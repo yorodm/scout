@@ -1,0 +1,9 @@
+{"event_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","sent_at":"2026-10-30T12:00:00Z"}
+{"type":"event"}
+{"event_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","timestamp":1761835200,"platform":"javascript","level":"error","release":"smoke@1.0.0","environment":"production","message":"SmokeError: grouping check","fingerprint":["smoke-group"],"exception":{"values":[{"type":"SmokeError","value":"grouping check","stacktrace":{"frames":[{"filename":"src/smoke.ts","function":"smoke","lineno":1,"colno":1,"in_app":true,"context_line":"throw new SmokeError('grouping check');"}]}}]},"breadcrumbs":{"values":[{"timestamp":"2026-10-30T11:59:59Z","category":"console","level":"info","message":"smoke breadcrumb"}]},"tags":{"service":"smoke"},"user":{"id":"smoke-user"}}
+{"type":"event"}
+{"event_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","timestamp":1761835201,"platform":"javascript","level":"error","release":"smoke@1.0.0","environment":"production","message":"SmokeError: grouping check","fingerprint":["smoke-group"],"exception":{"values":[{"type":"SmokeError","value":"grouping check","stacktrace":{"frames":[{"filename":"src/smoke.ts","function":"smoke","lineno":1,"colno":1,"in_app":true,"context_line":"throw new SmokeError('grouping check');"}]}}]}}
+{"type":"event"}
+{"event_id":"cccccccccccccccccccccccccccccccc","timestamp":1761835202,"platform":"javascript","level":"error","release":"smoke@1.0.0","environment":"production","message":"SmokeError: grouping check","fingerprint":["smoke-group"],"exception":{"values":[{"type":"SmokeError","value":"grouping check","stacktrace":{"frames":[{"filename":"src/smoke.ts","function":"smoke","lineno":1,"colno":1,"in_app":true,"context_line":"throw new SmokeError('grouping check');"}]}}]}}
+{"type":"attachment","filename":"note.txt","content_type":"text/plain"}
+hello from the smoke test

@@ -1,0 +1,561 @@
+use crate::error::ApiError;
+use crate::models::{Attachment, Event, LogLine, Project};
+use crate::state::AppState;
+use crate::store::event_hex_id;
+use crate::worker::Job;
+use actix_web::{web, HttpRequest, HttpResponse};
+use chrono::{DateTime, TimeZone, Utc};
+use flate2::read::GzDecoder;
+use serde_json::{json, Map, Value};
+use std::collections::HashMap;
+use std::io::Read;
+use uuid::Uuid;
+
+pub fn config(cfg: &mut web::ServiceConfig) {
+    cfg.route("/api/{project}/envelope", web::post().to(ingest_envelope))
+        .route("/api/{project}/envelope/", web::post().to(ingest_envelope))
+        .route("/api/{project}/store", web::post().to(ingest_store))
+        .route("/api/{project}/store/", web::post().to(ingest_store))
+        .route("/api/{project}/logs", web::post().to(ingest_logs))
+        .route("/api/{project}/logs/", web::post().to(ingest_logs));
+}
+
+pub async fn ingest_envelope(
+    req: HttpRequest,
+    path: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let project = authenticate(&req, path.as_str(), &query, &state).await?;
+    let bytes = decode_body(&req, body)?;
+    let ParsedEnvelope {
+        header,
+        mut events,
+        attachments,
+        logs,
+        ignored,
+    } = parse_envelope(&bytes).map_err(ApiError::BadRequest)?;
+
+    // Sentry puts the event id in the envelope header as well as the event item;
+    // fall back to the header when a single event omits it.
+    if let Some(header_id) = header.get("event_id").and_then(Value::as_str) {
+        if events.len() == 1 {
+            if let Some(object) = events[0].as_object_mut() {
+                object.entry("event_id").or_insert_with(|| json!(header_id));
+            }
+        }
+    }
+
+    let event_ids = persist_events(&state, &project, events, &attachments, bytes).await;
+    let log_count = persist_logs(&state, &project, logs).await;
+
+    Ok(HttpResponse::Ok().json(json!({
+        "id": event_ids.first(),
+        "event_ids": event_ids,
+        "logs": log_count,
+        "ignored": ignored,
+    })))
+}
+
+pub async fn ingest_store(
+    req: HttpRequest,
+    path: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let project = authenticate(&req, path.as_str(), &query, &state).await?;
+    let bytes = decode_body(&req, body)?;
+    let event: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiError::BadRequest(format!("invalid event JSON: {e}")))?;
+    if !event.is_object() {
+        return Err(ApiError::BadRequest("event must be a JSON object".into()));
+    }
+    let ids = persist_events(&state, &project, vec![event], &[], bytes).await;
+    Ok(HttpResponse::Ok().json(json!({ "id": ids.first() })))
+}
+
+pub async fn ingest_logs(
+    req: HttpRequest,
+    path: web::Path<String>,
+    query: web::Query<HashMap<String, String>>,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let project = authenticate(&req, path.as_str(), &query, &state).await?;
+    let bytes = decode_body(&req, body)?;
+    let value = parse_log_document(&bytes)?;
+    let logs = match &value {
+        Value::Array(items) => items.clone(),
+        Value::Object(obj) => obj
+            .get("logs")
+            .or_else(|| obj.get("items"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![value.clone()]),
+        _ => vec![value.clone()],
+    };
+    let count = persist_logs(&state, &project, logs).await;
+    Ok(HttpResponse::Ok().json(json!({ "accepted": count })))
+}
+
+async fn authenticate(
+    req: &HttpRequest,
+    project_ref: &str,
+    query: &HashMap<String, String>,
+    state: &AppState,
+) -> Result<Project, ApiError> {
+    let key_str = extract_ingest_key(req, query)
+        .ok_or_else(|| ApiError::Unauthorized("missing ingest key".into()))?;
+    let store = state.store.read().await;
+    let project = store
+        .project_by_identifier(project_ref)
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
+    let key = store
+        .keys
+        .get(&key_str)
+        .ok_or_else(|| ApiError::Unauthorized("invalid ingest key".into()))?;
+    if key.revoked || key.project_id != project.id {
+        return Err(ApiError::Unauthorized(
+            "ingest key is not valid for this project".into(),
+        ));
+    }
+    Ok(project)
+}
+
+fn extract_ingest_key(req: &HttpRequest, query: &HashMap<String, String>) -> Option<String> {
+    for header in ["x-sentry-auth", "authorization"] {
+        if let Some(value) = req.headers().get(header).and_then(|v| v.to_str().ok()) {
+            let lower = value.to_ascii_lowercase();
+            if lower.starts_with("sentry ") {
+                if let Some(key) = parse_sentry_auth(&value[7..]).get("sentry_key") {
+                    return Some(key.clone());
+                }
+            }
+        }
+    }
+    if let Some(key) = query.get("sentry_key") {
+        return Some(key.clone());
+    }
+    req.headers()
+        .get("x-scout-key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+fn parse_sentry_auth(value: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for part in value.split(',') {
+        if let Some((k, v)) = part.split_once('=') {
+            out.insert(k.trim().to_string(), v.trim().trim_matches('"').to_string());
+        }
+    }
+    out
+}
+
+fn decode_body(req: &HttpRequest, body: web::Bytes) -> Result<Vec<u8>, ApiError> {
+    let encoding = req
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if encoding.is_empty() || encoding == "identity" {
+        return Ok(body.to_vec());
+    }
+    if encoding.contains("gzip") {
+        let mut decoder = GzDecoder::new(&body[..]);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| ApiError::BadRequest(format!("invalid gzip body: {e}")))?;
+        return Ok(out);
+    }
+    Err(ApiError::BadRequest(format!(
+        "unsupported content-encoding: {encoding}"
+    )))
+}
+
+async fn persist_events(
+    state: &AppState,
+    project: &Project,
+    events: Vec<Value>,
+    attachments: &[Attachment],
+    raw: Vec<u8>,
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut jobs = Vec::new();
+    {
+        let mut store = state.store.write().await;
+        let received_at = Utc::now();
+        for event in events {
+            let sentry_id = event
+                .get("event_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(event_hex_id);
+            if store
+                .seen_event_ids
+                .contains_key(&(project.id, sentry_id.clone()))
+            {
+                ids.push(sentry_id);
+                continue;
+            }
+            let id = Uuid::new_v4();
+            store.events.insert(
+                id,
+                Event {
+                    id,
+                    sentry_event_id: sentry_id.clone(),
+                    project_id: project.id,
+                    issue_id: None,
+                    received_at,
+                    raw: raw.clone(),
+                    event,
+                    attachments: attachments.to_vec(),
+                },
+            );
+            store
+                .seen_event_ids
+                .insert((project.id, sentry_id.clone()), id);
+            jobs.push(Job::GroupEvent {
+                project_id: project.id,
+                event_id: id,
+            });
+            ids.push(sentry_id);
+        }
+        store.apply_retention(project);
+    }
+    for job in jobs {
+        let _ = state.jobs.send(job);
+    }
+    ids
+}
+
+async fn persist_logs(state: &AppState, project: &Project, logs: Vec<Value>) -> usize {
+    let mut store = state.store.write().await;
+    let received_at = Utc::now();
+    let mut count = 0;
+    for value in logs {
+        for item in log_values(&value) {
+            if let Some(line) = to_log_line(project.id, &item, received_at) {
+                store.logs.push(line);
+                count += 1;
+            }
+        }
+    }
+    store.apply_retention(project);
+    count
+}
+
+fn log_values(value: &Value) -> Vec<Value> {
+    match value {
+        Value::Array(items) => items.clone(),
+        Value::Object(obj) => obj
+            .get("items")
+            .or_else(|| obj.get("logs"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_else(|| vec![value.clone()]),
+        _ => vec![value.clone()],
+    }
+}
+
+fn to_log_line(project_id: Uuid, value: &Value, received_at: DateTime<Utc>) -> Option<LogLine> {
+    let obj = value.as_object()?;
+    let message = obj
+        .get("message")
+        .or_else(|| obj.get("body"))
+        .map(value_to_string)
+        .unwrap_or_default();
+    if message.is_empty() {
+        return None;
+    }
+    let timestamp = parse_time(obj.get("timestamp")).unwrap_or(received_at);
+    let level = obj
+        .get("level")
+        .and_then(Value::as_str)
+        .unwrap_or("info")
+        .to_string();
+    let source = obj
+        .get("source")
+        .and_then(Value::as_str)
+        .or_else(|| obj.get("service").and_then(Value::as_str))
+        .or_else(|| obj.get("logger").and_then(Value::as_str))
+        .unwrap_or("ingest")
+        .to_string();
+    let attributes = obj
+        .get("attributes")
+        .map(normalize_attributes)
+        .unwrap_or(Value::Null);
+    Some(LogLine {
+        id: Uuid::new_v4(),
+        project_id,
+        timestamp,
+        level,
+        message,
+        source,
+        attributes,
+        received_at,
+    })
+}
+
+fn normalize_attributes(value: &Value) -> Value {
+    let Some(obj) = value.as_object() else {
+        return value.clone();
+    };
+    let mut map = Map::new();
+    for (key, value) in obj {
+        let inner = value.get("value").cloned().unwrap_or_else(|| value.clone());
+        map.insert(key.clone(), inner);
+    }
+    Value::Object(map)
+}
+
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn parse_time(value: Option<&Value>) -> Option<DateTime<Utc>> {
+    let value = value?;
+    if let Some(seconds) = value.as_f64() {
+        return from_seconds(seconds);
+    }
+    if let Some(text) = value.as_str() {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(text) {
+            return Some(dt.with_timezone(&Utc));
+        }
+        if let Ok(seconds) = text.parse::<f64>() {
+            return from_seconds(seconds);
+        }
+    }
+    None
+}
+
+fn from_seconds(seconds: f64) -> Option<DateTime<Utc>> {
+    let seconds = if seconds > 1e12 {
+        seconds / 1000.0
+    } else {
+        seconds
+    };
+    let whole = seconds.trunc() as i64;
+    let nanos = (seconds.fract().abs() * 1_000_000_000.0) as u32;
+    Utc.timestamp_opt(whole, nanos).single()
+}
+
+fn parse_log_document(bytes: &[u8]) -> Result<Value, ApiError> {
+    if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
+        return Ok(value);
+    }
+    let mut values = Vec::new();
+    for line in bytes.split(|b| *b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_slice::<Value>(line) {
+            Ok(value) => values.push(value),
+            Err(e) => {
+                return Err(ApiError::BadRequest(format!(
+                    "invalid log JSON (expected JSON or NDJSON): {e}"
+                )))
+            }
+        }
+    }
+    if values.is_empty() {
+        return Err(ApiError::BadRequest("empty log body".into()));
+    }
+    Ok(Value::Array(values))
+}
+
+pub struct ParsedEnvelope {
+    pub header: Value,
+    pub events: Vec<Value>,
+    pub attachments: Vec<Attachment>,
+    pub logs: Vec<Value>,
+    pub ignored: usize,
+}
+
+pub fn parse_envelope(input: &[u8]) -> Result<ParsedEnvelope, String> {
+    let mut pos = 0usize;
+    let header_line = read_line(input, &mut pos).ok_or_else(|| "empty envelope".to_string())?;
+    let header: Value =
+        serde_json::from_slice(header_line).map_err(|e| format!("invalid envelope header: {e}"))?;
+    if !header.is_object() {
+        return Err("envelope header must be a JSON object".into());
+    }
+
+    let mut out = ParsedEnvelope {
+        header,
+        events: Vec::new(),
+        attachments: Vec::new(),
+        logs: Vec::new(),
+        ignored: 0,
+    };
+
+    while pos < input.len() {
+        if input[pos] == b'\n' {
+            pos += 1;
+            continue;
+        }
+        if input[pos] == b'\r' && input.get(pos + 1) == Some(&b'\n') {
+            pos += 2;
+            continue;
+        }
+        let item_line = read_line(input, &mut pos)
+            .ok_or_else(|| "truncated envelope item header".to_string())?;
+        if item_line.is_empty() {
+            continue;
+        }
+        let item: Value = serde_json::from_slice(item_line)
+            .map_err(|e| format!("invalid envelope item header: {e}"))?;
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or("");
+        let payload: Vec<u8> = if let Some(len) = item.get("length").and_then(Value::as_u64) {
+            let len = len as usize;
+            if pos + len > input.len() {
+                return Err("envelope item length exceeds body".into());
+            }
+            let payload = input[pos..pos + len].to_vec();
+            pos += len;
+            if input.get(pos) == Some(&b'\n') {
+                pos += 1;
+            } else if input.get(pos) == Some(&b'\r') && input.get(pos + 1) == Some(&b'\n') {
+                pos += 2;
+            }
+            payload
+        } else {
+            read_line(input, &mut pos)
+                .ok_or_else(|| "truncated envelope item payload".to_string())?
+                .to_vec()
+        };
+
+        match item_type {
+            "event" => {
+                let event: Value = serde_json::from_slice(&payload)
+                    .map_err(|e| format!("invalid event payload: {e}"))?;
+                out.events.push(event);
+            }
+            "attachment" => {
+                out.attachments.push(Attachment {
+                    filename: item
+                        .get("filename")
+                        .and_then(Value::as_str)
+                        .unwrap_or("attachment")
+                        .to_string(),
+                    content_type: item
+                        .get("content_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("application/octet-stream")
+                        .to_string(),
+                    data: payload,
+                });
+            }
+            "log" => {
+                let log: Value = serde_json::from_slice(&payload)
+                    .map_err(|e| format!("invalid log payload: {e}"))?;
+                out.logs.push(log);
+            }
+            _ => out.ignored += 1,
+        }
+    }
+
+    Ok(out)
+}
+
+fn read_line<'a>(input: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
+    if *pos >= input.len() {
+        return None;
+    }
+    let start = *pos;
+    let mut end = start;
+    while end < input.len() && input[end] != b'\n' {
+        end += 1;
+    }
+    *pos = if end < input.len() { end + 1 } else { end };
+    let mut slice = &input[start..end];
+    if slice.last() == Some(&b'\r') {
+        slice = &slice[..slice.len() - 1];
+    }
+    Some(slice)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn envelope(with_length: bool) -> Vec<u8> {
+        let event = json!({
+            "event_id": "abc123",
+            "message": "boom",
+            "level": "error"
+        });
+        let event_body = serde_json::to_vec(&event).unwrap();
+        let header = r#"{"event_id":"abc123","sent_at":"2026-10-30T12:00:00Z"}"#;
+        let item = if with_length {
+            format!(r#"{{"type":"event","length":{}}}"#, event_body.len())
+        } else {
+            r#"{"type":"event"}"#.to_string()
+        };
+        let attachment = b"hello attachment";
+        let att_header = format!(
+            r#"{{"type":"attachment","length":{},"filename":"note.txt","content_type":"text/plain"}}"#,
+            attachment.len()
+        );
+        let mut out = Vec::new();
+        out.extend_from_slice(header.as_bytes());
+        out.push(b'\n');
+        out.extend_from_slice(item.as_bytes());
+        out.push(b'\n');
+        out.extend_from_slice(&event_body);
+        out.push(b'\n');
+        out.extend_from_slice(att_header.as_bytes());
+        out.push(b'\n');
+        out.extend_from_slice(attachment);
+        out.push(b'\n');
+        out
+    }
+
+    #[test]
+    fn parses_length_prefixed_envelope() {
+        let parsed = parse_envelope(&envelope(true)).unwrap();
+        assert_eq!(parsed.events.len(), 1);
+        assert_eq!(parsed.attachments.len(), 1);
+        assert_eq!(parsed.attachments[0].filename, "note.txt");
+        assert_eq!(parsed.events[0]["message"], "boom");
+    }
+
+    #[test]
+    fn parses_newline_delimited_event() {
+        let parsed = parse_envelope(&envelope(false)).unwrap();
+        assert_eq!(parsed.events.len(), 1);
+    }
+
+    #[test]
+    fn rejects_truncated_length() {
+        let body = b"{\"event_id\":\"x\"}\n{\"type\":\"event\",\"length\":999}\n{}";
+        assert!(parse_envelope(body).is_err());
+    }
+
+    #[test]
+    fn sentry_auth_parsing() {
+        let map =
+            parse_sentry_auth("sentry_version=7, sentry_key=\"abc\", sentry_client=raven-js/3.0");
+        assert_eq!(map.get("sentry_key").map(String::as_str), Some("abc"));
+        assert_eq!(map.get("sentry_version").map(String::as_str), Some("7"));
+    }
+
+    #[test]
+    fn normalises_sentry_log_attributes() {
+        let attrs = json!({
+            "service": {"value": "checkout", "type": "string"},
+            "duration_ms": {"value": 42, "type": "number"}
+        });
+        let normalized = normalize_attributes(&attrs);
+        assert_eq!(normalized["service"], "checkout");
+        assert_eq!(normalized["duration_ms"], 42);
+    }
+}

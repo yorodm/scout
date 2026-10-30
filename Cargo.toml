@@ -1,0 +1,27 @@
+[package]
+name = "scout"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+description = "Self-hosted, Sentry-compatible error tracking and log ingestion (prototype)"
+
+[dependencies]
+actix-web = "4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+flate2 = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+oxc_allocator = "0.156"
+oxc_parser = "0.156"
+oxc_span = "0.156"
+
+[profile.dev]
+debug = 0

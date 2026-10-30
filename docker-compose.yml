@@ -1,0 +1,12 @@
+# Prototype: one service with an in-memory store. The production shape adds
+# postgres and minio here; see architecture.md.
+services:
+  scout:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      SCOUT_SELF_URL: "http://127.0.0.1:8080"
+      RUST_LOG: "info"
+    restart: unless-stopped

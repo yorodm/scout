@@ -1,0 +1,10 @@
+target
+.git
+.specify
+.agents
+specs
+tests
+examples
+**/*.md
+Dockerfile
+docker-compose.yml
