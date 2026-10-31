@@ -428,3 +428,14 @@ Tasks appended by `/speckit-converge` after assessing the current implementation
 - [X] T172 Add an optional `metadata` jsonb field to `AuditEntry` and the `audit::record` helper so administrative actions can carry structured context per data-model `audit_log` / T006 (partial).
 - [X] T173 Sweep expired sessions periodically (or during the retention worker) so session rows do not accumulate per data-model `sessions` (missing).
 - [X] T174 Apply `SCOUT_RETENTION_DAYS` and `SCOUT_CONFIDENCE_THRESHOLD` as defaults when a project is created through the provisioning API per plan: configuration / FR-013 (partial).
+
+---
+
+## Phase 11: Convergence
+
+Tasks appended by the second `/speckit-converge` pass. They are additional to the unchecked tasks above; existing task IDs and Phase 10 are unchanged.
+
+- [ ] T175 Hash ingest keys at rest and stop returning plaintext from `GET /api/projects`, `GET /api/projects/{project_id}`, `GET /api/projects/{project_id}/keys`, and `GET /api/projects/{project_id}/settings` in `src/store.rs` and `src/api.rs`; store `key_hash` plus `key_prefix`, look keys up by hashing the presented value, and return the plaintext only from create and rotate per Constitution Additional Constraints (hashed credentials) / FR-029 / `contracts/api.md` (contradicts).
+- [ ] T176 Add `disabled_at` to `User` and reject sign-in with `403` for a disabled account in `src/models.rs` and `src/api.rs`, per FR-030 / `contracts/api.md` login / data-model `users` (partial).
+- [ ] T177 Record `Organisation.created_by` as the operator that created the organisation and expose it in the organisation response in `src/models.rs`, `src/store.rs`, and `src/api.rs`, per data-model `organisations` (partial).
+- [ ] T178 Sweep expired sessions from the periodic retention worker in `src/worker.rs` (in addition to sign-in) so session rows do not accumulate, per data-model `sessions` / T173 (partial).
