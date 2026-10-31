@@ -5,6 +5,7 @@ target
 specs
 tests
 examples
+ui/dist
 **/*.md
 Dockerfile
 docker-compose.yml

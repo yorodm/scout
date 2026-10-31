@@ -3,26 +3,64 @@
 Self-hosted, Sentry-compatible error tracking and log ingestion.
 
 Scout accepts the payloads existing Sentry SDKs already send, groups repeated errors into issues, and
-stores raw events and logs — on your infrastructure, not a vendor's. It serves its own UI for triage,
-project management and access control, and lets a project owner connect a [Jev](https://jev-api.com/docs/api)-compatible
-decisions endpoint that *suggests* how an incoming item should be categorised (issue, log or raw event);
-a human confirms.
+stores raw events and logs — on your infrastructure, not a vendor's. It serves a Sycamore UI for
+triage, project management and access control, and lets a project owner connect a
+[Jev](https://jev-api.com/docs/api)-compatible decisions endpoint that *suggests* how an incoming item
+should be categorised (issue, log or raw event); a human confirms.
 
 > **Status: runnable prototype.** The ingest path, grouping worker, classification worker, REST API and
-> UI are implemented in Rust. The metadata store and raw-payload store are in-memory adapters: the
-> boundaries match [architecture.md](architecture.md), but Postgres and S3/MinIO are not wired up yet.
-> See [Prototype shortcuts](#prototype-shortcuts) for the honest list.
+> Sycamore/Tailwind UI are implemented in Rust. The metadata store and raw-payload store are in-memory
+> adapters: the boundaries match [architecture.md](architecture.md), but Postgres and S3/MinIO are not
+> wired up yet. See [Prototype shortcuts](#prototype-shortcuts) for the honest list.
+
+## Stack
+
+- **Backend** — Rust + Actix Web: ingest API, project API, background worker.
+- **UI** — Sycamore 0.9 (CSR), compiled to WebAssembly with Trunk; Tailwind CSS v4 compiled by
+  Trunk's built-in `tailwind-css` pipeline. **No Node or npm is involved.**
+- **Prototype storage** — in-memory metadata and raw payloads.
+- **Target storage** — PostgreSQL (metadata) and S3/MinIO (raw payloads), behind the same store
+  boundaries.
+
+## Prerequisites
+
+- A Rust toolchain.
+- The `wasm32-unknown-unknown` target: `rustup target add wasm32-unknown-unknown`
+- [Trunk](https://trunkrs.dev/): use a prebuilt release binary or `cargo install trunk --locked`.
+  Trunk downloads the matching `wasm-bindgen` and Tailwind binaries on first build.
+
+No Node.js is required or used.
 
 ## Quick start
 
+Build the UI, then run the single Actix binary:
+
 ```sh
+rustup target add wasm32-unknown-unknown
+# Install Trunk once (prebuilt release is fastest).
+(cd ui && trunk build --release)
 cargo run
 # open http://localhost:8080
 ```
 
-Requires only a Rust toolchain (edition 2021). No Node build, database, or object store is needed for
-the prototype. The server seeds an organisation, two projects, three issues, log lines and three demo
-accounts on startup.
+`cargo run` serves the API and the contents of `ui/dist`. If `ui/dist/index.html` is missing, the
+server returns a page explaining how to build it instead of failing.
+
+### Live development
+
+Run the backend and Trunk's dev server side by side:
+
+```sh
+# terminal 1
+cargo run                     # API on :8080
+
+# terminal 2
+cd ui && trunk serve          # UI on :8081, proxies /api and /mock-jev to :8080
+# open http://localhost:8081
+```
+
+Trunk rebuilds the WASM bundle and Tailwind CSS on change. The proxy configuration lives in
+`ui/Trunk.toml`.
 
 ```sh
 curl http://localhost:8080/api/health
@@ -114,7 +152,7 @@ These are deliberate and visible, not silent gaps:
 | --- | --- | --- |
 | Metadata | In-memory `Store` behind ordinary methods | Postgres adapter + migrations |
 | Raw payloads | In-memory `Event.raw`, append-only semantics | S3/MinIO adapter; same immutable key/value contract |
-| UI | No-build SPA (vanilla JS + handcrafted CSS) served by Actix | Port to Sycamore + Tailwind; same API |
+| UI | Sycamore 0.9 CSR + Tailwind CSS, built by Trunk | Add SSR/hydration if needed; refine Tailwind component layer |
 | Sessions | In-memory bearer tokens, no passwords | Password hashing, cookies, OIDC/SSO provider |
 | Invites | Direct membership by seeded email | Email invitations and acceptance tokens |
 | Retention | Sweep on ingest; per-project day window | Scheduled sweeper + object-store lifecycle rules |
@@ -124,6 +162,25 @@ These are deliberate and visible, not silent gaps:
 Everything else follows the documented behaviour: ingest stores the original bytes before replying,
 grouping and classification happen off the request path, classification has a bounded timeout and at
 most one retry, and a classifier failure is a normal "no suggestion" state rather than an error.
+
+## UI layout
+
+```
+ui/
+  index.html              Trunk entry point (rust + tailwind-css assets)
+  Trunk.toml              build/serve config and /api, /mock-jev proxies
+  styles/tailwind.css     Tailwind entry; imports the design system
+  styles/design-system.css  design tokens and component classes (processed by Tailwind)
+  src/main.rs             mounts the Sycamore App
+  src/api.rs              typed fetch client and response models
+  src/state.rs            reactive store, routing, actions
+  src/util.rs             formatting and browser helpers
+  src/components/         app shell, login, issues, logs, search, members,
+                          settings, modals, toasts
+```
+
+The backend serves `ui/dist` (override with `SCOUT_UI_DIR`). Ingestion and the REST API are unchanged
+by the UI choice.
 
 ## API surface
 
@@ -152,16 +209,39 @@ Ingest authenticates with `X-Sentry-Auth`, `Authorization: Sentry ...`, or `?sen
 dashboard request requires a bearer session token and is authorised against the project before data
 is touched.
 
-## Tests
+## Tests and checks
 
 ```sh
+# Backend unit + integration tests (in-process Actix app)
 cargo test
+
+# UI type-check for the WASM target
+(cd ui && cargo check --target wasm32-unknown-unknown)
+
+# UI production build (Sycamore + Tailwind via Trunk)
+(cd ui && trunk build --release)
 ```
 
-Nine unit tests cover envelope parsing (length-prefixed and newline-delimited), truncation rejection,
-Sentry auth parsing, log attribute normalisation, fingerprint stability, explicit fingerprints, and
-message normalisation. One integration test parses `web/app.js` with a real JavaScript parser so a
-syntax error cannot slip into the UI.
+The backend suite runs in-process with `actix_web::test` — no running server, browser or `curl`
+required. Unit tests cover envelope parsing (length-prefixed and newline-delimited), truncation
+rejection, Sentry auth parsing, log attribute normalisation, fingerprint stability, explicit
+fingerprints, and message normalisation. Integration tests in `src/tests.rs` drive the same App
+wiring as `main.rs` and cover:
+
+- ingest and grouping — 3 identical events become one issue with count 3, and 1,000 events become
+  one issue with count 1,000
+- key scoping — an unknown key, a key for another project, and a revoked key all return `401`
+- de-duplication of a retried event id
+- byte-identical retrieval of the stored raw payload
+- classifier suggestions, confirm/override, and an unreachable classifier leaving items without a
+  suggestion while ingest still succeeds
+- resolve/reopen state history
+- role enforcement (viewer, triager, last-owner protection) and a role change taking effect without
+  a restart
+- log ingestion/search and unified search across issues and logs
+
+`examples/sample-envelope.txt` remains a manual aid for trying a real Sentry envelope with `curl` or
+an SDK; the integration suite builds its own fixtures.
 
 ## Deployment
 
@@ -169,9 +249,10 @@ syntax error cannot slip into the UI.
 docker compose up --build
 ```
 
-The compose file runs the prototype as one service. The production shape — `scout` + `postgres` +
-`minio`, all from one compose file — is described in [architecture.md](architecture.md); those two
-services are not part of the prototype yet.
+The Docker build compiles the backend and the Sycamore/Tailwind UI in separate stages, then runs one
+`scout` container with both the API and the static UI bundle. The production shape also adds
+`postgres` and `minio`, all from one compose file, as described in
+[architecture.md](architecture.md); those two services are not part of the prototype yet.
 
 ## Documentation
 

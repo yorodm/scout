@@ -6,6 +6,8 @@ mod ingest;
 mod models;
 mod state;
 mod store;
+#[cfg(test)]
+mod tests;
 mod ui;
 mod worker;
 
@@ -57,13 +59,15 @@ async fn main() -> std::io::Result<()> {
             .wrap(actix_web::middleware::Logger::default())
             .configure(api::config)
             .configure(ingest::config)
-            .configure(ui::config)
             .route(
                 "/mock-jev/v1/systemone",
                 web::post().to(classifier::mock_systemone),
             )
             .route("/mock-jev/outage", web::get().to(classifier::get_outage))
             .route("/mock-jev/outage", web::post().to(classifier::set_outage))
+            // Keep the static UI last: Files("/") is a catch-all and would
+            // otherwise shadow /api and /mock-jev.
+            .configure(ui::config)
     })
     .bind(("0.0.0.0", port))?
     .run()
