@@ -210,7 +210,7 @@ Returns only projects the caller is a member of. Soft-deleted projects are exclu
       "logs": 9,
       "model_configured": true,
       "retention_days": 30,
-      "key": "scout_…-only-for-admin-and-above"
+      "key_prefix": "scout_abc1"
     }
   ]
 }
@@ -247,8 +247,11 @@ Requires admin or owner. **200**
 {
   "project": { … },
   "role": "owner",
-  "dsn": "http://scout_…@host:8080/1",
-  "keys": [ { "id": "uuid", "label": "Default", "key_prefix": "scout_abc1", "revoked": false } ],
+  "dsn_id": "1",
+  "key_prefix": "scout_abc1",
+  "keys": [
+    { "id": "uuid", "label": "Default", "key_prefix": "scout_abc1", "created_at": "…", "revoked": false }
+  ],
   "model": {
     "endpoint": "https://jev.example.com",
     "model": "jev-latest",
@@ -257,7 +260,9 @@ Requires admin or owner. **200**
 }
 ```
 
-The plaintext `model.api_key` is never returned.
+Ingest keys are hashed at rest: responses expose only the prefix, never the plaintext or the hash.
+The full DSN (`http://<key>@<host>/<dsn_id>`) is available only in the response that creates or
+rotates a key. The plaintext `model.api_key` is never returned either.
 
 ### `PUT /api/projects/{project_id}/settings`
 
@@ -480,7 +485,9 @@ Requires admin or owner.
 { "label": "ci" }
 ```
 
-**200** returns the key object **including the plaintext `key` once**. It is never retrievable again.
+**200** returns `{ "key": "scout_…", "id": "uuid", "label": "ci", "key_prefix": "scout_abc1", "created_at": "…", "revoked": false }`.
+The plaintext `key` is shown once and never retrievable again; later listings expose only
+`key_prefix`.
 
 ### `DELETE /api/projects/{project_id}/keys/{key_id}`
 

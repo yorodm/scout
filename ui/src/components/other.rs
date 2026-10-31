@@ -478,8 +478,12 @@ fn settings_view(
     model_key: Signal<String>,
     outage: ReadSignal<bool>,
 ) -> View {
-    let dsn = settings.dsn.clone().unwrap_or_default();
-    let dsn_for_copy = dsn.clone();
+    let key_hint = settings
+        .key_prefix
+        .clone()
+        .map(|prefix| format!("{prefix}… (active key)"))
+        .unwrap_or_else(|| "No active key — create one below and copy it once.".to_string());
+    let dsn_for_copy = format!("/api/{}/envelope/", settings.project.dsn_id);
     let mock_endpoint = settings.mock_model_endpoint.clone();
     let retention_value = retention;
     let endpoint_value = endpoint;
@@ -501,7 +505,7 @@ fn settings_view(
         input(
             class="input",
             readonly=true,
-            value=dsn.clone(),
+            value=key_hint.clone(),
         )
     };
     let copy_button = view! {
@@ -513,7 +517,7 @@ fn settings_view(
                 spawn_local(async move {
                     let clipboard = util::window().navigator().clipboard();
                     match JsFuture::from(clipboard.write_text(&dsn)).await {
-                        Ok(_) => state::toast(store, "DSN copied", "success"),
+                        Ok(_) => state::toast(store, "Ingest path copied", "success"),
                         Err(_) => state::toast(store, "Copy failed — select the field manually", "error"),
                     }
                 });
@@ -583,7 +587,7 @@ fn settings_view(
                     view! { span(class="badge") { "Sentry-compatible" } },
                 ))
                 label(class="field") {
-                    "DSN"
+                    "Ingest key"
                     div(class="dsn-box") {
                         (dsn_input)
                         (copy_button)
@@ -591,8 +595,8 @@ fn settings_view(
                 }
                 div(class="hint") {
                     (format!(
-                        "Change only this DSN in an existing Sentry SDK. Ingest path: POST /api/{}/envelope/",
-                        settings.project.dsn_id
+                        "Keys are hashed at rest and the plaintext is shown once when created or rotated. Use http://<key>@<host>/{}/ as the DSN. Ingest path: POST /api/{}/envelope/",
+                        settings.project.dsn_id, settings.project.dsn_id
                     ))
                 }
                 div(class="divider") {}
@@ -756,7 +760,7 @@ fn settings_view(
 }
 
 fn key_row(store: Signal<AppState>, key: &IngestKey) -> View {
-    let key_text = key.key.clone();
+    let key_text = format!("{}…", key.key_prefix);
     let label = key.label.clone();
     let created = util::relative(&key.created_at);
     let revoked = key.revoked;

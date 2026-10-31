@@ -56,7 +56,12 @@ pub struct ProjectSummary {
     pub logs: u64,
     pub model_configured: bool,
     pub retention_days: u32,
+    /// Plaintext key is never returned by list endpoints; this field is only
+    /// populated in the browser session after creating or rotating a key.
+    #[serde(default)]
     pub key: Option<String>,
+    #[serde(default)]
+    pub key_prefix: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -210,14 +215,20 @@ pub struct IngestKey {
     pub id: String,
     pub project_id: String,
     pub label: String,
-    pub key: String,
+    pub key_prefix: String,
     pub created_at: String,
     pub revoked: bool,
 }
 
+/// Response to creating a key: the plaintext is present exactly once.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct KeyResponse {
-    pub key: IngestKey,
+    pub key: String,
+    pub id: String,
+    pub label: String,
+    pub key_prefix: String,
+    pub created_at: String,
+    pub revoked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -243,7 +254,10 @@ pub struct Project {
 pub struct SettingsResponse {
     pub project: Project,
     pub role: String,
-    pub dsn: Option<String>,
+    #[serde(default)]
+    pub dsn_id: String,
+    #[serde(default)]
+    pub key_prefix: Option<String>,
     pub keys: Vec<IngestKey>,
     pub mock_model_endpoint: String,
 }

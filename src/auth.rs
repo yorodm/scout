@@ -53,7 +53,6 @@ pub fn hash_token(token: &str) -> String {
 
 /// First `len` characters of a token, for identifying a key in the UI without
 /// exposing the secret.
-#[allow(dead_code)] // used by ingest-key creation in the administration slice
 pub fn token_prefix(token: &str, len: usize) -> String {
     token.chars().take(len).collect()
 }
@@ -111,6 +110,7 @@ SCOUT_OPERATOR_PASSWORD (neither may be blank) and restart"
         name: "Deployment operator".into(),
         password_hash: Some(password_hash),
         is_operator: true,
+        disabled_at: None,
     };
     store.users.insert(user.id, user.clone());
     store.users_by_email.insert(email.clone(), user.id);
@@ -161,6 +161,7 @@ pub fn create_local_account(
         name: name.trim().to_string(),
         password_hash: Some(password_hash),
         is_operator: false,
+        disabled_at: None,
     };
     store.users.insert(user.id, user.clone());
     store.users_by_email.insert(email, user.id);
