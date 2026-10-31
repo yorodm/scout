@@ -163,6 +163,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
             endpoint: format!("{}/mock-jev", self_url.trim_end_matches('/')),
             api_key: None,
             model: "jev-latest".into(),
+            confidence_threshold: 0.5,
         }),
         created_at: now - Duration::days(46),
     };
@@ -531,6 +532,7 @@ fn seed_issue(
         breadcrumbs: derived.breadcrumbs,
         suggestion,
         decision,
+        first_presented_at: None,
         state_history,
         last_event_id: event_id,
     };

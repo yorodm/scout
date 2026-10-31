@@ -340,6 +340,28 @@ Any member with access. Streams the immutable object with
 `Content-Type: application/octet-stream` and `X-Scout-Event-Id: <sentry event id>`. `404` when the
 payload has expired under retention.
 
+### `GET /api/issues/{issue_id}/occurrences`
+
+Any member with access. Returns the stored occurrences of the issue, newest first, for the detail
+timeline.
+
+**200**
+
+```json
+{
+  "occurrences": [
+    {
+      "id": "uuid",
+      "sentry_event_id": "…",
+      "received_at": "…",
+      "size": 2048,
+      "attachment_count": 1,
+      "raw_available": true
+    }
+  ]
+}
+```
+
 ### `POST /api/issues/{issue_id}/state`
 
 Requires triager or above.

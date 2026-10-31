@@ -646,6 +646,18 @@ mod tests {
     }
 
     #[test]
+    fn normalises_log_timestamp_and_level() {
+        let value = json!({
+            "message": "epoch millis",
+            "timestamp": 1_700_000_000_000u64
+        });
+        let line = to_log_line(Uuid::nil(), &value, Utc::now()).expect("a log line");
+        assert_eq!(line.level, "info", "level defaults to info");
+        assert_eq!(line.source, "ingest", "source falls back to ingest");
+        assert_eq!(line.timestamp.timestamp(), 1_700_000_000);
+    }
+
+    #[test]
     fn normalises_sentry_log_attributes() {
         let attrs = json!({
             "service": {"value": "checkout", "type": "string"},

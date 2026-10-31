@@ -51,6 +51,11 @@ pub async fn suggest(
             _ => continue,
         };
         if !response.status().is_success() {
+            // A rejected request is not worth retrying; only 5xx and transport
+            // failures get the single retry.
+            if response.status().is_client_error() {
+                return None;
+            }
             continue;
         }
         let body = match response.json::<Value>().await {
@@ -68,6 +73,10 @@ pub async fn suggest(
             .and_then(Value::as_f64)
             .unwrap_or(0.5)
             .clamp(0.0, 1.0);
+        // Below the project's threshold is treated exactly like no answer.
+        if confidence < config.confidence_threshold {
+            return None;
+        }
         return Some(Suggestion {
             category,
             confidence,
@@ -89,6 +98,20 @@ fn normalize_category(raw: &str) -> Option<String> {
         "log" | "log_line" => Some("log".into()),
         "raw_event" | "raw" | "event" => Some("raw_event".into()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalises_known_categories_and_rejects_the_rest() {
+        assert_eq!(normalize_category("error").as_deref(), Some("issue"));
+        assert_eq!(normalize_category(" Log-Line ").as_deref(), Some("log"));
+        assert_eq!(normalize_category("raw").as_deref(), Some("raw_event"));
+        assert_eq!(normalize_category("billing"), None);
+        assert_eq!(normalize_category(""), None);
     }
 }
 

@@ -137,11 +137,11 @@
 ### Implementation
 
 - [ ] T063 [P] [US2] Implement issue list queries in `src/store_postgres.rs`: project scope, `state` (`open|resolved|ignored`), `level`, `q`, `category` (`issue|log|raw_event` from the human decision), and `sort` (`last_seen|count|first_seen`).
-- [ ] T064 [US2] Implement `GET /api/projects/{project_id}/issues` in `src/api.rs` with the filters and sort from `contracts/api.md`.
-- [ ] T065 [US2] Implement `GET /api/issues/{issue_id}` in `src/api.rs`, including event metadata, attachments, `raw_available`, and setting `first_presented_at` on the first read.
-- [ ] T066 [US2] Implement `POST /api/issues/{issue_id}/state` in `src/api.rs` for `open`, `resolved`, and `ignored`, appending `issue_state_changes` with actor and time.
-- [ ] T067 [US2] Return `404` from `src/api.rs` with an actionable message when the raw payload has expired, and keep issue metadata readable.
-- [ ] T068 [US2] Add `GET /api/issues/{issue_id}/occurrences` in `src/api.rs` and document it in `contracts/api.md`, returning the event list ordered newest first for the occurrence timeline.
+- [X] T064 [US2] Implement `GET /api/projects/{project_id}/issues` in `src/api.rs` with the filters and sort from `contracts/api.md`.
+- [X] T065 [US2] Implement `GET /api/issues/{issue_id}` in `src/api.rs`, including event metadata, attachments, `raw_available`, and setting `first_presented_at` on the first read.
+- [X] T066 [US2] Implement `POST /api/issues/{issue_id}/state` in `src/api.rs` for `open`, `resolved`, and `ignored`, appending `issue_state_changes` with actor and time.
+- [X] T067 [US2] Return `404` from `src/api.rs` with an actionable message when the raw payload has expired, and keep issue metadata readable.
+- [X] T068 [US2] Add `GET /api/issues/{issue_id}/occurrences` in `src/api.rs` and document it in `contracts/api.md`, returning the event list ordered newest first for the occurrence timeline.
 - [ ] T069 [P] [US2] Extend `IssuesView` in `ui/src/components/issues.rs` with state/level/category filters, sort controls, and search.
 - [ ] T070 [P] [US2] Extend `IssueDetail` in `ui/src/components/issues.rs` with frames, breadcrumbs, release, raw payload view, and state-history timeline.
 - [ ] T071 [US2] Add the occurrence timeline to `ui/src/components/issues.rs`, driven by the occurrences endpoint.
@@ -152,12 +152,12 @@
 
 ### Tests for User Story 2
 
-- [ ] T076 [US2] Add issue list filter/sort/search integration tests in `src/tests.rs`.
-- [ ] T077 [US2] Add open → resolved → ignored → open transition and history tests in `src/tests.rs`.
-- [ ] T078 [US2] Add cross-project denial tests for list, detail, and raw in `src/tests.rs`.
-- [ ] T079 [US2] Add the raw-expired (`raw_available: false`, `404` on raw) test in `src/tests.rs`.
-- [ ] T080 [US2] Add the `first_presented_at` freeze test in `src/tests.rs`.
-- [ ] T081 [US2] Add the occurrence-list ordering and project-scoping test in `src/tests.rs`.
+- [X] T076 [US2] Add issue list filter/sort/search integration tests in `src/tests.rs`.
+- [X] T077 [US2] Add open → resolved → ignored → open transition and history tests in `src/tests.rs`.
+- [X] T078 [US2] Add cross-project denial tests for list, detail, and raw in `src/tests.rs`.
+- [X] T079 [US2] Add the raw-expired (`raw_available: false`, `404` on raw) test in `src/tests.rs`.
+- [X] T080 [US2] Add the `first_presented_at` freeze test in `src/tests.rs`.
+- [X] T081 [US2] Add the occurrence-list ordering and project-scoping test in `src/tests.rs`.
 - [ ] T082 [US2] Verify the `ui/Trunk.toml` build: `(cd ui && cargo check --target wasm32-unknown-unknown)` and `trunk build --release`.
 - [ ] T083 [US2] Document issue filters, triage states, and occurrence history in `README.md`; run `quickstart.md` scenarios 1 and 7.
 
@@ -174,20 +174,20 @@
 ### Implementation
 
 - [ ] T084 [P] [US3] Implement `LogLine` persistence and queries in `src/store.rs` and `src/store_postgres.rs`, including attributes JSONB and timestamp/level indexes.
-- [ ] T085 [US3] Implement `POST /api/{project}/logs/` in `src/ingest.rs` for JSON objects, arrays, `logs`/`items` wrappers, and NDJSON.
-- [ ] T086 [US3] Persist envelope `log` items in `src/ingest.rs` through the same log-line path.
-- [ ] T087 [US3] Implement `GET /api/projects/{project_id}/logs` in `src/api.rs` with `q`, `level`, and `limit` (default 200, max 1000).
-- [ ] T088 [US3] Implement `GET /api/projects/{project_id}/search` in `src/api.rs`: case-insensitive substring matching over the FR-012 fields, newest first, 50 per kind.
+- [X] T085 [US3] Implement `POST /api/{project}/logs/` in `src/ingest.rs` for JSON objects, arrays, `logs`/`items` wrappers, and NDJSON.
+- [X] T086 [US3] Persist envelope `log` items in `src/ingest.rs` through the same log-line path.
+- [X] T087 [US3] Implement `GET /api/projects/{project_id}/logs` in `src/api.rs` with `q`, `level`, and `limit` (default 200, max 1000).
+- [X] T088 [US3] Implement `GET /api/projects/{project_id}/search` in `src/api.rs`: case-insensitive substring matching over the FR-012 fields, newest first, 50 per kind.
 - [ ] T089 [P] [US3] Extend `LogsView` in `ui/src/components/other.rs` with level and text filters.
 - [ ] T090 [P] [US3] Extend `SearchView` in `ui/src/components/other.rs` to render issues and logs in one result set.
 - [ ] T091 [US3] Extend the UI client with log and search calls in `ui/src/api.rs`.
 
 ### Tests for User Story 3
 
-- [ ] T092 [US3] Add log JSON/NDJSON/envelope ingest and retrieval tests in `src/tests.rs`.
-- [ ] T093 [US3] Add the unified search test (issues + logs, newest first, capped) in `src/tests.rs`.
-- [ ] T094 [US3] Add the cross-project log isolation test in `src/tests.rs`.
-- [ ] T095 [US3] Add timestamp/level/attribute normalisation tests in `src/tests.rs`.
+- [X] T092 [US3] Add log JSON/NDJSON/envelope ingest and retrieval tests in `src/tests.rs`.
+- [X] T093 [US3] Add the unified search test (issues + logs, newest first, capped) in `src/tests.rs`.
+- [X] T094 [US3] Add the cross-project log isolation test in `src/tests.rs`.
+- [X] T095 [US3] Add timestamp/level/attribute normalisation tests in `src/tests.rs`.
 - [ ] T096 [US3] Run `quickstart.md` scenario 4 and verify the UI log/search views.
 
 **Checkpoint**: User Stories 1–3 work independently; logs and issues are searchable together.
@@ -202,13 +202,13 @@
 
 ### Implementation
 
-- [ ] T097 [P] [US4] Implement project model settings (`endpoint`, `model`, `api_key_ref`, `confidence_threshold` default `0.5`) in `src/models.rs` and `src/store_postgres.rs`.
-- [ ] T098 [US4] Implement `GET`/`PUT /api/projects/{project_id}/settings` in `src/api.rs` with endpoint, model-id, threshold, and retention validation; never return the API key.
-- [ ] T099 [US4] Implement summary construction and redaction in `src/classifier.rs`: derived metadata plus a payload sample capped at 2,048 characters, with the sensitive-key list from `contracts/classifier.md` replaced by `[redacted]`.
-- [ ] T100 [US4] Implement the Jev client in `src/classifier.rs`: `POST {endpoint}/v1/systemone`, optional bearer auth, 800 ms timeout, at most one retry, tolerant `choice`/`answer`/`category` parsing, and category normalisation.
-- [ ] T101 [US4] Apply the per-project confidence threshold in `src/classifier.rs` and `src/worker.rs`; below it, record no suggestion.
-- [ ] T102 [US4] Enforce the late-suggestion rule in `src/worker.rs`: apply only while `first_presented_at IS NULL` and `decision_at IS NULL`.
-- [ ] T103 [US4] Implement `POST /api/issues/{issue_id}/categorisation` in `src/api.rs` for confirm/override with `issue|log|raw_event`, preserving the suggestion and never moving the stored item.
+- [X] T097 [P] [US4] Implement project model settings (`endpoint`, `model`, `api_key_ref`, `confidence_threshold` default `0.5`) in `src/models.rs` and `src/store_postgres.rs`.
+- [X] T098 [US4] Implement `GET`/`PUT /api/projects/{project_id}/settings` in `src/api.rs` with endpoint, model-id, threshold, and retention validation; never return the API key.
+- [X] T099 [US4] Implement summary construction and redaction in `src/classifier.rs`: derived metadata plus a payload sample capped at 2,048 characters, with the sensitive-key list from `contracts/classifier.md` replaced by `[redacted]`.
+- [X] T100 [US4] Implement the Jev client in `src/classifier.rs`: `POST {endpoint}/v1/systemone`, optional bearer auth, 800 ms timeout, at most one retry, tolerant `choice`/`answer`/`category` parsing, and category normalisation.
+- [X] T101 [US4] Apply the per-project confidence threshold in `src/classifier.rs` and `src/worker.rs`; below it, record no suggestion.
+- [X] T102 [US4] Enforce the late-suggestion rule in `src/worker.rs`: apply only while `first_presented_at IS NULL` and `decision_at IS NULL`.
+- [X] T103 [US4] Implement `POST /api/issues/{issue_id}/categorisation` in `src/api.rs` for confirm/override with `issue|log|raw_event`, preserving the suggestion and never moving the stored item.
 - [ ] T104 [US4] Update the built-in mock endpoint in `src/classifier.rs` to exercise redaction, thresholds, and outage paths.
 - [ ] T105 [P] [US4] Add the suggestion/confidence card to `IssueDetail` in `ui/src/components/issues.rs`.
 - [ ] T106 [P] [US4] Add the model connection, threshold, and retention form to `SettingsView` in `ui/src/components/other.rs`.
@@ -216,13 +216,13 @@
 
 ### Tests for User Story 4
 
-- [ ] T108 [US4] Add the suggestion-attached test in `src/tests.rs`.
-- [ ] T109 [US4] Add the below-threshold discard test in `src/tests.rs`.
-- [ ] T110 [US4] Add the unreachable/outage test asserting `200`, stored item, and `suggestion: null` in `src/tests.rs`.
-- [ ] T111 [US4] Add malformed and unknown-category response tests in `src/tests.rs`.
-- [ ] T112 [US4] Add a redaction and 2 KB cap test using nested secrets/PII and an oversized event in `src/tests.rs`.
-- [ ] T113 [US4] Add the late-suggestion discard test using `first_presented_at` in `src/tests.rs`.
-- [ ] T114 [US4] Add confirm/override tests asserting the decision is authoritative and the item/grouping/raw data are unchanged in `src/tests.rs`.
+- [X] T108 [US4] Add the suggestion-attached test in `src/tests.rs`.
+- [X] T109 [US4] Add the below-threshold discard test in `src/tests.rs`.
+- [X] T110 [US4] Add the unreachable/outage test asserting `200`, stored item, and `suggestion: null` in `src/tests.rs`.
+- [X] T111 [US4] Add malformed and unknown-category response tests in `src/tests.rs`.
+- [X] T112 [US4] Add a redaction and 2 KB cap test using nested secrets/PII and an oversized event in `src/tests.rs`.
+- [X] T113 [US4] Add the late-suggestion discard test using `first_presented_at` in `src/tests.rs`.
+- [X] T114 [US4] Add confirm/override tests asserting the decision is authoritative and the item/grouping/raw data are unchanged in `src/tests.rs`.
 - [ ] T115 [US4] Run `quickstart.md` scenarios 5 and 6.
 
 **Checkpoint**: User Stories 1–4 work independently; classifier failure is a normal state.

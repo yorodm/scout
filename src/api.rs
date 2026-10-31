@@ -56,6 +56,10 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             web::put().to(update_settings),
         )
         .route("/api/issues/{issue_id}", web::get().to(get_issue))
+        .route(
+            "/api/issues/{issue_id}/occurrences",
+            web::get().to(list_occurrences),
+        )
         .route("/api/issues/{issue_id}/raw", web::get().to(get_raw))
         .route(
             "/api/issues/{issue_id}/state",
@@ -330,10 +334,12 @@ pub async fn get_project(
     } else {
         None
     };
+    let (project, api_key_configured) = public_project(project);
     Ok(HttpResponse::Ok().json(json!({
         "project": project,
         "role": role,
         "key": key,
+        "model_api_key_configured": api_key_configured,
     })))
 }
 
@@ -347,6 +353,9 @@ pub struct IssueQuery {
     pub level: Option<String>,
     #[serde(default)]
     pub q: Option<String>,
+    /// Matches the human decision when one exists; suggestions do not count.
+    #[serde(default)]
+    pub category: Option<String>,
     #[serde(default)]
     pub sort: Option<String>,
 }
@@ -363,6 +372,7 @@ pub async fn list_issues(
     let needle = query.q.as_deref().unwrap_or("").trim().to_ascii_lowercase();
     let state_filter = query.state.as_deref().filter(|s| !s.is_empty());
     let level_filter = query.level.as_deref().filter(|s| !s.is_empty());
+    let category_filter = query.category.as_deref().filter(|s| !s.is_empty());
 
     let mut issues: Vec<Issue> = store
         .issues
@@ -370,6 +380,13 @@ pub async fn list_issues(
         .filter(|i| i.project_id == project_id)
         .filter(|i| state_filter.is_none_or(|s| issue_state_str(i.state) == s))
         .filter(|i| level_filter.is_none_or(|l| i.level.eq_ignore_ascii_case(l)))
+        .filter(|i| {
+            category_filter.is_none_or(|category| {
+                i.decision
+                    .as_ref()
+                    .is_some_and(|decision| decision.category == category)
+            })
+        })
         .filter(|i| {
             needle.is_empty()
                 || i.title.to_ascii_lowercase().contains(&needle)
@@ -399,8 +416,8 @@ pub async fn get_issue(
 ) -> Result<HttpResponse, ApiError> {
     let issue_id = path.into_inner();
     let (user_id, _) = auth_user(&req, &state).await?;
-    let store = state.store.read().await;
-    let issue = store
+    let mut store = state.store.write().await;
+    let mut issue = store
         .issues
         .get(&issue_id)
         .cloned()
@@ -408,9 +425,20 @@ pub async fn get_issue(
     store
         .role_for(user_id, issue.project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
+    // FR-019: the first presentation freezes late classifier suggestions. The
+    // timestamp is written once and never advanced by later reads.
+    if issue.first_presented_at.is_none() {
+        let now = Utc::now();
+        issue.first_presented_at = Some(now);
+        if let Some(stored) = store.issues.get_mut(&issue_id) {
+            stored.first_presented_at = Some(now);
+        }
+    }
     let event = store.events.get(&issue.last_event_id);
     let meta = event.map(EventMeta::from);
     let event_json = event.map(|e| e.event.clone());
+    let raw_available =
+        event.is_some_and(|e| e.raw_object_key.is_some() && e.raw_expired_at.is_none());
     let attachments: Vec<Value> = event
         .map(|e| {
             e.attachments
@@ -430,8 +458,44 @@ pub async fn get_issue(
         "event": meta,
         "event_json": event_json,
         "attachments": attachments,
-        "raw_available": event.is_some(),
+        "raw_available": raw_available,
     })))
+}
+
+pub async fn list_occurrences(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let issue_id = path.into_inner();
+    let (user_id, _) = auth_user(&req, &state).await?;
+    let store = state.store.read().await;
+    let issue = store
+        .issues
+        .get(&issue_id)
+        .ok_or_else(|| ApiError::NotFound("issue not found".into()))?;
+    store
+        .role_for(user_id, issue.project_id)
+        .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
+
+    let mut occurrences: Vec<Value> = store
+        .events
+        .values()
+        .filter(|event| event.issue_id == Some(issue_id))
+        .map(|event| {
+            json!({
+                "id": event.id,
+                "sentry_event_id": event.sentry_event_id,
+                "received_at": event.received_at,
+                "size": event.raw_size,
+                "attachment_count": event.attachments.len(),
+                "raw_available": event.raw_object_key.is_some()
+                    && event.raw_expired_at.is_none(),
+            })
+        })
+        .collect();
+    occurrences.sort_by(|a, b| b["received_at"].as_str().cmp(&a["received_at"].as_str()));
+    Ok(HttpResponse::Ok().json(json!({ "occurrences": occurrences })))
 }
 
 pub async fn get_raw(
@@ -947,6 +1011,22 @@ pub async fn revoke_key(
 
 // --- settings --------------------------------------------------------------
 
+/// Project JSON safe to return to a client: secrets never leave the process.
+fn public_project(mut project: Project) -> (Value, bool) {
+    let api_key_configured = project
+        .model
+        .as_ref()
+        .and_then(|model| model.api_key.as_ref())
+        .is_some();
+    if let Some(model) = project.model.as_mut() {
+        model.api_key = None;
+    }
+    (
+        serde_json::to_value(project).unwrap_or(Value::Null),
+        api_key_configured,
+    )
+}
+
 pub async fn get_settings(
     req: HttpRequest,
     path: web::Path<Uuid>,
@@ -975,11 +1055,13 @@ pub async fn get_settings(
         .cloned()
         .collect();
     keys.sort_by_key(|k| std::cmp::Reverse(k.created_at));
+    let (project, api_key_configured) = public_project(project);
     Ok(HttpResponse::Ok().json(json!({
         "project": project,
         "role": role,
         "dsn": dsn,
         "keys": keys,
+        "model_api_key_configured": api_key_configured,
         "mock_model_endpoint": format!("{}/mock-jev", state.self_url.trim_end_matches('/')),
     })))
 }
@@ -1019,10 +1101,16 @@ pub async fn update_settings(
             if model.model.trim().is_empty() {
                 return Err(ApiError::BadRequest("model id cannot be empty".into()));
             }
+            if !(0.0..=1.0).contains(&model.confidence_threshold) {
+                return Err(ApiError::BadRequest(
+                    "confidence_threshold must be between 0 and 1".into(),
+                ));
+            }
             Some(ModelConfig {
                 endpoint: model.endpoint.trim().trim_end_matches('/').to_string(),
                 api_key: model.api_key.clone().filter(|k| !k.trim().is_empty()),
                 model: model.model.trim().to_string(),
+                confidence_threshold: model.confidence_threshold,
             })
         }
         None => None,

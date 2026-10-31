@@ -39,6 +39,15 @@ async fn mock_model(body: web::Json<Value>) -> HttpResponse {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_ascii_lowercase();
+    if message.contains("malformed response") {
+        return HttpResponse::Ok().body("not json");
+    }
+    if message.contains("low confidence") {
+        return HttpResponse::Ok().json(json!({ "choice": "issue", "confidence": 0.1 }));
+    }
+    if message.contains("unknown category") {
+        return HttpResponse::Ok().json(json!({ "choice": "billing", "confidence": 0.9 }));
+    }
     let category = if message.contains("log") || message.contains("pool") {
         "log"
     } else {
@@ -231,16 +240,23 @@ where
     panic!("timed out waiting for issue {title:?} to reach count {expected}");
 }
 
-async fn wait_for_suggestion<S, B>(app: &S, token: &str, issue_id: Uuid) -> Value
+/// Poll the issue list (which does not present the issue) until the classifier
+/// answer lands. Opening the detail would freeze suggestions by design (FR-019).
+async fn wait_for_suggestion<S, B>(app: &S, token: &str, project: Uuid, issue_id: Uuid) -> Value
 where
     S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
     B: MessageBody,
 {
+    let target = issue_id.to_string();
     for _ in 0..250 {
-        let (status, body) = call_json(app, get(&format!("/api/issues/{issue_id}"), token)).await;
-        assert_eq!(status, StatusCode::OK, "issue detail failed: {body}");
-        if body["issue"]["suggestion"].is_object() {
-            return body["issue"].clone();
+        let issues = issues_for(app, token, project).await;
+        if let Some(issue) = issues
+            .iter()
+            .find(|issue| issue["id"].as_str() == Some(target.as_str()))
+        {
+            if issue["suggestion"].is_object() {
+                return issue.clone();
+            }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -545,8 +561,13 @@ async fn suggestion_is_attached_from_the_model() {
     assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
 
     let issue = wait_for_issue_count(&app, token, project, "IntegrationError: suggest me", 1).await;
-    let issue =
-        wait_for_suggestion(&app, token, issue["id"].as_str().unwrap().parse().unwrap()).await;
+    let issue = wait_for_suggestion(
+        &app,
+        token,
+        project,
+        issue["id"].as_str().unwrap().parse().unwrap(),
+    )
+    .await;
     assert_eq!(issue["suggestion"]["category"], "issue");
     assert!(issue["suggestion"]["confidence"].as_f64().unwrap() > 0.0);
 }
@@ -635,7 +656,7 @@ async fn confirm_and_override_categorisation() {
     )
     .await;
     let issue_id = issue["id"].as_str().unwrap().to_string();
-    let issue = wait_for_suggestion(&app, token, issue_id.parse().unwrap()).await;
+    let issue = wait_for_suggestion(&app, token, project, issue_id.parse().unwrap()).await;
     assert_eq!(issue["suggestion"]["category"], "issue");
 
     let (status, body) = call_json(
@@ -724,6 +745,40 @@ async fn resolve_and_reopen_issue_records_history() {
             .unwrap()["state"],
         "open"
     );
+
+    // FR-021: ignored is a real state and must be recorded like the others.
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/issues/{issue_id}/state"),
+            token,
+            json!({ "state": "ignored" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ignore failed: {body}");
+    assert_eq!(body["issue"]["state"], "ignored");
+    assert_eq!(
+        body["issue"]["state_history"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["state"],
+        "ignored"
+    );
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/issues/{issue_id}/state"),
+            token,
+            json!({ "state": "open" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "reopen from ignored failed: {body}");
+    assert_eq!(body["issue"]["state"], "open");
+    assert_eq!(body["issue"]["state_history"].as_array().unwrap().len(), 5);
 }
 
 #[actix_web::test]
@@ -771,6 +826,22 @@ async fn viewer_cannot_reach_a_project_they_are_not_in() {
     let (status, _) = call_json(
         &app,
         get(&format!("/api/projects/{platform}/issues"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Detail and raw are project-scoped too.
+    let platform_issue = first_open_issue(&app, demo_token, platform).await;
+    let platform_issue_id = platform_issue["id"].as_str().unwrap();
+    let (status, _) = call_json(
+        &app,
+        get(&format!("/api/issues/{platform_issue_id}"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call_json(
+        &app,
+        get(&format!("/api/issues/{platform_issue_id}/raw"), token),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1285,4 +1356,545 @@ async fn expired_sessions_are_rejected() {
 
     let (status, _) = call_json(&app, get("/api/me", &token)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// --- issue list, detail, and occurrences -----------------------------------
+
+#[actix_web::test]
+async fn issue_list_filters_by_category_level_and_sorts() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    // Only the webhook issue carries a human decision, so `category` must not
+    // match issues that merely have a suggestion.
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/issues?category=issue"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "filtered list failed: {body}");
+    let issues = body["issues"].as_array().unwrap();
+    assert!(!issues.is_empty());
+    for issue in issues {
+        assert_eq!(issue["decision"]["category"], "issue");
+    }
+    assert!(issues
+        .iter()
+        .any(|issue| issue["title"] == "WebhookDeliveryFailed: 503 from inventory-service"));
+    assert!(
+        !issues.iter().any(|issue| issue["title"]
+            == "TypeError: Cannot read properties of undefined (reading 'currency')"),
+        "a suggestion is not a decision"
+    );
+
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/issues?level=fatal"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let issues = body["issues"].as_array().unwrap();
+    assert!(issues.iter().all(|issue| issue["level"] == "fatal"));
+    assert!(issues.iter().any(|issue| issue["title"]
+        == "PoolExhaustedError: timed out waiting for a database connection (30s)"));
+
+    let (status, body) = call_json(
+        &app,
+        get(&format!("/api/projects/{project}/issues?sort=count"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let counts: Vec<u64> = body["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|issue| issue["count"].as_u64())
+        .collect();
+    assert!(
+        counts.windows(2).all(|pair| pair[0] >= pair[1]),
+        "count sort must be descending: {counts:?}"
+    );
+}
+
+#[actix_web::test]
+async fn issue_detail_freezes_first_presented_at_and_reports_raw_availability() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+    let issue = issues_for(&app, token, project)
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue["title"] == "TypeError: Cannot read properties of undefined (reading 'currency')"
+        })
+        .expect("seeded checkout issue");
+    let issue_id = issue["id"].as_str().unwrap();
+    assert!(
+        issue["first_presented_at"].is_null(),
+        "listing must not present the issue"
+    );
+
+    let (status, first) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "detail failed: {first}");
+    let presented = first["issue"]["first_presented_at"]
+        .as_str()
+        .expect("the first read sets first_presented_at")
+        .to_string();
+    assert_eq!(first["raw_available"], true);
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let (status, second) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        second["issue"]["first_presented_at"].as_str(),
+        Some(presented.as_str()),
+        "later reads must not advance the timestamp"
+    );
+}
+
+#[actix_web::test]
+async fn occurrences_are_newest_first_and_project_scoped() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+    let platform = project_id(&app, token, "platform-api").await;
+
+    let issue = issues_for(&app, token, web)
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue["title"] == "TypeError: Cannot read properties of undefined (reading 'currency')"
+        })
+        .expect("seeded checkout issue");
+    let issue_id = Uuid::parse_str(issue["id"].as_str().unwrap()).unwrap();
+
+    // Add two controlled occurrences so ordering does not depend on timing.
+    {
+        let mut store = state.store.write().await;
+        let base = store
+            .events
+            .values()
+            .find(|event| event.issue_id == Some(issue_id))
+            .cloned()
+            .expect("the seeded event is linked to the issue");
+        for (offset, sentry_id) in [(30, hex_id(70)), (5, hex_id(71))] {
+            let mut event = base.clone();
+            event.id = Uuid::new_v4();
+            event.sentry_event_id = sentry_id;
+            event.received_at = chrono::Utc::now() - chrono::Duration::seconds(offset);
+            store.events.insert(event.id, event);
+        }
+    }
+
+    let (status, body) = call_json(
+        &app,
+        get(&format!("/api/issues/{issue_id}/occurrences"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "occurrences failed: {body}");
+    let occurrences = body["occurrences"].as_array().unwrap();
+    assert_eq!(occurrences.len(), 3);
+    let times: Vec<String> = occurrences
+        .iter()
+        .map(|occurrence| occurrence["received_at"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        times.windows(2).all(|pair| pair[0] >= pair[1]),
+        "occurrences must be newest first: {times:?}"
+    );
+
+    // A viewer of scout-web must not read another project's occurrences.
+    let viewer = login(&app, "viewer@scout.local").await;
+    let viewer_token = viewer["token"].as_str().unwrap();
+    let platform_issue = first_open_issue(&app, token, platform).await;
+    let (status, _) = call_json(
+        &app,
+        get(
+            &format!(
+                "/api/issues/{}/occurrences",
+                platform_issue["id"].as_str().unwrap()
+            ),
+            viewer_token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[actix_web::test]
+async fn expired_raw_payload_is_reported_without_failing_the_issue() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+    let issue = issues_for(&app, token, project)
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue["title"] == "TypeError: Cannot read properties of undefined (reading 'currency')"
+        })
+        .expect("seeded checkout issue");
+    let issue_id = issue["id"].as_str().unwrap().to_string();
+
+    {
+        let mut store = state.store.write().await;
+        let last_event = Uuid::parse_str(issue["last_event_id"].as_str().unwrap()).unwrap();
+        let event = store.events.get_mut(&last_event).expect("the last event");
+        event.raw_object_key = None;
+        event.raw_expired_at = Some(chrono::Utc::now());
+    }
+
+    let (status, detail) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "metadata stays readable: {detail}");
+    assert_eq!(detail["raw_available"], false);
+
+    let (status, body) = call_json(&app, get(&format!("/api/issues/{issue_id}/raw"), token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].as_str().unwrap_or("").contains("expired"));
+}
+
+// --- logs and unified search ------------------------------------------------
+
+#[actix_web::test]
+async fn logs_accept_json_ndjson_and_envelope_items() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+
+    let ndjson = b"{\"message\":\"ndjson marker one\",\"level\":\"warning\"}\n{\"message\":\"ndjson marker two\"}\n".to_vec();
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-ndjson",
+            ndjson,
+            "logs",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ndjson ingest failed: {body}");
+    assert_eq!(body["accepted"], 2);
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(br#"{"event_id":"abc"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(br#"{"type":"log"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        json!({ "message": "envelope log marker", "level": "error" })
+            .to_string()
+            .as_bytes(),
+    );
+    raw.push(b'\n');
+    // Unknown item types are counted, not rejected.
+    raw.extend_from_slice(br#"{"type":"span"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(br#"{"span_id":"abc"}"#);
+    raw.push(b'\n');
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            raw,
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "envelope ingest failed: {body}");
+    assert_eq!(body["logs"], 1);
+    assert_eq!(body["ignored"], 1);
+
+    let project = project_id(&app, token, "scout-web").await;
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/logs?q=envelope+log+marker"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let logs = body["logs"].as_array().unwrap();
+    assert_eq!(logs.len(), 1, "envelope logs share the normal log path");
+    assert_eq!(logs[0]["level"], "error");
+}
+
+#[actix_web::test]
+async fn logs_are_newest_first_capped_and_project_scoped() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+    let platform = project_id(&app, token, "platform-api").await;
+
+    // Ingest the same term into two projects; search must stay scoped.
+    for (dsn, key, source) in [
+        ("1", "scout_demo_key", "web-isolation"),
+        ("2", "scout_platform_key", "platform-isolation"),
+    ] {
+        let (status, body) = call_json(
+            &app,
+            ingest_request(
+                dsn,
+                key,
+                "application/json",
+                json!({ "message": "isolation marker", "source": source })
+                    .to_string()
+                    .into_bytes(),
+                "logs",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "log ingest failed: {body}");
+    }
+
+    for (project, expected_source) in [(web, "web-isolation"), (platform, "platform-isolation")] {
+        let (status, body) = call_json(
+            &app,
+            get(
+                &format!("/api/projects/{project}/search?q=isolation+marker"),
+                token,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let logs = body["logs"].as_array().unwrap();
+        assert_eq!(logs.len(), 1, "search must not cross project boundaries");
+        assert_eq!(logs[0]["source"], expected_source);
+    }
+
+    // Freshest-first ordering and the limit are both enforced.
+    {
+        let mut store = state.store.write().await;
+        let now = chrono::Utc::now();
+        for index in 0..55 {
+            store.logs.push(crate::models::LogLine {
+                id: Uuid::new_v4(),
+                project_id: web,
+                timestamp: now - chrono::Duration::seconds(index),
+                level: "info".into(),
+                message: format!("cap marker {index}"),
+                source: "cap-test".into(),
+                attributes: json!({ "index": index }),
+                received_at: now,
+            });
+        }
+    }
+
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{web}/logs?q=cap+marker&limit=10"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let logs = body["logs"].as_array().unwrap();
+    assert_eq!(logs.len(), 10);
+    let timestamps: Vec<String> = logs
+        .iter()
+        .map(|log| log["timestamp"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        timestamps.windows(2).all(|pair| pair[0] >= pair[1]),
+        "logs must be newest first: {timestamps:?}"
+    );
+
+    let (status, body) = call_json(
+        &app,
+        get(&format!("/api/projects/{web}/search?q=cap+marker"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["logs"].as_array().unwrap().len(),
+        50,
+        "unified search caps each kind"
+    );
+}
+
+// --- classifier thresholds and malformed answers ---------------------------
+
+#[actix_web::test]
+async fn below_threshold_suggestions_are_discarded() {
+    let self_url = start_mock_model();
+    let app = init_app(&self_url).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(
+                &hex_id(80),
+                "low confidence case",
+                &["low-confidence-group"],
+            )]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+
+    let issue = wait_for_issue_count(
+        &app,
+        token,
+        project,
+        "IntegrationError: low confidence case",
+        1,
+    )
+    .await;
+    let issue_id = issue["id"].as_str().unwrap().to_string();
+
+    // The mock answers immediately; give the worker ample time to discard it.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let issue = issues_for(&app, token, project)
+        .await
+        .into_iter()
+        .find(|candidate| candidate["id"] == issue_id.as_str())
+        .expect("the ingested issue");
+    assert!(
+        issue["suggestion"].is_null(),
+        "a below-threshold answer must not be stored: {issue}"
+    );
+}
+
+#[actix_web::test]
+async fn unknown_or_malformed_model_answers_leave_no_suggestion() {
+    let self_url = start_mock_model();
+    let app = init_app(&self_url).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[
+                event(&hex_id(81), "unknown category case", &["unknown-category"]),
+                event(
+                    &hex_id(82),
+                    "malformed response case",
+                    &["malformed-response"],
+                ),
+            ]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+
+    for title in [
+        "IntegrationError: unknown category case",
+        "IntegrationError: malformed response case",
+    ] {
+        wait_for_issue_count(&app, token, project, title, 1).await;
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let issues = issues_for(&app, token, project).await;
+    for title in [
+        "IntegrationError: unknown category case",
+        "IntegrationError: malformed response case",
+    ] {
+        let issue = issues
+            .iter()
+            .find(|issue| issue["title"] == title)
+            .expect("the ingested issue");
+        assert!(
+            issue["suggestion"].is_null(),
+            "{title} must not gain a suggestion"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn settings_never_return_the_model_api_key() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    let (status, body) = call_json(
+        &app,
+        put_json(
+            &format!("/api/projects/{project}/settings"),
+            token,
+            json!({
+                "retention_days": 30,
+                "model": {
+                    "endpoint": "https://models.example.com/v1",
+                    "model": "jev-latest",
+                    "api_key": "super-secret-token",
+                    "confidence_threshold": 0.7
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "settings update failed: {body}");
+
+    for uri in [
+        format!("/api/projects/{project}/settings"),
+        format!("/api/projects/{project}"),
+    ] {
+        let (status, body) = call_json(&app, get(&uri, token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !body.to_string().contains("super-secret-token"),
+            "the api key must never be returned: {body}"
+        );
+    }
+
+    let (status, settings) = call_json(
+        &app,
+        get(&format!("/api/projects/{project}/settings"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settings["model_api_key_configured"], true);
+    assert_eq!(settings["project"]["model"]["confidence_threshold"], 0.7);
+
+    let (status, body) = call_json(
+        &app,
+        put_json(
+            &format!("/api/projects/{project}/settings"),
+            token,
+            json!({
+                "retention_days": 30,
+                "model": {
+                    "endpoint": "https://models.example.com/v1",
+                    "model": "jev-latest",
+                    "confidence_threshold": 1.5
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
 }

@@ -10,11 +10,18 @@ pub struct Organisation {
     pub sso_provider: Option<String>,
 }
 
+fn default_confidence_threshold() -> f64 {
+    0.5
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub endpoint: String,
     pub api_key: Option<String>,
     pub model: String,
+    /// Suggestions below this confidence are discarded.
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -165,6 +172,10 @@ pub struct Issue {
     pub breadcrumbs: Vec<Breadcrumb>,
     pub suggestion: Option<Suggestion>,
     pub decision: Option<CategorisationDecision>,
+    /// Set the first time a member opens the issue detail. A late classifier
+    /// answer is discarded once this is set (FR-019).
+    #[serde(default)]
+    pub first_presented_at: Option<DateTime<Utc>>,
     pub state_history: Vec<StateChange>,
     pub last_event_id: Uuid,
 }
