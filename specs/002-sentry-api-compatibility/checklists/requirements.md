@@ -37,6 +37,6 @@
   implementation choice; no language, framework, storage, or internal-design detail is specified.
 - `SC-007` was reworded to "reference self-hosted deployment" so the criterion stays about observable
   latency rather than hardware.
-- **Blocking**: the Governance Note identifies a conflict with the ratified constitution ("Sentry
-  read-API compatibility ... MUST NOT be implied"). The constitution must be amended before planning;
-  this checklist does not clear that blocker.
+- **Resolved 2026-11-01**: the constitution was amended to v1.1.0, replacing the "ingestion only"
+  boundary with a bounded, opt-in read-API surface. The former blocking note is cleared and planning
+  may proceed.
