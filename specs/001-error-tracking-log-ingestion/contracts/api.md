@@ -18,6 +18,13 @@ Statuses used: `400` bad request, `401` unauthenticated, `403` authenticated but
 
 ## Authentication
 
+### Bootstrap (deployment operator)
+
+On startup, if no user has `is_operator = true`, Scout creates the deployment operator from
+`SCOUT_OPERATOR_EMAIL` and `SCOUT_OPERATOR_PASSWORD`. The password is hashed with Argon2id and never
+logged. Later starts ignore the variables and do not reset the stored password. The operator signs in
+through `POST /api/login`; its user object has `is_operator: true`.
+
 ### `POST /api/login`
 
 ```json
@@ -29,7 +36,7 @@ Statuses used: `400` bad request, `401` unauthenticated, `403` authenticated but
 ```json
 {
   "token": "opaque-session-token",
-  "user": { "id": "uuid", "email": "person@example.com", "name": "Person" },
+  "user": { "id": "uuid", "email": "person@example.com", "name": "Person", "is_operator": false },
   "memberships": [
     { "project_id": "uuid", "project_name": "scout-web", "slug": "scout-web", "role": "owner" }
   ]
@@ -45,7 +52,7 @@ Deletes the session. **200** `{ "ok": true }`.
 
 ### `GET /api/me`
 
-**200** `{ "user": {…}, "memberships": [ … ] }`.
+**200** `{ "user": {…, "is_operator": false}, "memberships": [ … ] }`.
 
 ### `POST /api/recover`
 
@@ -58,8 +65,9 @@ Unauthenticated password reset using a single-use recovery code issued at accoun
 **200** `{ "ok": true }`. The code is consumed; other unused codes remain valid. An unknown email,
 an unknown code, or a used code returns `401` with the same body. No email is sent.
 
-When an account is created (by invitation acceptance or by an operator), the creation response
-includes a `recovery_codes` array. The codes are shown once and stored only as hashes.
+When an account is created (by invitation acceptance, initial-admin setup, or operator bootstrap),
+the creation response includes a `recovery_codes` array. The codes are shown once and stored only as
+hashes.
 
 ---
 
@@ -79,6 +87,7 @@ Requires organisation admin. Creates a one-time invitation token.
 {
   "invitation": {
     "id": "uuid",
+    "kind": "project_invite",
     "email": "new@example.com",
     "project_id": "uuid",
     "role": "triager",
@@ -118,6 +127,10 @@ Creates a local account (or attaches the invitation to an existing account with 
 which must first authenticate), applies the project role, and returns a session in the same shape as
 `POST /api/login`.
 
+This endpoint also accepts an `org_admin_setup` token returned by `POST /api/orgs`. In that case it
+creates (or binds) the initial admin, grants `org_admin` on the organisation, returns `recovery_codes`,
+and creates no project membership. The token is single-use and expires after 7 days.
+
 ### `DELETE /api/orgs/{org_id}/invitations/{invitation_id}`
 
 Requires organisation admin. Revokes a pending invitation. **200** `{ "ok": true }`.
@@ -125,6 +138,31 @@ Requires organisation admin. Revokes a pending invitation. **200** `{ "ok": true
 ---
 
 ## Organisations and projects
+
+### `GET /api/orgs`
+
+Requires the deployment operator. **200** `{ "organisations": [ { "id": "uuid", "name": "Acme", "created_at": "…" } ] }`.
+
+### `POST /api/orgs`
+
+Requires the deployment operator. Creates an organisation and its initial admin account.
+
+```json
+{ "name": "Acme", "initial_admin_email": "admin@example.com" }
+```
+
+**200**
+
+```json
+{
+  "organisation": { "id": "uuid", "name": "Acme" },
+  "initial_admin_setup_token": "one-time-token-shown-only-here"
+}
+```
+
+If an account with `initial_admin_email` already exists, it is bound instead of created. The operator
+shares the setup token out of band; the admin redeems it with `POST /api/invitations/{token}/accept`
+to set a password and receive recovery codes. The operator cannot create any other accounts.
 
 ### `GET /api/projects`
 

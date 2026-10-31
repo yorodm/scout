@@ -26,6 +26,13 @@
 - Q: Which issue states should the first slice support? (FR-023) → A: Open, resolved, and ignored.
 - Q: Should Scout enforce ingest rate limits in the first slice? (FR-009) → A: A global in-flight concurrency cap; excess requests return 429 with Retry-After, configurable with a generous default.
 
+### Session 2026-10-31 (operator provisioning)
+
+- Q: How should the first organisation and its first administrator be created on a fresh deployment? (FR-025, FR-030) → A: Environment variables at startup seed the deployment operator account and its password; the operator then creates organisations on first boot.
+- Q: What should happen to the operator account on later restarts when the bootstrap environment variables are still set? (FR-030) → A: Create the operator only if none exists; later starts ignore the environment variables and do not reset the password.
+- Q: Besides the bootstrap account, should the deployment operator be able to create other accounts directly? (FR-030) → A: Only the initial organisation admin when creating an organisation; everyone else joins by invitation.
+- Q: When the operator creates an organisation's initial admin, how should that person receive their sign-in credentials? (FR-028, FR-030) → A: Scout returns a one-time setup token shared out of band; the admin redeems it to set a password and receives recovery codes.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Provision a project and ingest unmodified SDK errors into grouped issues (Priority: P1)
@@ -118,6 +125,7 @@ An organisation admin creates projects, invites people, and grants or revokes a 
 5. **Given** an organisation configured for OIDC/SSO, **When** a person signs in through the provider, **Then** they are authenticated and matched to a member; local accounts remain usable.
 6. **Given** a viewer role, **When** the member attempts to resolve items, confirm categorisations, or change settings, **Then** the action is denied.
 7. **Given** a project owner, **When** they rotate or revoke an ingest key, **Then** the previous key stops being accepted.
+8. **Given** a fresh deployment with the operator environment variables set, **When** the operator signs in, **Then** the operator can create the first organisation and its initial organisation admin, and receive a one-time setup token for that admin.
 
 ---
 
@@ -150,6 +158,8 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **Ingest concurrency saturated**: When the global in-flight cap is reached, excess ingest requests return `429` with `Retry-After`; already-accepted events are unaffected, and SDK retries can recover.
 - **Cross-project access attempt**: A signed-in member requests another project's issue, log, or raw payload; the request is denied and no existence information leaks.
 - **Retention expires an event referenced by an issue**: The raw payload is removed on schedule while the issue's metadata remains; the detail view indicates the raw payload has expired.
+- **Reviewing invitation with no organisation admin**: An organisation created by the operator always has an owner before invitations are issued.
+- **Bootstrap variables left set**: On later starts the operator is not recreated and the stored password is not reset.
 - **Very large attachment**: An attachment greater than 10 MB is rejected with an actionable error rather than silently truncated.
 - **Model connected but returns after the item was already shown**: A late suggestion is discarded rather than retroactively altering the stored item without human confirmation.
 
@@ -195,12 +205,12 @@ An operator starts the whole stack from one compose file on their own infrastruc
 
 **Administration and access control**
 
-- **FR-025**: System MUST support organisations containing multiple projects.
+- **FR-025**: System MUST support organisations containing multiple projects. A deployment operator account seeded from environment variables at startup MUST be able to create organisations and create each organisation's initial admin.
 - **FR-026**: System MUST support members assigned one of owner, admin, triager, or viewer, scoped to a specific project.
 - **FR-027**: Owners and admins MUST be able to grant and revoke member roles, and changes MUST take effect without redeploying.
-- **FR-028**: System MUST support invitations that carry a project role and apply it when accepted; an admin MUST generate a one-time invite link/token that is shared out of band and redeemed while the invitee signs in or creates a local account, with no email/SMTP dependency.
+- **FR-028**: System MUST support invitations that carry a project role and apply it when accepted; an admin MUST generate a one-time invite link/token that is shared out of band and redeemed while the invitee signs in or creates a local account, with no email/SMTP dependency. The same one-time token mechanism MUST establish an organisation's initial admin, with the token returned to the operator for out-of-band delivery.
 - **FR-029**: Project owners MUST be able to create, rotate, and revoke per-project ingest keys.
-- **FR-030**: System MUST support local accounts and optional OIDC/SSO sign-in per organisation. Local accounts MUST authenticate with email and password, with passwords hashed server-side, and MUST be created only by an invitation or an operator (no public self-sign-up). At account creation the system MUST issue single-use recovery codes, stored hashed, that allow a forgotten password to be reset without email.
+- **FR-030**: System MUST support local accounts and optional OIDC/SSO sign-in per organisation. Local accounts MUST authenticate with email and password, with passwords hashed server-side, and MUST be created only by an invitation or as the initial organisation admin created by the deployment operator (no public self-sign-up); the operator MUST NOT create other accounts. At account creation the system MUST issue single-use recovery codes, stored hashed, that allow a forgotten password to be reset without email. The initial organisation admin MUST receive a one-time setup token, set a password through it, and receive recovery codes. The deployment operator account MUST be seeded from environment variables at startup, with its initial password taken from the environment; seeding MUST be idempotent, so later starts MUST NOT reset an existing operator's password.
 - **FR-031**: System MUST authorise every request server-side against the requesting member's project scope, including ingest-key requests.
 
 **Operations and data lifecycle**
@@ -216,7 +226,7 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **Project**: A unit of tracking inside an organisation; owns issues, log lines, ingest keys, retention settings, and an optional decision-model connection.
 - **Member**: A person's identity within an organisation, with one or more project-scoped role assignments.
 - **Project Role Assignment**: The role (owner, admin, triager, viewer) a member holds on a specific project.
-- **Invitation**: A pending offer of membership and a project role, addressed to a person and redeemed through a one-time link/token shared out of band; it does not depend on email delivery.
+- **Invitation**: A pending offer of membership and a project role, addressed to a person and redeemed through a one-time link/token shared out of band; it does not depend on email delivery. The same token mechanics establish an organisation's initial admin.
 - **Ingest Key**: A project-scoped credential that authenticates incoming events and log lines; can be rotated and revoked.
 - **Issue**: A grouped identity for repeated occurrences within a project, carrying count, first-seen, last-seen, and triage state (open, resolved, or ignored).
 - **Event / Occurrence**: One received submission, linked to exactly one issue, with its received timestamp and identifier.
@@ -225,6 +235,7 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **Categorisation Suggestion**: The category proposed by the decision endpoint for an item, with the confidence and time received, retained for audit alongside any human decision.
 - **Categorisation Decision**: The human's authoritative category for an item, recorded with the actor and time; it overrides the suggestion for labelling and filtering without moving the stored item.
 - **Recovery Code**: A single-use code issued when a local account is created, stored hashed, and used to reset a forgotten password without email.
+- **Deployment Operator**: The bootstrap account seeded from environment variables at startup, only when no operator exists; it is not scoped to an organisation and can create organisations and their initial organisation admin.
 - **Decision Model Connection**: A project's link to a Jev-compatible endpoint, including its location, credential reference, and suggestion-confidence threshold (default 0.5); can be disconnected.
 - **Retention Policy**: A per-project period after which raw payloads and log lines expire.
 
@@ -242,6 +253,7 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **SC-008**: A developer can go from the first received event to a resolved issue — viewing the raw event and confirming categorisation — in under 2 minutes.
 - **SC-009**: Retried deliveries of the same event never increase an issue's count beyond the number of distinct events received.
 - **SC-010**: When the global ingest concurrency cap is saturated, every excess request receives `429` with `Retry-After`, and no already-accepted event is lost or delayed beyond the normal ingest bound.
+- **SC-011**: A fresh deployment with the operator environment variables set reaches a sign-in-capable operator account, and the operator can create its first organisation and obtain a one-time setup token for its initial organisation admin without direct database access.
 
 ## Assumptions
 
@@ -252,7 +264,8 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **Idempotency**: Sentry-compatible events carry an event identifier; retries with the same identifier are deduplicated per project. Events without an identifier are not deduplicated.
 - **Storage failure behaviour**: Ingest returns a retryable failure rather than acknowledging an event that was not durably stored, so SDK retry behaviour protects against loss.
 - **Multiple organisations**: A single deployment can host multiple organisations, each with its own projects, members, and optional SSO configuration.
-- **Identity**: Local accounts are always available. They sign in with email and password, and passwords are hashed server-side; accounts are created only by invitation or an operator, with no public self-sign-up. Each account receives single-use recovery codes at creation for password recovery without email. OIDC/SSO is optional and configured per organisation; no assumption is made about a specific provider.
+- **Identity**: Local accounts are always available. They sign in with email and password, and passwords are hashed server-side; accounts are created only by invitation or as the organisation's initial admin created by the deployment operator, with no public self-sign-up. Each account receives single-use recovery codes at creation for password recovery without email. OIDC/SSO is optional and configured per organisation; no assumption is made about a specific provider.
+- **Operator provisioning**: At startup, Scout reads the operator email and password from environment variables and establishes the deployment operator account if none exists. If an operator already exists, the environment values are ignored and the stored password is not reset. The operator can create organisations and each organisation's initial admin; all other accounts join by invitation. The operator supplies the initial admin's email and receives a one-time setup token to share out of band; redeeming it sets the admin's password and issues recovery codes.
 - **Suggested wait budget**: The categorisation wait budget is short enough not to be perceptible to senders (target: well under one second) and is configurable per project.
 - **Suggestion confidence threshold**: Each project has a configurable threshold, defaulting to 0.5; a suggestion below it is discarded rather than shown to a triager.
 - **Categorisation decisions do not re-file**: Confirming or overriding a category records an authoritative label; the event, its issue grouping, its count, and its raw payload remain unchanged.

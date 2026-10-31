@@ -33,6 +33,8 @@ search. The scenarios below add the external-service wiring and the flows that n
 ## Start the stack
 
 ```sh
+export SCOUT_OPERATOR_EMAIL=operator@example.com
+export SCOUT_OPERATOR_PASSWORD='change-this-before-first-start'
 docker compose up --build
 ```
 
@@ -40,9 +42,48 @@ Expected: `scout`, `postgres`, and `minio` become healthy. The UI is reachable a
 `http://localhost:8080`, and `GET /api/health` returns `200` with `database: "ok"` and
 `object_store: "ok"`.
 
-Seed credentials for local exploration are printed by the app at startup (demo, triager, and viewer
-accounts on the seeded `scout-web` project). Production deployments create accounts through
-invitations; see [contracts/api.md](./contracts/api.md#invitations).
+On first start, the deployment operator is created from `SCOUT_OPERATOR_EMAIL` and
+`SCOUT_OPERATOR_PASSWORD` if no operator exists. Later starts ignore these variables and do not reset
+the password. For local exploration, the prototype also seeds demo, triager, and viewer accounts on
+the `scout-web` project. Production deployments create accounts through the initial-admin setup token
+and invitations; see [contracts/api.md](./contracts/api.md#authentication).
+
+## Scenario 0 — Bootstrap and first organisation (SC-011)
+
+1. Set the operator environment variables and start the stack from empty PostgreSQL and MinIO.
+2. Sign in as the operator:
+
+```sh
+curl -sS -X POST 'http://localhost:8080/api/login' \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"operator@example.com","password":"change-this-before-first-start"}'
+```
+
+3. Create an organisation and its initial admin:
+
+```sh
+curl -sS -X POST 'http://localhost:8080/api/orgs' \
+  -H "Authorization: Bearer <operator-token>" \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme","initial_admin_email":"admin@example.com"}'
+```
+
+4. Share the returned `initial_admin_setup_token` out of band. Redeem it to set the admin password:
+
+```sh
+curl -sS -X POST 'http://localhost:8080/api/invitations/<setup-token>/accept' \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Acme Admin","password":"admin-password"}'
+```
+
+5. Sign in as `admin@example.com`; the response includes `org_admin` access and `recovery_codes`.
+6. Restart the stack with the same operator variables and sign in with the **changed** operator
+   password (if changed). The restart must not reset it.
+
+Expected: the operator can create the organisation and obtain a one-time setup token; the token works
+once; the initial admin can sign in, create a project, and issue its first ingest key. Reusing or
+expiring the setup token returns `410` and grants nothing. The operator cannot create any other
+accounts.
 
 ## Scenario 1 — Fresh deployment to first issue (SC-001)
 

@@ -121,7 +121,8 @@ the incident window); storing a late suggestion (violates FR-019).
 **Decision**: Local accounts authenticate with email and password. Store Argon2id password hashes.
 Issue opaque session tokens (256-bit random), store only their SHA-256 hash with an expiry (default 7
 days) and rotate on sign-in. There is no public sign-up: an account is created by redeeming a
-one-time invitation token or by an operator. Invitation tokens are 256-bit random, stored hashed,
+one-time invitation token, or as an organisation's initial admin created by the deployment operator
+(R15). Invitation tokens are 256-bit random, stored hashed,
 scoped to an organisation plus an optional project/role, and expire after 7 days. Admin-generated
 links are shared out of band; Scout sends no email. At account creation, issue a set of single-use
 recovery codes, stored hashed; redeeming one sets a new password without email.
@@ -248,6 +249,34 @@ immutable-payload principle); treating the suggestion as the outcome (violates F
 
 ---
 
+## R15. Operator provisioning and first organisation
+
+**Decision**: At startup, read `SCOUT_OPERATOR_EMAIL` and `SCOUT_OPERATOR_PASSWORD`. If no user has
+`is_operator = true`, create one with an Argon2id password hash and the flag. If an operator already
+exists, ignore the environment values and do not reset the password; log a warning that the bootstrap
+variables were ignored. The operator authenticates through the normal local login and is not scoped
+to any organisation. It can create an organisation with `POST /api/orgs`, which also creates (or
+reuses by email) the organisation's initial admin account and returns a one-time setup token using
+the invitation token mechanics. The initial admin redeems the token to set a password and receive
+recovery codes, then holds the `org_admin` role. The operator cannot create any other accounts;
+everyone else joins by invitation. Passwords and tokens are never logged.
+
+**Rationale**: Implements FR-025, FR-028, FR-030, and SC-011 without SMTP or a CLI. Idempotent
+seeding avoids surprising password resets; returning a setup token avoids the operator choosing or
+knowing the admin's permanent password; least privilege keeps the operator out of tenant data unless
+explicitly added to a project.
+
+**Alternatives considered**: First-run setup page (more UI state and a bootstrap-exposure window);
+operator CLI (extra surface and container exec); seeded default credentials (unsafe); resetting the
+password from the environment on every start (can lock out an operator who changed it); letting the
+operator create arbitrary accounts (more privilege than needed).
+
+**Security notes**: Supply the bootstrap values as deployment secrets. The password is hashed
+immediately and never logged. Setup tokens are single-use, hashed at rest, and expire after 7 days.
+Operator actions (organisation creation, initial-admin setup) are written to `audit_log`.
+
+---
+
 ## Resolved `NEEDS CLARIFICATION` checklist
 
 | Topic | Resolution |
@@ -262,3 +291,4 @@ immutable-payload principle); treating the suggestion as the outcome (violates F
 | Ingest backpressure | R13: global in-flight cap, `429` + `Retry-After` |
 | Triage states and decision semantics | R14: open/resolved/ignored; decisions are metadata-only |
 | Search matching rules | R8: case-insensitive substring, newest first, 50 per kind |
+| Operator provisioning and first organisation | R15: idempotent env-seeded operator; setup token for the initial admin |

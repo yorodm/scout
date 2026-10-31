@@ -13,11 +13,12 @@ Jev-compatible decisions endpoint only *suggests* a category after storage; inge
 
 The repository already contains a working prototype: Actix API, Sycamore/Tailwind UI, in-memory
 metadata store, and an in-process grouping/classification worker. This plan takes that prototype to
-the specified product: PostgreSQL and object storage replace the in-memory store, local accounts gain
-password authentication, token-based invitations, and single-use recovery codes, the classifier
-applies redaction and a per-project confidence threshold, triage gains the `ignored` state and
-decision-based filtering, ingest gains a configurable global backpressure cap, and
-durability/authorisation rules become explicit.
+the specified product: PostgreSQL and object storage replace the in-memory store, a deployment
+operator is bootstrapped from environment variables and creates organisations plus each
+organisation's initial admin, local accounts gain password authentication, token-based invitations,
+and single-use recovery codes, the classifier applies redaction and a per-project confidence
+threshold, triage gains the `ignored` state and decision-based filtering, ingest gains a configurable
+global backpressure cap, and durability/authorisation rules become explicit.
 
 ## Technical Context
 
@@ -29,11 +30,11 @@ durability/authorisation rules become explicit.
 `wasm-bindgen`, `gloo-net`, `web-sys` for the UI. Trunk 0.22 builds the UI, including Tailwind through
 Trunk's built-in `tailwind-css` pipeline (no Node.js toolchain).
 
-**Storage**: PostgreSQL for organisations, projects, users, roles, invitations, sessions, recovery
-codes, ingest-key hashes, issues, event metadata, suggestions, decisions, log lines, and jobs.
-S3-compatible object storage (AWS S3 or MinIO) for immutable raw payloads and attachments. The
-in-memory `Store` remains as a test adapter so the in-crate integration suite runs without external
-services.
+**Storage**: PostgreSQL for organisations, projects, users (including the deployment-operator flag),
+roles, invitations and initial-admin setup tokens, sessions, recovery codes, ingest-key hashes,
+issues, event metadata, suggestions, decisions, log lines, and jobs. S3-compatible object storage
+(AWS S3 or MinIO) for immutable raw payloads and attachments. The in-memory `Store` remains as a test
+adapter so the in-crate integration suite runs without external services.
 
 **Testing**: `cargo test` — unit tests plus in-crate integration tests using `actix_web::test`, per the
 project constraint that the backend must not be split into a library crate. No `tests/` integration
@@ -54,8 +55,9 @@ path with a bounded 800 ms attempt (at most one retry).
 **Constraints**: 10 MB per ingest request and per attachment (FR-007); no ingest dependency on the
 classifier (FR-009, FR-018); a global in-flight ingest concurrency cap returning `429` with
 `Retry-After` (FR-035); raw payloads are write-once and never rewritten (FR-034); one compose file
-for app, PostgreSQL, and object storage (FR-032); no Node.js in the build; UI served by the same
-binary; migrations idempotent and safe for concurrent starts.
+for app, PostgreSQL, and object storage (FR-032); the deployment operator is seeded from environment
+variables only when none exists, and later starts never reset its password (FR-030); no Node.js in
+the build; UI served by the same binary; migrations idempotent and safe for concurrent starts.
 
 **Scale/Scope**: Planning target for one deployment: up to 50 projects, up to 1,000 members, 30-day
 default retention, 50 million stored events per month. These are sizing assumptions, not new product
@@ -98,13 +100,19 @@ specs/001-error-tracking-log-ingestion/
 Cargo.toml                  # workspace + `scout` binary crate
 migrations/                 # sqlx PostgreSQL migrations (added with persistence work)
 src/
-├── main.rs                 # bootstrap, app wiring, static UI fallback
-├── api.rs                  # dashboard API (sessions, projects, issues, members, keys, settings)
+├── main.rs                 # bootstrap, operator seeding, app wiring, static UI fallback
+├── config.rs               # environment configuration and defaults
+├── api.rs                  # dashboard API (operator, orgs, sessions, issues, members, keys, settings)
+├── auth.rs                 # Argon2id, sessions, invitations, setup tokens, recovery codes, OIDC
+├── audit.rs                # admin action audit helper
 ├── ingest.rs               # Sentry envelopes, legacy store, log ingestion, dedupe
 ├── grouping.rs             # deterministic fingerprinting and derived issue fields
 ├── classifier.rs           # Jev client, summary redaction, confidence threshold
 ├── worker.rs               # in-process job claims and grouping/classification pipeline
-├── store.rs                # metadata-store trait + in-memory test adapter
+├── objects.rs              # write-once object-store adapter (S3 / MinIO)
+├── store.rs                # metadata-store trait and shared queries
+├── store_memory.rs         # in-memory adapter and seed fixtures (tests/default)
+├── store_postgres.rs       # PostgreSQL adapter
 ├── models.rs               # domain types and enums
 ├── state.rs                # AppState (store, jobs, self URL)
 ├── error.rs                # ApiError → HTTP mapping
@@ -150,8 +158,9 @@ See [research.md](./research.md). All technical unknowns are resolved there; the
 ### Post-Design Constitution Re-check
 
 **Gate result: PASS.** The design still introduces no conflict because no ratified principles exist.
-The single-binary, three-service deployment, project-scoped authorisation, immutable raw payloads, and
-non-blocking classifier all remain within the spec's stated constraints.
+The single-binary, three-service deployment, least-privilege operator provisioning, project-scoped
+authorisation, immutable raw payloads, and non-blocking classifier all remain within the spec's stated
+constraints.
 
 ## Implementation Sequencing (input for /speckit-tasks)
 
@@ -162,14 +171,16 @@ non-blocking classifier all remain within the spec's stated constraints.
 3. **Durability semantics**: write raw → insert event + job in one transaction → acknowledge; add the
    job table and `FOR UPDATE SKIP LOCKED` claiming; add the configurable global in-flight ingest cap
    with `429` + `Retry-After`; keep the prototype's in-process channel as the test-only default.
-4. **Authentication**: Argon2id password hashing, opaque session tokens stored hashed with expiry,
-   invite tokens redeemed at account creation, single-use recovery codes for password reset, and
-   optional OIDC account linking by verified email.
+4. **Authentication and provisioning**: Argon2id password hashing, opaque session tokens stored
+   hashed with expiry, invite tokens redeemed at account creation, single-use recovery codes for
+   password reset, the idempotent environment-seeded deployment operator, one-time setup tokens for
+   an organisation's initial admin, and optional OIDC account linking by verified email.
 5. **Classifier hardening**: redact sensitive fields before building the ≤2 KB summary; apply the
    per-project confidence threshold (default 0.5); enforce the 800 ms budget and single retry.
-6. **API and UI alignment**: settings for threshold and retention, invitation screens, recovery-code
-   redemption, member/role management, the `ignored` state, decision-based issue filtering,
-   raw-expired state, and log/search views using the defined substring-matching rules.
+6. **API and UI alignment**: operator organisation creation and initial-admin setup screens, settings
+   for threshold and retention, invitation screens, recovery-code redemption, member/role management,
+   the `ignored` state, decision-based issue filtering, raw-expired state, and log/search views using
+   the defined substring-matching rules.
 7. **Verification**: extend `src/tests.rs` for every acceptance scenario, including `ignored` state
    transitions, decision-based filtering, and the global concurrency cap (SC-010); add a compose-based
    smoke script for PostgreSQL/object-store wiring; and run the quickstart.

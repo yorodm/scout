@@ -35,6 +35,7 @@ Job ── references Project + Event
 | `name` | text | not null, 1–120 chars |
 | `sso_provider` | text | nullable; provider identifier when OIDC is configured |
 | `sso_config` | jsonb | nullable; issuer, client id, and secret reference (never a plaintext secret) |
+| `created_by` | uuid | nullable; FK → users. The deployment operator that created the organisation |
 | `created_at` | timestamptz | not null, default now |
 
 ### `users`
@@ -45,8 +46,13 @@ Job ── references Project + Event
 | `email` | citext | not null, unique; stored lowercased |
 | `name` | text | not null |
 | `password_hash` | text | nullable only for accounts that authenticate exclusively through OIDC |
+| `is_operator` | boolean | not null, default false; at most one true row (partial unique index) |
 | `created_at` | timestamptz | not null, default now |
 | `disabled_at` | timestamptz | nullable |
+
+The deployment operator is a normal `users` row with `is_operator = true`. It is not scoped to any
+organisation and is created at startup only when no operator exists. A partial unique index
+(`WHERE is_operator`) enforces at most one.
 
 ### `org_members`
 
@@ -90,17 +96,20 @@ A project MUST retain at least one `owner`; demoting or removing the final owner
 |--------|------|-------------|
 | `id` | uuid | PK |
 | `org_id` | uuid | FK → organisations, not null |
-| `project_id` | uuid | FK → projects, nullable (organisation-only invitation when null) |
+| `kind` | text | `project_invite` \| `org_admin_setup`, not null, default `project_invite` |
+| `project_id` | uuid | FK → projects, nullable; null for `org_admin_setup` |
 | `email` | citext | not null |
-| `role` | text | project role, nullable when `project_id` is null |
+| `role` | text | project role for `project_invite`; null for `org_admin_setup` |
 | `token_hash` | text | not null, unique; SHA-256 of the one-time token |
 | `created_by` | uuid | FK → users, not null |
 | `expires_at` | timestamptz | not null, default now + 7 days |
 | `accepted_at` | timestamptz | nullable |
+| `accepted_user_id` | uuid | nullable; FK → users created or bound on acceptance |
 | `revoked_at` | timestamptz | nullable |
 
 The plaintext token is shown once at creation and never stored. Delivery is out of band; no email is
-sent.
+sent. An `org_admin_setup` token is returned to the operator when creating an organisation; redeeming
+it creates (or binds a verified existing account) and grants `org_members.role = org_admin`.
 
 ### `ingest_keys`
 
@@ -282,6 +291,14 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
 - Raw object keys are write-once. No code path updates an existing object; retention only deletes.
 - Every issue must have at least one `owner` in `project_members`.
 - A member can hold one role per project; `project_members` is keyed by `(project_id, user_id)`.
+- At most one `users.is_operator = true`. Startup seeding creates the operator only when none exists;
+  later starts MUST NOT update the stored password.
+- Every organisation MUST have either a pending `org_admin_setup` token or an `org_admin` member
+  before project invitations are issued.
+- `org_admin_setup` tokens are single-use, hashed at rest, and expire after 7 days; accepting one
+  creates or binds the initial admin and grants `org_admin`.
+- Operator-created accounts are limited to the initial organisation admin; all other accounts are
+  created by invitation.
 
 ## State transitions
 
@@ -295,6 +312,10 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
 | Invitation | — | admin creates | pending | Token shown once |
 | Invitation | pending | invitee redeems | accepted | `accepted_at` set; membership created |
 | Invitation | pending | admin revokes / expires | revoked / expired | Token no longer redeemable |
+| Deployment operator | — | startup, no operator exists | active | Seeded from env; password hashed |
+| Deployment operator | active | later startup with env set | unchanged | Password not reset; warning logged |
+| Organisation | — | operator creates | active | `created_by` set; initial-admin setup token issued |
+| Initial admin setup | pending | token redeemed | accepted | User created or bound; `org_admin` granted |
 | Ingest key | — | owner/admin creates | active | Plaintext shown once |
 | Ingest key | active | owner/admin revokes | revoked | Terminal; already-stored events unaffected |
 | Session | — | successful sign-in | active | Opaque token returned once |
@@ -314,3 +335,5 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
   triager has seen the issue or decided, a late answer is discarded (FR-019).
 - `open_issues`, `total_issues`, and `logs` counters on project summaries are computed per query in
   the prototype and may become maintained counters if profiling requires it.
+- The deployment operator is a deployment-level principal: it can list and create organisations but
+  cannot read a project's issues, logs, or raw payloads unless it is also a member of that project.
