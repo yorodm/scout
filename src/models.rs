@@ -8,6 +8,9 @@ pub struct Organisation {
     pub id: Uuid,
     pub name: String,
     pub sso_provider: Option<String>,
+    /// The deployment operator that created the organisation.
+    #[serde(default)]
+    pub created_by: Option<Uuid>,
     #[serde(default)]
     pub created_at: DateTime<Utc>,
 }
@@ -125,7 +128,12 @@ pub struct IngestKey {
     pub id: Uuid,
     pub project_id: Uuid,
     pub label: String,
-    pub key: String,
+    /// SHA-256 of the plaintext key. Never serialised; the plaintext is shown
+    /// once at creation/rotation and is not stored.
+    #[serde(default, skip_serializing)]
+    pub key_hash: String,
+    /// First characters of the plaintext key, for identification in the UI.
+    pub key_prefix: String,
     pub created_at: DateTime<Utc>,
     pub revoked: bool,
 }
@@ -140,6 +148,9 @@ pub struct User {
     pub password_hash: Option<String>,
     /// The single deployment-level principal seeded from the environment.
     pub is_operator: bool,
+    /// A disabled account cannot sign in or start new sessions.
+    #[serde(default)]
+    pub disabled_at: Option<DateTime<Utc>>,
 }
 
 /// An authenticated session. Only the SHA-256 of the opaque token is stored, and

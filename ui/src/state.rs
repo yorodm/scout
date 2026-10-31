@@ -580,7 +580,22 @@ pub async fn create_key(store: Signal<AppState>) {
     let project_id = store.with(|state| state.project_id.clone());
     match api::create_key(&token, &project_id, "Created in prototype").await {
         Ok(data) => {
-            toast(store, format!("Created {}", data.key.key), "success");
+            // Keep the plaintext for this browser session so the demo send
+            // actions work; the server never returns it again.
+            let plaintext = data.key.clone();
+            let prefix = data.key_prefix.clone();
+            store.update(|state| {
+                for project in state.projects.iter_mut() {
+                    if project.id == project_id {
+                        project.key = Some(plaintext.clone());
+                    }
+                }
+            });
+            toast(
+                store,
+                format!("Created key {prefix} — copy it now, it is shown once"),
+                "success",
+            );
             load_settings(store).await;
             load_projects(store).await;
         }
