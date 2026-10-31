@@ -34,6 +34,12 @@ pub struct Project {
     pub org_id: Uuid,
     pub retention_days: u32,
     pub model: Option<ModelConfig>,
+    /// Set when an owner soft-deletes the project. Rows, objects, and logs stay
+    /// and remain subject to retention.
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -216,6 +222,9 @@ pub struct Event {
     pub raw_object_key: Option<String>,
     pub raw_size: u64,
     pub raw_expired_at: Option<DateTime<Utc>>,
+    /// Historical attachment count; attachments themselves expire with the raw
+    /// payload.
+    pub attachment_count: usize,
     pub event: Value,
     pub attachments: Vec<Attachment>,
 }
@@ -236,7 +245,7 @@ impl From<&Event> for EventMeta {
             sentry_event_id: e.sentry_event_id.clone(),
             received_at: e.received_at,
             size: e.raw_size as usize,
-            attachment_count: e.attachments.len(),
+            attachment_count: e.attachment_count,
         }
     }
 }

@@ -15,6 +15,10 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .route("/api/projects", web::get().to(list_projects))
         .route("/api/projects/{project_id}", web::get().to(get_project))
         .route(
+            "/api/projects/{project_id}",
+            web::delete().to(soft_delete_project),
+        )
+        .route(
             "/api/projects/{project_id}/issues",
             web::get().to(list_issues),
         )
@@ -101,10 +105,21 @@ async fn auth_project(
 ) -> Result<(Uuid, String, Role), ApiError> {
     let (user_id, email) = auth_user(req, state).await?;
     let store = state.store.read().await;
+    if !project_is_active(&store, project_id) {
+        return Err(ApiError::NotFound("project not found".into()));
+    }
     let role = store
         .role_for(user_id, project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
     Ok((user_id, email, role))
+}
+
+/// A soft-deleted project is hidden from every normal read, but its rows remain.
+fn project_is_active(store: &crate::store::Store, project_id: Uuid) -> bool {
+    store
+        .projects
+        .get(&project_id)
+        .is_some_and(|project| project.deleted_at.is_none())
 }
 
 fn issue_state_str(state: IssueState) -> &'static str {
@@ -283,6 +298,9 @@ pub async fn list_projects(
         let Some(project) = store.projects.get(project_id) else {
             continue;
         };
+        if project.deleted_at.is_some() {
+            continue;
+        }
         let org_name = store
             .orgs
             .get(&project.org_id)
@@ -352,6 +370,40 @@ pub async fn get_project(
         "key": key,
         "model_api_key_configured": api_key_configured,
     })))
+}
+
+/// FR-036: owner-only soft-delete. Rows, objects, and logs are retained and stay
+/// subject to retention; the project disappears from normal reads and ingest.
+pub async fn soft_delete_project(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let project_id = path.into_inner();
+    let (user_id, email, role) = auth_project(&req, &state, project_id).await?;
+    if !role.is_owner() {
+        return Err(ApiError::Forbidden(
+            "only the project owner can delete it".into(),
+        ));
+    }
+    let mut store = state.store.write().await;
+    {
+        let project = store
+            .projects
+            .get_mut(&project_id)
+            .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
+        project.deleted_at = Some(Utc::now());
+        project.deleted_by = Some(user_id);
+    }
+    crate::audit::record(
+        &mut store,
+        None,
+        Some(project_id),
+        &email,
+        "project.soft_deleted",
+        None,
+    );
+    Ok(HttpResponse::Ok().json(json!({ "ok": true })))
 }
 
 // --- issues ----------------------------------------------------------------
@@ -436,6 +488,9 @@ pub async fn get_issue(
     store
         .role_for(user_id, issue.project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
+    if !project_is_active(&store, issue.project_id) {
+        return Err(ApiError::NotFound("project not found".into()));
+    }
     // FR-019: the first presentation freezes late classifier suggestions. The
     // timestamp is written once and never advanced by later reads.
     if issue.first_presented_at.is_none() {
@@ -488,6 +543,9 @@ pub async fn list_occurrences(
     store
         .role_for(user_id, issue.project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
+    if !project_is_active(&store, issue.project_id) {
+        return Err(ApiError::NotFound("project not found".into()));
+    }
 
     let mut occurrences: Vec<Value> = store
         .events
@@ -499,7 +557,7 @@ pub async fn list_occurrences(
                 "sentry_event_id": event.sentry_event_id,
                 "received_at": event.received_at,
                 "size": event.raw_size,
-                "attachment_count": event.attachments.len(),
+                "attachment_count": event.attachment_count,
                 "raw_available": event.raw_object_key.is_some()
                     && event.raw_expired_at.is_none(),
             })
@@ -524,6 +582,9 @@ pub async fn get_raw(
     store
         .role_for(user_id, issue.project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
+    if !project_is_active(&store, issue.project_id) {
+        return Err(ApiError::NotFound("project not found".into()));
+    }
     let event = store
         .events
         .get(&issue.last_event_id)
@@ -569,6 +630,9 @@ pub async fn set_issue_state(
             "triager role or above is required".into(),
         ));
     }
+    if !project_is_active(&store, project_id) {
+        return Err(ApiError::NotFound("project not found".into()));
+    }
     let issue = store.issues.get_mut(&issue_id).expect("checked above");
     issue.state = body.state;
     issue.state_history.push(StateChange {
@@ -607,6 +671,9 @@ pub async fn categorise(
         return Err(ApiError::Forbidden(
             "triager role or above is required".into(),
         ));
+    }
+    if !project_is_active(&store, project_id) {
+        return Err(ApiError::NotFound("project not found".into()));
     }
 
     let issue = store.issues.get_mut(&issue_id).expect("checked above");

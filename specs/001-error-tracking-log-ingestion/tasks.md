@@ -36,7 +36,7 @@
 - [X] T007 Update `docker-compose.yml` to add PostgreSQL and MinIO services with health checks and wire `DATABASE_URL`, `SCOUT_S3_*`, and the operator bootstrap variables into the app.
 - [X] T008 Update `Dockerfile` to build the Trunk UI and run the binary with migrations available in the image.
 - [X] T009 [P] Add or extend loading, empty, and error primitives in `ui/src/components/common.rs`.
-- [ ] T010 Run the baseline checks for `Cargo.toml` and `ui/Trunk.toml`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all --check`, and `cd ui && trunk build --release`; record the current pass state.
+- [X] T010 Run the baseline checks for `Cargo.toml` and `ui/Trunk.toml`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all --check`, and `cd ui && trunk build --release`; record the current pass state.
 
 ---
 
@@ -158,7 +158,7 @@
 - [X] T079 [US2] Add the raw-expired (`raw_available: false`, `404` on raw) test in `src/tests.rs`.
 - [X] T080 [US2] Add the `first_presented_at` freeze test in `src/tests.rs`.
 - [X] T081 [US2] Add the occurrence-list ordering and project-scoping test in `src/tests.rs`.
-- [ ] T082 [US2] Verify the `ui/Trunk.toml` build: `(cd ui && cargo check --target wasm32-unknown-unknown)` and `trunk build --release`.
+- [X] T082 [US2] Verify the `ui/Trunk.toml` build: `(cd ui && cargo check --target wasm32-unknown-unknown)` and `trunk build --release`.
 - [ ] T083 [US2] Document issue filters, triage states, and occurrence history in `README.md`; run `quickstart.md` scenarios 1 and 7.
 
 **Checkpoint**: User Stories 1 and 2 work independently and together.
@@ -266,9 +266,9 @@
 - [ ] T139 [US5] Add key rotation/revocation ingest tests in `src/tests.rs`.
 - [ ] T140 [US5] Add an OIDC mock-provider test covering verified-email linking and uninvited rejection in `src/tests.rs`.
 - [ ] T141 [US5] Run `quickstart.md` scenarios 0, 7, 8, and 11.
-- [ ] T142 [US5] Implement owner-only soft-delete at `DELETE /api/projects/{project_id}` in `src/api.rs`, setting `projects.deleted_at`/`deleted_by`, hiding the project from lists and settings, and writing a `project.soft_deleted` audit row.
-- [ ] T143 [US5] Reject all ingest for a soft-deleted project in `src/ingest.rs` and `src/store_postgres.rs`, returning `401` without writing data.
-- [ ] T144 [US5] Add soft-delete tests in `src/tests.rs`: project hidden, direct lookup `404`, keys rejected, rows/raw objects/log lines retained and still subject to retention, and a `project.soft_deleted` audit row recorded.
+- [X] T142 [US5] Implement owner-only soft-delete at `DELETE /api/projects/{project_id}` in `src/api.rs`, setting `projects.deleted_at`/`deleted_by`, hiding the project from lists and settings, and writing a `project.soft_deleted` audit row.
+- [X] T143 [US5] Reject all ingest for a soft-deleted project in `src/ingest.rs` and `src/store_postgres.rs`, returning `401` without writing data.
+- [X] T144 [US5] Add soft-delete tests in `src/tests.rs`: project hidden, direct lookup `404`, keys rejected, rows/raw objects/log lines retained and still subject to retention, and a `project.soft_deleted` audit row recorded.
 
 **Checkpoint**: All administration, provisioning, and access-control flows are enforced server-side.
 
@@ -284,16 +284,16 @@
 
 - [ ] T145 [P] [US6] Finalize the `scout`/`postgres`/`minio` services, health checks, volumes, and environment in `docker-compose.yml`, including the operator variables.
 - [ ] T146 [P] [US6] Finalize the multi-stage `Dockerfile` (backend build, Trunk UI build, minimal runtime) and expose the UI bundle.
-- [ ] T147 [US6] Implement the retention sweep job in `src/worker.rs` plus the per-request retention check in `src/ingest.rs`.
-- [ ] T148 [US6] Delete expired attachments and raw objects, clear `events.raw_object_key`, set `raw_expired_at`, and delete expired `log_lines` in `src/store_postgres.rs` and `src/objects.rs`.
-- [ ] T149 [US6] Enforce create-only object writes in `src/objects.rs` so no code path can overwrite an existing payload.
+- [X] T147 [US6] Implement the retention sweep job in `src/worker.rs` plus the per-request retention check in `src/ingest.rs`.
+- [X] T148 [US6] Delete expired attachments and raw objects, clear `events.raw_object_key`, set `raw_expired_at`, and delete expired `log_lines` in `src/store_postgres.rs` and `src/objects.rs`.
+- [X] T149 [US6] Enforce create-only object writes in `src/objects.rs` so no code path can overwrite an existing payload.
 - [ ] T150 [US6] Ensure migrations in `migrations/` run idempotently on startup under the advisory lock in `src/main.rs` for multiple replicas.
 
 ### Tests for User Story 6
 
-- [ ] T151 [US6] Add the retention test (expired raw/log removed, issue metadata kept, `raw_available: false`) in `src/tests.rs`.
-- [ ] T152 [US6] Add the per-project retention isolation test in `src/tests.rs`.
-- [ ] T153 [US6] Add the raw immutability test asserting no overwrite is possible in `src/tests.rs`.
+- [X] T151 [US6] Add the retention test (expired raw/log removed, issue metadata kept, `raw_available: false`) in `src/tests.rs`.
+- [X] T152 [US6] Add the per-project retention isolation test in `src/tests.rs`.
+- [X] T153 [US6] Add the raw immutability test asserting no overwrite is possible in `src/tests.rs`.
 - [ ] T154 [US6] Add a compose smoke script at `scripts/compose-smoke.sh` that boots the stack, waits for health, completes operator bootstrap, and reaches a first issue.
 - [ ] T155 [US6] Run `quickstart.md` scenarios 1, 3, and 9 end to end.
 
@@ -313,7 +313,7 @@
 - [ ] T161 Standardize "raw payload" terminology across `spec.md`, `contracts/api.md`, and `contracts/ingest.md` (analyze finding F10).
 - [ ] T162 Verify that the checklist coverage counts (F6) and bearer-session wording (F15) remain consistent, and clarify recovery-code delivery for new vs existing initial admins (F16) in `spec.md` and `contracts/api.md`.
 - [ ] T163 Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` across `src/` and `ui/src/`; fix all failures.
-- [ ] T164 Run the `ui/Trunk.toml` build: `(cd ui && cargo check --target wasm32-unknown-unknown)` and `(cd ui && trunk build --release)`.
+- [X] T164 Run the `ui/Trunk.toml` build: `(cd ui && cargo check --target wasm32-unknown-unknown)` and `(cd ui && trunk build --release)`.
 - [ ] T165 Walk every scenario in `quickstart.md` and record pass/fail, including SC-001 through SC-013.
 - [ ] T166 Re-run `/speckit-analyze` and verify F1–F16 are closed and any remaining low-impact items are explicitly deferred in `tasks.md`, `spec.md`, and `contracts/`.
 

@@ -83,6 +83,7 @@ async fn main() -> std::io::Result<()> {
         .build()
         .expect("build http client");
     worker::spawn(store.clone(), rx, http.clone());
+    worker::spawn_retention(store.clone(), objects.clone(), Duration::from_secs(3600));
 
     let state = web::Data::new(AppState {
         store,

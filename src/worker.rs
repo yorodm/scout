@@ -1,6 +1,8 @@
 use crate::models::{Issue, IssueState, Project, StateChange};
+use crate::objects::Objects;
 use crate::store::Store;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc::UnboundedReceiver, RwLock};
 use uuid::Uuid;
 
@@ -23,6 +25,36 @@ pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: re
                     project_id,
                     event_id,
                 } => process_event(&store, &http, job_id, project_id, event_id).await,
+            }
+        }
+    });
+}
+
+/// Periodically expire raw payloads and log lines for every project and delete
+/// the objects they referenced. Issue rows and counters are never removed here.
+pub fn spawn_retention(store: Arc<RwLock<Store>>, objects: Arc<Objects>, period: Duration) {
+    actix_web::rt::spawn(async move {
+        let mut ticker = tokio::time::interval(period);
+        loop {
+            ticker.tick().await;
+            let keys = {
+                let mut store = store.write().await;
+                let projects: Vec<Project> = store.projects.values().cloned().collect();
+                projects
+                    .iter()
+                    .flat_map(|project| store.apply_retention(project))
+                    .collect::<Vec<_>>()
+            };
+            if !keys.is_empty() {
+                tracing::debug!(
+                    expired_objects = keys.len(),
+                    "retention sweep expired payloads"
+                );
+            }
+            for key in keys {
+                if let Err(error) = objects.delete(&key).await {
+                    tracing::warn!(%key, %error, "retention could not delete an object");
+                }
             }
         }
     });

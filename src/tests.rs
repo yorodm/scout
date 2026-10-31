@@ -2121,4 +2121,315 @@ async fn attachment_bytes_are_written_once_to_object_storage() {
         payload.to_vec(),
         "the object store holds the exact attachment bytes"
     );
+
+    // Raw payloads are write-once: a second write to the same key must fail and
+    // must not change the stored bytes.
+    let raw_key = state.store.read().await.events[&last_event]
+        .raw_object_key
+        .clone()
+        .expect("a raw object");
+    let original = state.objects.get(&raw_key).await.unwrap();
+    assert!(matches!(
+        state.objects.put_create(&raw_key, b"forged".to_vec()).await,
+        Err(crate::objects::ObjectError::AlreadyExists(_))
+    ));
+    assert_eq!(
+        state.objects.get(&raw_key).await.unwrap(),
+        original,
+        "an existing raw payload can never be rewritten"
+    );
+}
+
+// --- retention --------------------------------------------------------------
+
+#[actix_web::test]
+async fn retention_expires_raw_payloads_and_keeps_issue_metadata() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+    let issue = issues_for(&app, token, project)
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue["title"] == "TypeError: Cannot read properties of undefined (reading 'currency')"
+        })
+        .expect("seeded checkout issue");
+    let issue_id = Uuid::parse_str(issue["id"].as_str().unwrap()).unwrap();
+    let event_id = Uuid::parse_str(issue["last_event_id"].as_str().unwrap()).unwrap();
+
+    let (raw_key, attachment_key) = {
+        let store = state.store.read().await;
+        let event = store.events.get(&event_id).expect("the seeded event");
+        assert_eq!(event.attachment_count, 1);
+        (
+            event.raw_object_key.clone().expect("a raw object"),
+            event.attachments[0]
+                .object_key
+                .clone()
+                .expect("an attachment object"),
+        )
+    };
+    assert!(state.objects.get(&raw_key).await.is_ok());
+    assert!(state.objects.get(&attachment_key).await.is_ok());
+
+    // Age the event past the 30-day window and run the same sweep the worker runs.
+    let keys = {
+        let mut store = state.store.write().await;
+        let project_model = store.projects.get(&project).cloned().unwrap();
+        store.events.get_mut(&event_id).unwrap().received_at =
+            chrono::Utc::now() - chrono::Duration::days(40);
+        store.apply_retention(&project_model)
+    };
+    assert!(keys.contains(&raw_key));
+    assert!(keys.contains(&attachment_key));
+    for key in &keys {
+        let _ = state.objects.delete(key).await;
+    }
+
+    {
+        let store = state.store.read().await;
+        let event = store
+            .events
+            .get(&event_id)
+            .expect("event metadata survives retention");
+        assert!(event.raw_object_key.is_none());
+        assert!(event.raw_expired_at.is_some());
+        assert!(event.attachments.is_empty());
+        assert_eq!(event.attachment_count, 1, "the historical count is kept");
+        assert_eq!(store.issues[&issue_id].count, 1284, "issue counters stay");
+    }
+    assert!(matches!(
+        state.objects.get(&raw_key).await,
+        Err(crate::objects::ObjectError::NotFound(_))
+    ));
+
+    let (status, detail) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "detail stays readable: {detail}");
+    assert_eq!(detail["raw_available"], false);
+    assert_eq!(detail["event"]["attachment_count"], 1);
+    assert!(detail["attachments"].as_array().unwrap().is_empty());
+
+    let (status, body) = call_json(&app, get(&format!("/api/issues/{issue_id}/raw"), token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].as_str().unwrap_or("").contains("expired"));
+
+    // A retried delivery after expiry is still deduplicated.
+    let sentry_id = state.store.read().await.events[&event_id]
+        .sentry_event_id
+        .clone();
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&sentry_id, "retention retry", &["retention-group"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retry failed: {body}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        state.store.read().await.issues[&issue_id].count,
+        1284,
+        "a retry after expiry must not inflate the count"
+    );
+}
+
+#[actix_web::test]
+async fn retention_is_per_project_and_covers_logs() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let now = chrono::Utc::now();
+    let (web, platform, web_event, platform_event) = {
+        let store = state.store.read().await;
+        let web = store
+            .projects
+            .values()
+            .find(|project| project.name == "scout-web")
+            .unwrap()
+            .id;
+        let platform = store
+            .projects
+            .values()
+            .find(|project| project.name == "platform-api")
+            .unwrap()
+            .id;
+        let web_event = store
+            .issues
+            .values()
+            .find(|issue| issue.project_id == web && issue.title.starts_with("TypeError"))
+            .unwrap()
+            .last_event_id;
+        let platform_event = store
+            .issues
+            .values()
+            .find(|issue| issue.project_id == platform)
+            .unwrap()
+            .last_event_id;
+        (web, platform, web_event, platform_event)
+    };
+
+    let (web_log, platform_log) = (Uuid::new_v4(), Uuid::new_v4());
+    {
+        let mut store = state.store.write().await;
+        for event_id in [web_event, platform_event] {
+            store.events.get_mut(&event_id).unwrap().received_at = now - chrono::Duration::days(20);
+        }
+        for (id, project_id, age, message) in [
+            (web_log, web, 40, "web retention log"),
+            (platform_log, platform, 20, "platform retention log"),
+        ] {
+            store.logs.push(crate::models::LogLine {
+                id,
+                project_id,
+                timestamp: now - chrono::Duration::days(age),
+                level: "info".into(),
+                message: message.into(),
+                source: "retention-test".into(),
+                attributes: json!({}),
+                received_at: now - chrono::Duration::days(age),
+            });
+        }
+    }
+
+    // scout-web retains for 30 days: 20 days is inside, the 40-day log expires.
+    let web_keys = {
+        let mut store = state.store.write().await;
+        let project = store.projects.get(&web).cloned().unwrap();
+        store.apply_retention(&project)
+    };
+    assert!(
+        web_keys.is_empty(),
+        "the 20-day event is still inside retention"
+    );
+    {
+        let store = state.store.read().await;
+        assert!(store.events[&web_event].raw_object_key.is_some());
+        assert!(!store.logs.iter().any(|log| log.id == web_log));
+        assert!(store.logs.iter().any(|log| log.id == platform_log));
+    }
+
+    // platform-api retains for 14 days: its 20-day event and log expire now.
+    let platform_keys = {
+        let mut store = state.store.write().await;
+        let project = store.projects.get(&platform).cloned().unwrap();
+        store.apply_retention(&project)
+    };
+    assert!(!platform_keys.is_empty());
+    {
+        let store = state.store.read().await;
+        assert!(store.events[&platform_event].raw_object_key.is_none());
+        assert!(store.events[&platform_event].raw_expired_at.is_some());
+        assert!(store.events[&web_event].raw_object_key.is_some());
+        assert!(!store.logs.iter().any(|log| log.id == platform_log));
+    }
+}
+
+// --- project soft-delete ----------------------------------------------------
+
+#[actix_web::test]
+async fn soft_deleted_project_is_hidden_and_rejects_ingest() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+    let issue = first_open_issue(&app, token, project).await;
+    let issue_id = issue["id"].as_str().unwrap().to_string();
+    let event_id = Uuid::parse_str(issue["last_event_id"].as_str().unwrap()).unwrap();
+
+    let (raw_key, events_before, issues_before, logs_before) = {
+        let store = state.store.read().await;
+        let raw_key = store.events[&event_id]
+            .raw_object_key
+            .clone()
+            .expect("a raw object");
+        (
+            raw_key,
+            store.events.len(),
+            store.issues.len(),
+            store.logs.len(),
+        )
+    };
+
+    // A triager cannot delete a project.
+    let triager = login(&app, "triager@scout.local").await;
+    let triager_token = triager["token"].as_str().unwrap();
+    let (status, _) = call_json(
+        &app,
+        delete(&format!("/api/projects/{project}"), triager_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, body) = call_json(&app, delete(&format!("/api/projects/{project}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "delete failed: {body}");
+
+    // Hidden from every normal read.
+    let (status, body) = call_json(&app, get("/api/projects", token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["id"] == project.to_string()),
+        "a soft-deleted project must disappear from the project list"
+    );
+    for uri in [
+        format!("/api/projects/{project}"),
+        format!("/api/projects/{project}/settings"),
+        format!("/api/projects/{project}/issues"),
+        format!("/api/issues/{issue_id}"),
+    ] {
+        let (status, _) = call_json(&app, get(&uri, token)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} must be hidden");
+    }
+
+    // Ingest is rejected with the same body as any other bad key.
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(97), "deleted project", &["deleted-group"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "invalid or missing ingest key");
+
+    // Nothing was deleted; the data stays subject to retention.
+    {
+        let store = state.store.read().await;
+        assert!(store.projects[&project].deleted_at.is_some());
+        assert_eq!(store.events.len(), events_before);
+        assert_eq!(store.issues.len(), issues_before);
+        assert_eq!(store.logs.len(), logs_before);
+        assert!(store.audit.iter().any(
+            |entry| entry.action == "project.soft_deleted" && entry.project_id == Some(project)
+        ));
+    }
+    assert!(state.objects.get(&raw_key).await.is_ok());
+
+    let keys = {
+        let mut store = state.store.write().await;
+        let deleted = store.projects[&project].clone();
+        store.events.get_mut(&event_id).unwrap().received_at =
+            chrono::Utc::now() - chrono::Duration::days(40);
+        store.apply_retention(&deleted)
+    };
+    assert!(
+        keys.contains(&raw_key),
+        "retention still applies to a soft-deleted project"
+    );
+
+    // Deleting again is a 404, not a second audit row.
+    let (status, _) = call_json(&app, delete(&format!("/api/projects/{project}"), token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

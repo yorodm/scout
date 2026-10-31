@@ -119,32 +119,35 @@ impl Store {
             .and_then(|id| self.users.get(id))
     }
 
-    /// Remove raw events and log lines that exceed the project's retention
-    /// window. Issues and their counters stay; their raw payload simply becomes
-    /// unavailable, which the UI reports. Returns the object keys that the
-    /// caller must delete from object storage.
+    /// Expire raw payloads and log lines that exceed the project's retention
+    /// window. The event row, its issue link, and issue counters stay so triage
+    /// history remains; only the raw reference, attachments, and object bytes go.
+    /// Returns the object keys the caller must delete.
     pub fn apply_retention(&mut self, project: &Project) -> Vec<String> {
         let cutoff = Utc::now() - Duration::days(project.retention_days as i64);
+        let now = Utc::now();
         let expired: Vec<Uuid> = self
             .events
             .values()
-            .filter(|e| e.project_id == project.id && e.received_at < cutoff)
+            .filter(|e| {
+                e.project_id == project.id && e.received_at < cutoff && e.raw_object_key.is_some()
+            })
             .map(|e| e.id)
             .collect();
         let mut keys = Vec::new();
         for id in expired {
-            if let Some(event) = self.events.remove(&id) {
-                self.seen_event_ids
-                    .remove(&(event.project_id, event.sentry_event_id));
+            if let Some(event) = self.events.get_mut(&id) {
                 keys.extend(
                     event
                         .attachments
                         .iter()
                         .filter_map(|attachment| attachment.object_key.clone()),
                 );
-                if let Some(key) = event.raw_object_key {
+                if let Some(key) = event.raw_object_key.take() {
                     keys.push(key);
                 }
+                event.attachments.clear();
+                event.raw_expired_at = Some(now);
             }
         }
         self.logs
@@ -185,6 +188,8 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
             model: "jev-latest".into(),
             confidence_threshold: 0.5,
         }),
+        deleted_at: None,
+        deleted_by: None,
         created_at: now - Duration::days(46),
     };
     let platform_id = Uuid::new_v4();
@@ -196,6 +201,8 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         org_id,
         retention_days: 14,
         model: None,
+        deleted_at: None,
+        deleted_by: None,
         created_at: now - Duration::days(21),
     };
     for project in [&web, &platform] {
@@ -586,6 +593,7 @@ fn seed_issue(
             raw_object_key: Some(raw_object_key),
             raw_size: raw.len() as u64,
             raw_expired_at: None,
+            attachment_count: stored_attachments.len(),
             event,
             attachments: stored_attachments,
         },

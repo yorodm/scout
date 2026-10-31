@@ -152,7 +152,8 @@ async fn authenticate(
         .cloned()
         .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
     let key = store.keys.get(&key_str).ok_or_else(invalid_key)?;
-    if key.revoked || key.project_id != project.id {
+    // A soft-deleted project rejects every key exactly like an invalid one.
+    if key.revoked || key.project_id != project.id || project.deleted_at.is_some() {
         return Err(invalid_key());
     }
     Ok(project)
@@ -315,6 +316,7 @@ async fn persist_events(
                     raw_object_key: Some(key),
                     raw_size,
                     raw_expired_at: None,
+                    attachment_count: event_attachments.len(),
                     event,
                     attachments: event_attachments,
                 },
