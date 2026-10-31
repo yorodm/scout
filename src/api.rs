@@ -194,18 +194,37 @@ pub async fn demo_accounts(state: web::Data<AppState>) -> Result<HttpResponse, A
 }
 
 pub async fn reset_demo(state: web::Data<AppState>) -> HttpResponse {
-    let fresh = crate::store::seed(&state.self_url);
+    let (fresh, raws) = crate::store::seed(&state.self_url);
+    for (key, data) in raws {
+        if let Err(error) = state.objects.put_create(&key, data).await {
+            return HttpResponse::InternalServerError()
+                .json(json!({ "error": format!("could not reseed raw payload: {error}") }));
+        }
+    }
     *state.store.write().await = fresh;
     crate::classifier::reset_outage();
     HttpResponse::Ok().json(json!({ "ok": true }))
 }
 
-pub async fn health() -> HttpResponse {
-    HttpResponse::Ok().json(json!({
-        "status": "ok",
+pub async fn health(state: web::Data<AppState>) -> HttpResponse {
+    let objects_ok = state.objects.healthy().await;
+    let healthy = state.storage_ready() && objects_ok;
+    let body = json!({
+        "status": if healthy { "ok" } else { "degraded" },
         "service": "scout",
         "version": env!("CARGO_PKG_VERSION"),
-    }))
+        "storage": if state.storage_ready() { "ok" } else { "unavailable" },
+        "object_store": if objects_ok {
+            state.objects.backend()
+        } else {
+            "unavailable"
+        },
+    });
+    if healthy {
+        HttpResponse::Ok().json(body)
+    } else {
+        HttpResponse::ServiceUnavailable().json(body)
+    }
 }
 
 // --- projects --------------------------------------------------------------
@@ -410,8 +429,13 @@ pub async fn get_raw(
         .get(&issue.last_event_id)
         .ok_or_else(|| ApiError::NotFound("raw payload has expired under retention".into()))?;
     let sentry_event_id = event.sentry_event_id.clone();
-    let bytes = event.raw.clone();
+    let key = event
+        .raw_object_key
+        .clone()
+        .filter(|_| event.raw_expired_at.is_none())
+        .ok_or_else(|| ApiError::NotFound("raw payload has expired under retention".into()))?;
     drop(store);
+    let bytes = state.objects.get(&key).await?;
     Ok(HttpResponse::Ok()
         .content_type("application/octet-stream")
         .insert_header(("X-Scout-Event-Id", sentry_event_id))
@@ -686,7 +710,7 @@ pub async fn add_member(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let project_id = path.into_inner();
-    let (_, _, actor_role) = auth_project(&req, &state, project_id).await?;
+    let (_, email, actor_role) = auth_project(&req, &state, project_id).await?;
     if !actor_role.can_manage() {
         return Err(ApiError::Forbidden(
             "admin role or above is required".into(),
@@ -703,6 +727,14 @@ pub async fn add_member(
         .cloned()
         .ok_or_else(|| ApiError::NotFound("no account with that email".into()))?;
     store.memberships.insert((user.id, project_id), body.role);
+    crate::audit::record(
+        &mut store,
+        None,
+        Some(project_id),
+        &email,
+        "member.added",
+        Some(user.email.clone()),
+    );
     Ok(HttpResponse::Ok().json(json!({
         "user_id": user.id,
         "name": user.name,
@@ -718,7 +750,7 @@ pub async fn update_member(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let (project_id, user_id) = path.into_inner();
-    let (_, _, actor_role) = auth_project(&req, &state, project_id).await?;
+    let (_, email, actor_role) = auth_project(&req, &state, project_id).await?;
     if !actor_role.can_manage() {
         return Err(ApiError::Forbidden(
             "admin role or above is required".into(),
@@ -739,6 +771,14 @@ pub async fn update_member(
         ));
     }
     store.memberships.insert((user_id, project_id), body.role);
+    crate::audit::record(
+        &mut store,
+        None,
+        Some(project_id),
+        &email,
+        "member.role_changed",
+        Some(user_id.to_string()),
+    );
     Ok(HttpResponse::Ok().json(json!({ "ok": true, "role": body.role })))
 }
 
@@ -748,7 +788,7 @@ pub async fn remove_member(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let (project_id, user_id) = path.into_inner();
-    let (_, _, actor_role) = auth_project(&req, &state, project_id).await?;
+    let (_, email, actor_role) = auth_project(&req, &state, project_id).await?;
     if !actor_role.can_manage() {
         return Err(ApiError::Forbidden(
             "admin role or above is required".into(),
@@ -769,6 +809,14 @@ pub async fn remove_member(
         ));
     }
     store.memberships.remove(&(user_id, project_id));
+    crate::audit::record(
+        &mut store,
+        None,
+        Some(project_id),
+        &email,
+        "member.removed",
+        Some(user_id.to_string()),
+    );
     Ok(HttpResponse::Ok().json(json!({ "ok": true })))
 }
 
@@ -810,7 +858,7 @@ pub async fn create_key(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let project_id = path.into_inner();
-    let (_, _, role) = auth_project(&req, &state, project_id).await?;
+    let (_, email, role) = auth_project(&req, &state, project_id).await?;
     if !role.can_manage() {
         return Err(ApiError::Forbidden(
             "admin role or above is required".into(),
@@ -828,12 +876,16 @@ pub async fn create_key(
         created_at: Utc::now(),
         revoked: false,
     };
-    state
-        .store
-        .write()
-        .await
-        .keys
-        .insert(key.key.clone(), key.clone());
+    let mut store = state.store.write().await;
+    store.keys.insert(key.key.clone(), key.clone());
+    crate::audit::record(
+        &mut store,
+        None,
+        Some(project_id),
+        &email,
+        "key.created",
+        Some(key.label.clone()),
+    );
     Ok(HttpResponse::Ok().json(json!({ "key": key })))
 }
 
@@ -843,7 +895,7 @@ pub async fn revoke_key(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let (project_id, key_id) = path.into_inner();
-    let (_, _, role) = auth_project(&req, &state, project_id).await?;
+    let (_, email, role) = auth_project(&req, &state, project_id).await?;
     if !role.can_manage() {
         return Err(ApiError::Forbidden(
             "admin role or above is required".into(),
@@ -855,7 +907,16 @@ pub async fn revoke_key(
         .values_mut()
         .find(|k| k.id == key_id && k.project_id == project_id)
         .ok_or_else(|| ApiError::NotFound("key not found".into()))?;
+    let label = key.label.clone();
     key.revoked = true;
+    crate::audit::record(
+        &mut store,
+        None,
+        Some(project_id),
+        &email,
+        "key.revoked",
+        Some(label),
+    );
     Ok(HttpResponse::Ok().json(json!({ "ok": true })))
 }
 
@@ -912,7 +973,7 @@ pub async fn update_settings(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let project_id = path.into_inner();
-    let (_, _, role) = auth_project(&req, &state, project_id).await?;
+    let (_, email, role) = auth_project(&req, &state, project_id).await?;
     if !role.can_manage() {
         return Err(ApiError::Forbidden(
             "admin role or above is required".into(),
@@ -948,5 +1009,13 @@ pub async fn update_settings(
         .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
     project.retention_days = body.retention_days;
     project.model = model;
+    crate::audit::record(
+        &mut store,
+        None,
+        Some(project_id),
+        &email,
+        "settings.updated",
+        None,
+    );
     Ok(HttpResponse::Ok().json(json!({ "ok": true })))
 }

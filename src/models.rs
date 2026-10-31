@@ -170,8 +170,11 @@ pub struct Event {
     pub project_id: Uuid,
     pub issue_id: Option<Uuid>,
     pub received_at: DateTime<Utc>,
-    /// The exact (decompressed) bytes received, kept immutable.
-    pub raw: Vec<u8>,
+    /// Write-once object key holding the exact (decompressed) bytes received.
+    /// Null once retention has removed the payload.
+    pub raw_object_key: Option<String>,
+    pub raw_size: u64,
+    pub raw_expired_at: Option<DateTime<Utc>>,
     pub event: Value,
     pub attachments: Vec<Attachment>,
 }
@@ -191,7 +194,7 @@ impl From<&Event> for EventMeta {
             id: e.id,
             sentry_event_id: e.sentry_event_id.clone(),
             received_at: e.received_at,
-            size: e.raw.len(),
+            size: e.raw_size as usize,
             attachment_count: e.attachments.len(),
         }
     }
@@ -207,4 +210,15 @@ pub struct LogLine {
     pub source: String,
     pub attributes: Value,
     pub received_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: Uuid,
+    pub org_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub actor: String,
+    pub action: String,
+    pub target: Option<String>,
+    pub at: DateTime<Utc>,
 }

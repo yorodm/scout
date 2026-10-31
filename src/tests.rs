@@ -13,9 +13,10 @@ use actix_web::http::StatusCode;
 use actix_web::test;
 use actix_web::{web, App, Error, HttpResponse, HttpServer};
 use serde_json::{json, Value};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
 // --- harness ---------------------------------------------------------------
@@ -46,8 +47,16 @@ async fn mock_model(body: web::Json<Value>) -> HttpResponse {
     HttpResponse::Ok().json(json!({ "choice": category, "confidence": 0.9 }))
 }
 
-async fn state_for(self_url: &str) -> web::Data<AppState> {
-    let store = Arc::new(RwLock::new(crate::store::seed(self_url)));
+async fn state_for(self_url: &str, max_in_flight: usize) -> web::Data<AppState> {
+    let objects = Arc::new(crate::objects::Objects::memory());
+    let (seeded, raws) = crate::store::seed(self_url);
+    for (key, data) in raws {
+        objects
+            .put_create(&key, data)
+            .await
+            .expect("seed raw payload");
+    }
+    let store = Arc::new(RwLock::new(seeded));
     let (jobs, rx) = mpsc::unbounded_channel::<Job>();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
@@ -58,6 +67,9 @@ async fn state_for(self_url: &str) -> web::Data<AppState> {
         store,
         jobs,
         self_url: self_url.to_string(),
+        ingest_gate: Arc::new(Semaphore::new(max_in_flight.max(1))),
+        objects,
+        storage_ready: Arc::new(AtomicBool::new(true)),
     })
 }
 
@@ -66,7 +78,12 @@ async fn state_for(self_url: &str) -> web::Data<AppState> {
 async fn init_app(
     self_url: &str,
 ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
-    let state = state_for(self_url).await;
+    init_app_with_state(state_for(self_url, 256).await).await
+}
+
+async fn init_app_with_state(
+    state: web::Data<AppState>,
+) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
     test::init_service(
         App::new()
             .app_data(state)
@@ -362,10 +379,11 @@ async fn thousand_identical_events_collapse_to_one_issue() {
 
 #[actix_web::test]
 async fn ingest_rejects_unknown_and_mismatched_keys() {
-    let app = init_app("http://127.0.0.1:1").await;
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
     let body = envelope(&[event(&hex_id(4), "key check", &["key-group"])]);
 
-    let (status, _) = call_json(
+    let (status, unknown) = call_json(
         &app,
         ingest_request(
             "1",
@@ -379,11 +397,33 @@ async fn ingest_rejects_unknown_and_mismatched_keys() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // The platform-api key must not be usable against scout-web.
-    let (status, _) = call_json(
+    let (status, wrong_project) = call_json(
         &app,
         ingest_request(
             "1",
             "scout_platform_key",
+            "application/x-sentry-envelope",
+            body.clone(),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A revoked key is rejected the same way, with no extra information.
+    state
+        .store
+        .write()
+        .await
+        .keys
+        .get_mut("scout_demo_key")
+        .expect("seeded demo key")
+        .revoked = true;
+    let (status, revoked) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
             "application/x-sentry-envelope",
             body,
             "envelope",
@@ -391,6 +431,13 @@ async fn ingest_rejects_unknown_and_mismatched_keys() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    assert_eq!(
+        unknown, wrong_project,
+        "key failures must not be distinguishable"
+    );
+    assert_eq!(unknown, revoked, "key failures must not be distinguishable");
+    assert_eq!(unknown["error"], "invalid or missing ingest key");
 }
 
 #[actix_web::test]
@@ -990,4 +1037,180 @@ async fn search_returns_issues_and_logs_together() {
         .unwrap()
         .iter()
         .any(|l| l["message"] == "searchable failure observed"));
+}
+
+// --- ingest limits, durability, backpressure -------------------------------
+
+#[actix_web::test]
+async fn oversized_envelope_is_rejected_before_anything_is_stored() {
+    use std::io::Write;
+
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let before = state.store.read().await.events.len();
+
+    // A gzip body that is small on the wire but expands past 10 MB must still
+    // be rejected: the limit applies to the decompressed payload.
+    let oversized = event(
+        &hex_id(90),
+        &"x".repeat(crate::ingest::MAX_INGEST_BYTES + 1),
+        &["oversized-group"],
+    );
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&envelope(&[oversized])).unwrap();
+    let compressed = encoder.finish().unwrap();
+    assert!(compressed.len() < crate::ingest::MAX_INGEST_BYTES);
+
+    let req = test::TestRequest::post()
+        .uri("/api/2/envelope")
+        .insert_header(("X-Scout-Key", "scout_platform_key"))
+        .insert_header(("Content-Encoding", "gzip"))
+        .insert_header(("Content-Type", "application/x-sentry-envelope"))
+        .set_payload(compressed)
+        .to_request();
+    let res = call(&app, req).await;
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = test::read_body(res).await;
+    assert!(!body.is_empty(), "413 responses should explain the limit");
+
+    assert_eq!(
+        state.store.read().await.events.len(),
+        before,
+        "a rejected request must not create an event"
+    );
+}
+
+#[actix_web::test]
+async fn unavailable_storage_returns_503_and_acknowledges_nothing() {
+    use std::sync::atomic::Ordering;
+
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let before = state.store.read().await.events.len();
+
+    state.storage_ready.store(false, Ordering::Relaxed);
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        envelope(&[event(&hex_id(91), "storage down", &["storage-group"])]),
+        "envelope",
+    );
+    let (status, body) = call_json(&app, req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(state.store.read().await.events.len(), before);
+
+    let (health, health_body) = call_json(
+        &app,
+        test::TestRequest::get().uri("/api/health").to_request(),
+    )
+    .await;
+    assert_eq!(health, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health_body["status"], "degraded");
+
+    state.storage_ready.store(true, Ordering::Relaxed);
+    let (health, _) = call_json(
+        &app,
+        test::TestRequest::get().uri("/api/health").to_request(),
+    )
+    .await;
+    assert_eq!(health, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn saturated_ingest_cap_returns_429_with_retry_after() {
+    let state = state_for("http://127.0.0.1:1", 1).await;
+    let app = init_app_with_state(state.clone()).await;
+
+    // Hold the only permit so the next request cannot acquire one.
+    let held = state
+        .ingest_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("acquire the sole ingest permit");
+
+    let body = envelope(&[event(&hex_id(92), "cap check", &["cap-group"])]);
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        body,
+        "envelope",
+    );
+    let res = call(&app, req).await;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(res.headers().get("retry-after").unwrap(), "1");
+
+    drop(held);
+
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        envelope(&[event(&hex_id(93), "cap check", &["cap-group"])]),
+        "envelope",
+    );
+    let (status, body) = call_json(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+}
+
+#[actix_web::test]
+async fn attachments_and_release_survive_grouping() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "platform-api").await;
+
+    let event_id = hex_id(94);
+    let payload = b"thread panicked at src/main.rs:42";
+    let mut raw = Vec::new();
+    raw.extend_from_slice(json!({ "event_id": event_id }).to_string().as_bytes());
+    raw.push(b'\n');
+    raw.extend_from_slice(br#"{"type":"event"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        event(&event_id, "attachment check", &["attach-group"])
+            .to_string()
+            .as_bytes(),
+    );
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        format!(
+            r#"{{"type":"attachment","length":{},"filename":"crash.log","content_type":"text/plain"}}"#,
+            payload.len()
+        )
+        .as_bytes(),
+    );
+    raw.push(b'\n');
+    raw.extend_from_slice(payload);
+    raw.push(b'\n');
+
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        raw,
+        "envelope",
+    );
+    let (status, body) = call_json(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let issue = wait_for_issue_count(
+        &app,
+        token,
+        project,
+        "IntegrationError: attachment check",
+        1,
+    )
+    .await;
+    assert_eq!(issue["release"], "integration@1.0.0");
+    assert_eq!(issue["breadcrumbs"].as_array().unwrap().len(), 1);
+
+    let issue_id = issue["id"].as_str().unwrap();
+    let (status, detail) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "detail: {detail}");
+    assert_eq!(detail["attachments"][0]["filename"], "crash.log");
+    assert_eq!(detail["attachments"][0]["size"], payload.len());
+    assert_eq!(detail["event"]["attachment_count"], 1);
 }

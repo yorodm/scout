@@ -5,11 +5,12 @@ use crate::store::event_hex_id;
 use crate::worker::Job;
 use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::{DateTime, TimeZone, Utc};
-use flate2::read::GzDecoder;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
-use std::io::Read;
 use uuid::Uuid;
+
+/// FR-007: one ingest request (and one attachment) may not exceed 10 MB.
+pub const MAX_INGEST_BYTES: usize = 10 * 1024 * 1024;
 
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.route("/api/{project}/envelope", web::post().to(ingest_envelope))
@@ -27,8 +28,10 @@ pub async fn ingest_envelope(
     body: web::Bytes,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
+    let _permit = acquire_ingest_permit(&state)?;
+    state.ensure_storage()?;
     let project = authenticate(&req, path.as_str(), &query, &state).await?;
-    let bytes = decode_body(&req, body)?;
+    let bytes = decode_body(body)?;
     let ParsedEnvelope {
         header,
         mut events,
@@ -47,8 +50,8 @@ pub async fn ingest_envelope(
         }
     }
 
-    let event_ids = persist_events(&state, &project, events, &attachments, bytes).await;
-    let log_count = persist_logs(&state, &project, logs).await;
+    let event_ids = persist_events(&state, &project, events, &attachments, bytes).await?;
+    let log_count = persist_logs(&state, &project, logs).await?;
 
     Ok(HttpResponse::Ok().json(json!({
         "id": event_ids.first(),
@@ -65,14 +68,16 @@ pub async fn ingest_store(
     body: web::Bytes,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
+    let _permit = acquire_ingest_permit(&state)?;
+    state.ensure_storage()?;
     let project = authenticate(&req, path.as_str(), &query, &state).await?;
-    let bytes = decode_body(&req, body)?;
+    let bytes = decode_body(body)?;
     let event: Value = serde_json::from_slice(&bytes)
         .map_err(|e| ApiError::BadRequest(format!("invalid event JSON: {e}")))?;
     if !event.is_object() {
         return Err(ApiError::BadRequest("event must be a JSON object".into()));
     }
-    let ids = persist_events(&state, &project, vec![event], &[], bytes).await;
+    let ids = persist_events(&state, &project, vec![event], &[], bytes).await?;
     Ok(HttpResponse::Ok().json(json!({ "id": ids.first() })))
 }
 
@@ -83,8 +88,10 @@ pub async fn ingest_logs(
     body: web::Bytes,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
+    let _permit = acquire_ingest_permit(&state)?;
+    state.ensure_storage()?;
     let project = authenticate(&req, path.as_str(), &query, &state).await?;
-    let bytes = decode_body(&req, body)?;
+    let bytes = decode_body(body)?;
     let value = parse_log_document(&bytes)?;
     let logs = match &value {
         Value::Array(items) => items.clone(),
@@ -96,8 +103,19 @@ pub async fn ingest_logs(
             .unwrap_or_else(|| vec![value.clone()]),
         _ => vec![value.clone()],
     };
-    let count = persist_logs(&state, &project, logs).await;
+    let count = persist_logs(&state, &project, logs).await?;
     Ok(HttpResponse::Ok().json(json!({ "accepted": count })))
+}
+
+fn acquire_ingest_permit(state: &AppState) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    state
+        .ingest_gate
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| ApiError::TooManyRequests {
+            message: "ingest concurrency limit reached; retry shortly".into(),
+            retry_after_secs: 1,
+        })
 }
 
 async fn authenticate(
@@ -106,23 +124,23 @@ async fn authenticate(
     query: &HashMap<String, String>,
     state: &AppState,
 ) -> Result<Project, ApiError> {
-    let key_str = extract_ingest_key(req, query)
-        .ok_or_else(|| ApiError::Unauthorized("missing ingest key".into()))?;
+    // Every key failure returns the same body, so a caller cannot learn whether
+    // a key exists, was revoked, or belongs to another project.
+    let key_str = extract_ingest_key(req, query).ok_or_else(invalid_key)?;
     let store = state.store.read().await;
     let project = store
         .project_by_identifier(project_ref)
         .cloned()
         .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
-    let key = store
-        .keys
-        .get(&key_str)
-        .ok_or_else(|| ApiError::Unauthorized("invalid ingest key".into()))?;
+    let key = store.keys.get(&key_str).ok_or_else(invalid_key)?;
     if key.revoked || key.project_id != project.id {
-        return Err(ApiError::Unauthorized(
-            "ingest key is not valid for this project".into(),
-        ));
+        return Err(invalid_key());
     }
     Ok(project)
+}
+
+fn invalid_key() -> ApiError {
+    ApiError::Unauthorized("invalid or missing ingest key".into())
 }
 
 fn extract_ingest_key(req: &HttpRequest, query: &HashMap<String, String>) -> Option<String> {
@@ -155,27 +173,21 @@ fn parse_sentry_auth(value: &str) -> HashMap<String, String> {
     out
 }
 
-fn decode_body(req: &HttpRequest, body: web::Bytes) -> Result<Vec<u8>, ApiError> {
-    let encoding = req
-        .headers()
-        .get("content-encoding")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if encoding.is_empty() || encoding == "identity" {
-        return Ok(body.to_vec());
+/// Actix's `Bytes` extractor already decompresses `Content-Encoding` bodies and
+/// enforces `PayloadConfig`. This guard keeps the 10 MB contract explicit for
+/// the handlers and covers any body that reaches them uncompressed.
+fn decode_body(body: web::Bytes) -> Result<Vec<u8>, ApiError> {
+    if body.len() > MAX_INGEST_BYTES {
+        return Err(too_large());
     }
-    if encoding.contains("gzip") {
-        let mut decoder = GzDecoder::new(&body[..]);
-        let mut out = Vec::new();
-        decoder
-            .read_to_end(&mut out)
-            .map_err(|e| ApiError::BadRequest(format!("invalid gzip body: {e}")))?;
-        return Ok(out);
-    }
-    Err(ApiError::BadRequest(format!(
-        "unsupported content-encoding: {encoding}"
-    )))
+    Ok(body.to_vec())
+}
+
+fn too_large() -> ApiError {
+    ApiError::PayloadTooLarge(format!(
+        "payload exceeds the {} byte ingest limit",
+        MAX_INGEST_BYTES
+    ))
 }
 
 async fn persist_events(
@@ -184,12 +196,19 @@ async fn persist_events(
     events: Vec<Value>,
     attachments: &[Attachment],
     raw: Vec<u8>,
-) -> Vec<String> {
+) -> Result<Vec<String>, ApiError> {
+    // Durability ordering (FR-005): write the immutable raw payload first, then
+    // insert the event + grouping job, and only then acknowledge.
+    state.ensure_storage()?;
+    let received_at = Utc::now();
+    let raw_size = raw.len() as u64;
+
+    // Resolve retried deliveries before writing anything, so a duplicate does
+    // not create a second object.
+    let mut pending: Vec<(Uuid, String, Value, String)> = Vec::new();
     let mut ids = Vec::new();
-    let mut jobs = Vec::new();
     {
-        let mut store = state.store.write().await;
-        let received_at = Utc::now();
+        let store = state.store.read().await;
         for event in events {
             let sentry_id = event
                 .get("event_id")
@@ -204,6 +223,38 @@ async fn persist_events(
                 continue;
             }
             let id = Uuid::new_v4();
+            let key = crate::objects::raw_key(project.id, id);
+            ids.push(sentry_id.clone());
+            pending.push((id, sentry_id, event, key));
+        }
+    }
+
+    let mut written: Vec<String> = Vec::new();
+    for (_, _, _, key) in &pending {
+        if let Err(error) = state.objects.put_create(key, raw.clone()).await {
+            for written_key in &written {
+                let _ = state.objects.delete(written_key).await;
+            }
+            return Err(error.into());
+        }
+        written.push(key.clone());
+    }
+
+    let mut jobs = Vec::new();
+    let mut orphans = Vec::new();
+    let expired;
+    {
+        let mut store = state.store.write().await;
+        for (id, sentry_id, event, key) in pending {
+            // A concurrent retry may have won the race; reuse its row and drop
+            // the object we just wrote rather than overwriting authoritative data.
+            if store
+                .seen_event_ids
+                .contains_key(&(project.id, sentry_id.clone()))
+            {
+                orphans.push(key);
+                continue;
+            }
             store.events.insert(
                 id,
                 Event {
@@ -212,7 +263,9 @@ async fn persist_events(
                     project_id: project.id,
                     issue_id: None,
                     received_at,
-                    raw: raw.clone(),
+                    raw_object_key: Some(key),
+                    raw_size,
+                    raw_expired_at: None,
                     event,
                     attachments: attachments.to_vec(),
                 },
@@ -224,30 +277,43 @@ async fn persist_events(
                 project_id: project.id,
                 event_id: id,
             });
-            ids.push(sentry_id);
         }
-        store.apply_retention(project);
+        expired = store.apply_retention(project);
+    }
+    for key in orphans.into_iter().chain(expired) {
+        let _ = state.objects.delete(&key).await;
     }
     for job in jobs {
         let _ = state.jobs.send(job);
     }
-    ids
+    Ok(ids)
 }
 
-async fn persist_logs(state: &AppState, project: &Project, logs: Vec<Value>) -> usize {
-    let mut store = state.store.write().await;
-    let received_at = Utc::now();
+async fn persist_logs(
+    state: &AppState,
+    project: &Project,
+    logs: Vec<Value>,
+) -> Result<usize, ApiError> {
+    state.ensure_storage()?;
     let mut count = 0;
-    for value in logs {
-        for item in log_values(&value) {
-            if let Some(line) = to_log_line(project.id, &item, received_at) {
-                store.logs.push(line);
-                count += 1;
+    let expired;
+    {
+        let mut store = state.store.write().await;
+        let received_at = Utc::now();
+        for value in logs {
+            for item in log_values(&value) {
+                if let Some(line) = to_log_line(project.id, &item, received_at) {
+                    store.logs.push(line);
+                    count += 1;
+                }
             }
         }
+        expired = store.apply_retention(project);
     }
-    store.apply_retention(project);
-    count
+    for key in expired {
+        let _ = state.objects.delete(&key).await;
+    }
+    Ok(count)
 }
 
 fn log_values(value: &Value) -> Vec<Value> {
@@ -546,6 +612,17 @@ mod tests {
             parse_sentry_auth("sentry_version=7, sentry_key=\"abc\", sentry_client=raven-js/3.0");
         assert_eq!(map.get("sentry_key").map(String::as_str), Some("abc"));
         assert_eq!(map.get("sentry_version").map(String::as_str), Some("7"));
+    }
+
+    #[test]
+    fn rejects_bodies_over_the_ingest_limit() {
+        let oversize = web::Bytes::from(vec![b'x'; MAX_INGEST_BYTES + 1]);
+        match decode_body(oversize) {
+            Err(ApiError::PayloadTooLarge(message)) => assert!(message.contains("10485760")),
+            other => panic!("expected a payload-too-large error, got {other:?}"),
+        }
+        let ok = web::Bytes::from_static(b"small");
+        assert_eq!(decode_body(ok).unwrap(), b"small");
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub struct Store {
     pub events: HashMap<Uuid, Event>,
     pub seen_event_ids: HashMap<(Uuid, String), Uuid>,
     pub logs: Vec<LogLine>,
+    pub audit: Vec<AuditEntry>,
 }
 
 impl Store {
@@ -57,8 +58,9 @@ impl Store {
 
     /// Remove raw events and log lines that exceed the project's retention
     /// window. Issues and their counters stay; their raw payload simply becomes
-    /// unavailable, which the UI reports.
-    pub fn apply_retention(&mut self, project: &Project) {
+    /// unavailable, which the UI reports. Returns the object keys that the
+    /// caller must delete from object storage.
+    pub fn apply_retention(&mut self, project: &Project) -> Vec<String> {
         let cutoff = Utc::now() - Duration::days(project.retention_days as i64);
         let expired: Vec<Uuid> = self
             .events
@@ -66,18 +68,26 @@ impl Store {
             .filter(|e| e.project_id == project.id && e.received_at < cutoff)
             .map(|e| e.id)
             .collect();
+        let mut keys = Vec::new();
         for id in expired {
             if let Some(event) = self.events.remove(&id) {
                 self.seen_event_ids
                     .remove(&(event.project_id, event.sentry_event_id));
+                if let Some(key) = event.raw_object_key {
+                    keys.push(key);
+                }
             }
         }
         self.logs
             .retain(|l| !(l.project_id == project.id && l.timestamp < cutoff));
+        keys
     }
 }
 
-pub fn seed(self_url: &str) -> Store {
+/// Build the demo store. Raw payloads are returned separately so the caller can
+/// write them to object storage (which is async) before serving requests.
+pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
+    let mut raws = Vec::new();
     let mut store = Store {
         orgs: HashMap::new(),
         projects: HashMap::new(),
@@ -92,6 +102,7 @@ pub fn seed(self_url: &str) -> Store {
         events: HashMap::new(),
         seen_event_ids: HashMap::new(),
         logs: Vec::new(),
+        audit: Vec::new(),
     };
 
     let org_id = Uuid::new_v4();
@@ -212,6 +223,7 @@ pub fn seed(self_url: &str) -> Store {
     );
     seed_issue(
         &mut store,
+        &mut raws,
         &web,
         checkout_event,
         1284,
@@ -257,6 +269,7 @@ pub fn seed(self_url: &str) -> Store {
     );
     seed_issue(
         &mut store,
+        &mut raws,
         &web,
         pool_event,
         37,
@@ -296,6 +309,7 @@ pub fn seed(self_url: &str) -> Store {
     );
     seed_issue(
         &mut store,
+        &mut raws,
         &web,
         webhook_event,
         12,
@@ -347,6 +361,7 @@ pub fn seed(self_url: &str) -> Store {
     );
     seed_issue(
         &mut store,
+        &mut raws,
         &platform,
         parse_event,
         5,
@@ -390,7 +405,7 @@ pub fn seed(self_url: &str) -> Store {
         log(platform_id, Duration::minutes(21), "warning", "upstream latency above threshold: p95=820ms", "platform-api", json!({"p95_ms":820,"threshold_ms":500})),
     ]);
 
-    store
+    (store, raws)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -431,6 +446,7 @@ fn event_json(
 #[allow(clippy::too_many_arguments)]
 fn seed_issue(
     store: &mut Store,
+    raw_objects: &mut Vec<(String, Vec<u8>)>,
     project: &Project,
     event: Value,
     count: u64,
@@ -450,6 +466,8 @@ fn seed_issue(
     let raw = serde_json::to_vec_pretty(&event).unwrap_or_default();
     let issue_id = Uuid::new_v4();
     let event_id = Uuid::new_v4();
+    let raw_object_key = crate::objects::raw_key(project.id, event_id);
+    raw_objects.push((raw_object_key.clone(), raw.clone()));
 
     let issue = Issue {
         id: issue_id,
@@ -488,7 +506,9 @@ fn seed_issue(
             project_id: project.id,
             issue_id: Some(issue_id),
             received_at: last_seen,
-            raw,
+            raw_object_key: Some(raw_object_key),
+            raw_size: raw.len() as u64,
+            raw_expired_at: None,
             event,
             attachments,
         },

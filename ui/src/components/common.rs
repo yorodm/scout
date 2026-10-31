@@ -31,6 +31,30 @@ pub fn empty_state(title: &str, body: &str, action: View) -> View {
     }
 }
 
+/// A failed request is a normal state: explain what failed and offer a retry
+/// action instead of leaving the view blank.
+#[allow(dead_code)] // consumed by the issue/log views as they gain request state
+pub fn error_state(title: &str, body: &str, action: View) -> View {
+    let title = title.to_string();
+    let body = body.to_string();
+    view! {
+        div(class="panel empty") {
+            strong { (title) }
+            span { (body) }
+            (action)
+        }
+    }
+}
+
+/// Placeholder rows shown while a list query is in flight.
+#[allow(dead_code)] // consumed by the issue/log views as they gain request state
+pub fn loading_rows(count: usize, height: &str) -> View {
+    let rows: Vec<View> = (0..count).map(|_| skeleton(height)).collect();
+    view! {
+        div(class="panel") { (rows) }
+    }
+}
+
 pub fn section_title(title: &str, right: View) -> View {
     let title = title.to_string();
     view! {

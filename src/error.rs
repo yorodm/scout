@@ -7,15 +7,24 @@ pub enum ApiError {
     Forbidden(String),
     NotFound(String),
     BadRequest(String),
+    PayloadTooLarge(String),
+    TooManyRequests {
+        message: String,
+        retry_after_secs: u64,
+    },
+    ServiceUnavailable(String),
 }
 
 impl fmt::Display for ApiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ApiError::Unauthorized(m)
-            | ApiError::Forbidden(m)
-            | ApiError::NotFound(m)
-            | ApiError::BadRequest(m) => write!(f, "{m}"),
+            ApiError::Unauthorized(message)
+            | ApiError::Forbidden(message)
+            | ApiError::NotFound(message)
+            | ApiError::BadRequest(message)
+            | ApiError::PayloadTooLarge(message)
+            | ApiError::ServiceUnavailable(message) => write!(f, "{message}"),
+            ApiError::TooManyRequests { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -27,11 +36,20 @@ impl ResponseError for ApiError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            ApiError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
+            ApiError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
     fn error_response(&self) -> HttpResponse {
-        HttpResponse::build(self.status_code())
-            .json(serde_json::json!({ "error": self.to_string() }))
+        let mut builder = HttpResponse::build(self.status_code());
+        if let ApiError::TooManyRequests {
+            retry_after_secs, ..
+        } = self
+        {
+            builder.insert_header(("Retry-After", retry_after_secs.to_string()));
+        }
+        builder.json(serde_json::json!({ "error": self.to_string() }))
     }
 }

@@ -27,15 +27,15 @@
 
 **Purpose**: Add the production dependencies and configuration surface the rest of the plan needs.
 
-- [ ] T001 Add `sqlx`, `object_store`, `argon2`, `openidconnect`, `rand`, and `base64` dependencies to `Cargo.toml`; keep the existing Actix/Sycamore versions.
-- [ ] T002 [P] Create `src/config.rs` with environment-backed settings and defaults: `DATABASE_URL`, `SCOUT_S3_*`, `SCOUT_RETENTION_DAYS` (30), `SCOUT_CONFIDENCE_THRESHOLD` (0.5), `SCOUT_INGEST_MAX_IN_FLIGHT` (256), `SCOUT_SESSION_TTL_DAYS` (7), `SCOUT_OPERATOR_EMAIL`, and `SCOUT_OPERATOR_PASSWORD`.
+- [X] T001 Add `sqlx`, `object_store`, `argon2`, `openidconnect`, `rand`, and `base64` dependencies to `Cargo.toml`; keep the existing Actix/Sycamore versions.
+- [X] T002 [P] Create `src/config.rs` with environment-backed settings and defaults: `DATABASE_URL`, `SCOUT_S3_*`, `SCOUT_RETENTION_DAYS` (30), `SCOUT_CONFIDENCE_THRESHOLD` (0.5), `SCOUT_INGEST_MAX_IN_FLIGHT` (256), `SCOUT_SESSION_TTL_DAYS` (7), `SCOUT_OPERATOR_EMAIL`, and `SCOUT_OPERATOR_PASSWORD`.
 - [ ] T003 [P] Create the `migrations/` directory and register `sqlx::migrate!("./migrations")` in `src/main.rs`.
-- [ ] T004 [P] Create `src/objects.rs` with an object-store abstraction (`put_create`, `get`, `delete`) over `object_store`.
-- [ ] T005 [P] Create `src/auth.rs` with Argon2id hashing, opaque token generation, and SHA-256 token hashing helpers.
-- [ ] T006 [P] Create `src/audit.rs` with an `audit(org_id, project_id, actor, action, target, metadata)` helper.
-- [ ] T007 Update `docker-compose.yml` to add PostgreSQL and MinIO services with health checks and wire `DATABASE_URL`, `SCOUT_S3_*`, and the operator bootstrap variables into the app.
-- [ ] T008 Update `Dockerfile` to build the Trunk UI and run the binary with migrations available in the image.
-- [ ] T009 [P] Add or extend loading, empty, and error primitives in `ui/src/components/common.rs`.
+- [X] T004 [P] Create `src/objects.rs` with an object-store abstraction (`put_create`, `get`, `delete`) over `object_store`.
+- [X] T005 [P] Create `src/auth.rs` with Argon2id hashing, opaque token generation, and SHA-256 token hashing helpers.
+- [X] T006 [P] Create `src/audit.rs` with an `audit(org_id, project_id, actor, action, target, metadata)` helper.
+- [X] T007 Update `docker-compose.yml` to add PostgreSQL and MinIO services with health checks and wire `DATABASE_URL`, `SCOUT_S3_*`, and the operator bootstrap variables into the app.
+- [X] T008 Update `Dockerfile` to build the Trunk UI and run the binary with migrations available in the image.
+- [X] T009 [P] Add or extend loading, empty, and error primitives in `ui/src/components/common.rs`.
 - [ ] T010 Run the baseline checks for `Cargo.toml` and `ui/Trunk.toml`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --all --check`, and `cd ui && trunk build --release`; record the current pass state.
 
 ---
@@ -46,12 +46,12 @@
 
 ### Migrations
 
-- [ ] T011 Create `migrations/0001_orgs_users.sql`: `organisations` (including `created_by`), `users` (including `is_operator` with a partial unique index), and `org_members` per data-model.md.
-- [ ] T012 [P] Create `migrations/0002_projects_members.sql`: `projects` (`retention_days` check `1..=3650`, `confidence_threshold` check `0..=1` default `0.5`) and `project_members`.
-- [ ] T013 [P] Create `migrations/0003_keys_sessions.sql`: `ingest_keys`, `sessions`, and `recovery_codes` with hashed-token uniqueness.
-- [ ] T014 [P] Create `migrations/0004_issues.sql`: `issues` (`state` `open|resolved|ignored`, unique `(project_id, fingerprint)`, `first_presented_at`) and `issue_state_changes`.
-- [ ] T015 [P] Create `migrations/0005_events_logs.sql`: `events` (unique `(project_id, sentry_event_id)`, `raw_object_key` nullable, `raw_expired_at`), `attachments`, and `log_lines`.
-- [ ] T016 [P] Create `migrations/0006_jobs_audit.sql`: `jobs` and `audit_log`, with the `(state, available_at)` job index.
+- [X] T011 Create `migrations/0001_orgs_users.sql`: `organisations` (including `created_by`), `users` (including `is_operator` with a partial unique index), and `org_members` per data-model.md.
+- [X] T012 [P] Create `migrations/0002_projects_members.sql`: `projects` (`retention_days` check `1..=3650`, `confidence_threshold` check `0..=1` default `0.5`) and `project_members`.
+- [X] T013 [P] Create `migrations/0003_keys_sessions.sql`: `ingest_keys`, `sessions`, and `recovery_codes` with hashed-token uniqueness.
+- [X] T014 [P] Create `migrations/0004_issues.sql`: `issues` (`state` `open|resolved|ignored`, unique `(project_id, fingerprint)`, `first_presented_at`) and `issue_state_changes`.
+- [X] T015 [P] Create `migrations/0005_events_logs.sql`: `events` (unique `(project_id, sentry_event_id)`, `raw_object_key` nullable, `raw_expired_at`), `attachments`, and `log_lines`.
+- [X] T016 [P] Create `migrations/0006_jobs_audit.sql`: `jobs` and `audit_log`, with the `(state, available_at)` job index.
 
 ### Store and adapters
 
@@ -63,10 +63,10 @@
 - [ ] T022 Implement Argon2id password verification, session issue/redeem/expiry, and `POST /api/login`, `POST /api/logout`, `GET /api/me` in `src/auth.rs` and `src/api.rs`.
 - [ ] T023 Implement idempotent deployment-operator seeding in `src/auth.rs` and `src/main.rs`: read `SCOUT_OPERATOR_EMAIL`/`SCOUT_OPERATOR_PASSWORD`, create only when no `users.is_operator` exists, hash with Argon2id, never reset an existing password on later starts, and fail startup with an actionable error naming the missing value when no operator exists and either bootstrap value is missing or blank.
 - [ ] T024 Implement `org_admin_setup` token issuance and redemption primitives in `src/auth.rs` and `src/store_postgres.rs`: SHA-256 hashed, single-use, 7-day expiry, and acceptance grants `org_admin`; for an existing account require a bearer session, accept no password in the request, and leave the password unchanged, while a new account sets its password.
-- [ ] T025 Implement `src/objects.rs` write-once object semantics and wire raw object retrieval through it.
+- [X] T025 Implement `src/objects.rs` write-once object semantics and wire raw object retrieval through it.
 - [ ] T026 Implement job insertion and `SELECT … FOR UPDATE SKIP LOCKED` claiming in `src/store_postgres.rs` and `src/worker.rs`.
-- [ ] T027 Add `PayloadTooLarge`, `TooManyRequests`, and `ServiceUnavailable` to `src/error.rs` with `413`, `429` + `Retry-After`, and `503` mappings.
-- [ ] T028 Implement the configurable global in-flight ingest cap in `src/ingest.rs` with a default of 256; return `429` with `Retry-After`.
+- [X] T027 Add `PayloadTooLarge`, `TooManyRequests`, and `ServiceUnavailable` to `src/error.rs` with `413`, `429` + `Retry-After`, and `503` mappings.
+- [X] T028 Implement the configurable global in-flight ingest cap in `src/ingest.rs` with a default of 256; return `429` with `Retry-After`.
 - [ ] T029 Run migrations at startup under a PostgreSQL advisory lock in `src/main.rs`.
 - [ ] T030 Extend `GET /api/health` in `src/api.rs` to report database and object-store reachability, returning `503` when either is down.
 - [ ] T031 Add structured tracing fields (request id, project id, event id, job id) in `src/main.rs` and the ingest/worker paths.
@@ -78,7 +78,7 @@
 - [ ] T034 Seed demo/triager/viewer accounts with known password hashes, project roles, and an operator fixture in `src/store_memory.rs`.
 - [ ] T035 Update `src/api.rs` authorisation helpers to resolve the session user, operator flag, and project role from the `Store` trait without holding locks across awaits.
 - [ ] T036 Update the harness in `src/tests.rs` to build the store via `src/store_memory.rs`, use a fake object store, and log in with email + password (including the operator).
-- [ ] T037 Add project/DSN resolution helpers (`dsn_id` and slug) to `src/store.rs` and use them in `src/ingest.rs`.
+- [X] T037 Add project/DSN resolution helpers (`dsn_id` and slug) to `src/store.rs` and use them in `src/ingest.rs`.
 - [ ] T038 Verify every migration and store method against `data-model.md` validation rules and constraints; fix drift before user stories begin.
 
 **Checkpoint**: Foundation ready — all six user stories can now be implemented in parallel.
@@ -94,31 +94,31 @@
 ### Implementation
 
 - [ ] T039 [P] [US1] Extend `Event`, `Attachment`, `Issue`, and `EventMeta` in `src/models.rs` with `raw_object_key`, `raw_size`, `raw_expired_at`, `attachment_count`, and issue counters.
-- [ ] T040 [P] [US1] Harden fingerprint derivation in `src/grouping.rs`: explicit fingerprint, exception-chain plus top five in-app frames, project salt, and normalised-message fallback.
-- [ ] T041 [US1] Harden envelope parsing in `src/ingest.rs`: newline-delimited and length-prefixed items, `event`/`attachment`/`log`, unknown-item counting, truncated-length rejection, and gzip decoding.
-- [ ] T042 [US1] Implement ingest authentication in `src/ingest.rs`: `X-Sentry-Auth`, `Authorization: Sentry …`, `?sentry_key=`, and `X-Scout-Key`; identical `401` for unknown, revoked, and cross-project keys.
+- [X] T040 [P] [US1] Harden fingerprint derivation in `src/grouping.rs`: explicit fingerprint, exception-chain plus top five in-app frames, project salt, and normalised-message fallback.
+- [X] T041 [US1] Harden envelope parsing in `src/ingest.rs`: newline-delimited and length-prefixed items, `event`/`attachment`/`log`, unknown-item counting, truncated-length rejection, and gzip decoding.
+- [X] T042 [US1] Implement ingest authentication in `src/ingest.rs`: `X-Sentry-Auth`, `Authorization: Sentry …`, `?sentry_key=`, and `X-Scout-Key`; identical `401` for unknown, revoked, and cross-project keys.
 - [ ] T043 [US1] Implement durability ordering in `src/ingest.rs`: write raw object(s), then insert event + grouping job in one transaction, then acknowledge; return `503` on failure.
-- [ ] T044 [US1] Implement per-project deduplication by `sentry_event_id` in `src/store_postgres.rs` and `src/ingest.rs`; return the existing id without a new job.
-- [ ] T045 [US1] Implement `POST /api/{project}/envelope/` (with and without trailing slash) in `src/ingest.rs` per `contracts/ingest.md`.
-- [ ] T046 [US1] Implement `POST /api/{project}/store/` in `src/ingest.rs`, storing the request body as the raw payload.
-- [ ] T047 [US1] Implement the grouping worker in `src/worker.rs`: claim job, derive fingerprint, upsert issue, increment count, update first/last-seen, link event, and never erase richer prior context.
-- [ ] T048 [US1] Implement `GET /api/issues/{issue_id}/raw` in `src/api.rs` with `Content-Type: application/octet-stream` and `X-Scout-Event-Id`.
-- [ ] T049 [US1] Enforce the 10 MB request and per-attachment limits in `src/ingest.rs`, returning `413` with nothing persisted.
-- [ ] T050 [US1] Verify `429` + `Retry-After` in `src/ingest.rs` when the global in-flight cap is saturated, and that no accepted event is lost.
-- [ ] T051 [US1] Keep route registration ordered in `src/main.rs` so `/api` and ingest routes are matched before the static-file catch-all.
+- [X] T044 [US1] Implement per-project deduplication by `sentry_event_id` in `src/store_postgres.rs` and `src/ingest.rs`; return the existing id without a new job.
+- [X] T045 [US1] Implement `POST /api/{project}/envelope/` (with and without trailing slash) in `src/ingest.rs` per `contracts/ingest.md`.
+- [X] T046 [US1] Implement `POST /api/{project}/store/` in `src/ingest.rs`, storing the request body as the raw payload.
+- [X] T047 [US1] Implement the grouping worker in `src/worker.rs`: claim job, derive fingerprint, upsert issue, increment count, update first/last-seen, link event, and never erase richer prior context.
+- [X] T048 [US1] Implement `GET /api/issues/{issue_id}/raw` in `src/api.rs` with `Content-Type: application/octet-stream` and `X-Scout-Event-Id`.
+- [X] T049 [US1] Enforce the 10 MB request and per-attachment limits in `src/ingest.rs`, returning `413` with nothing persisted.
+- [X] T050 [US1] Verify `429` + `Retry-After` in `src/ingest.rs` when the global in-flight cap is saturated, and that no accepted event is lost.
+- [X] T051 [US1] Keep route registration ordered in `src/main.rs` so `/api` and ingest routes are matched before the static-file catch-all.
 
 ### Tests for User Story 1
 
-- [ ] T052 [P] [US1] Add grouping unit tests in `src/grouping.rs` for fingerprint stability, explicit fingerprints, frame ordering, and message normalisation.
-- [ ] T053 [US1] Add the 3-event → one issue (count 3) integration test in `src/tests.rs`.
-- [ ] T054 [US1] Add the 1,000-event → one issue (count 1,000) integration test in `src/tests.rs`.
-- [ ] T055 [US1] Add the retried-event-id deduplication test in `src/tests.rs`.
-- [ ] T056 [US1] Add unknown-key, revoked-key, and cross-project-key tests in `src/tests.rs`.
-- [ ] T057 [US1] Add the byte-identical raw payload test (including the `X-Scout-Event-Id` header) in `src/tests.rs`.
-- [ ] T058 [US1] Add the 10 MB rejection test in `src/tests.rs`.
-- [ ] T059 [US1] Add the concurrency-cap `429` test in `src/tests.rs`.
-- [ ] T060 [US1] Add a storage-failure injection test in `src/tests.rs` asserting `503` and no acknowledged event.
-- [ ] T061 [US1] Add attachment/breadcrumb/release preservation assertions to `src/tests.rs`.
+- [X] T052 [P] [US1] Add grouping unit tests in `src/grouping.rs` for fingerprint stability, explicit fingerprints, frame ordering, and message normalisation.
+- [X] T053 [US1] Add the 3-event → one issue (count 3) integration test in `src/tests.rs`.
+- [X] T054 [US1] Add the 1,000-event → one issue (count 1,000) integration test in `src/tests.rs`.
+- [X] T055 [US1] Add the retried-event-id deduplication test in `src/tests.rs`.
+- [X] T056 [US1] Add unknown-key, revoked-key, and cross-project-key tests in `src/tests.rs`.
+- [X] T057 [US1] Add the byte-identical raw payload test (including the `X-Scout-Event-Id` header) in `src/tests.rs`.
+- [X] T058 [US1] Add the 10 MB rejection test in `src/tests.rs`.
+- [X] T059 [US1] Add the concurrency-cap `429` test in `src/tests.rs`.
+- [X] T060 [US1] Add a storage-failure injection test in `src/tests.rs` asserting `503` and no acknowledged event.
+- [X] T061 [US1] Add attachment/breadcrumb/release preservation assertions to `src/tests.rs`.
 
 ### Story 1 completion
 

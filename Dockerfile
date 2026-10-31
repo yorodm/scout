@@ -4,6 +4,7 @@ WORKDIR /src
 # Cache dependency compilation separately from the application sources.
 COPY Cargo.toml Cargo.lock ./
 COPY ui ./ui
+COPY migrations ./migrations
 RUN mkdir -p src && printf 'fn main() {}' > src/main.rs
 RUN cargo build --release --package scout
 
@@ -33,8 +34,10 @@ RUN apt-get update \
     && useradd --system --uid 10001 scout
 
 COPY --from=backend-build /src/target/release/scout /usr/local/bin/scout
+COPY --from=backend-build /src/migrations /app/migrations
 COPY --from=ui-build /src/ui/dist /app/ui/dist
 
+WORKDIR /app
 USER scout
 ENV PORT=8080 \
     RUST_LOG=info \

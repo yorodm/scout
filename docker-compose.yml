@@ -1,5 +1,8 @@
-# Prototype: one service with an in-memory store. The production shape adds
-# postgres and minio here; see architecture.md.
+# One deployment unit: the Scout binary, PostgreSQL for metadata, and
+# S3-compatible object storage for immutable raw payloads.
+#
+# Override the operator bootstrap values (and the object-store credentials) in a
+# .env file or your orchestrator's secret store before exposing this anywhere.
 services:
   scout:
     build: .
@@ -7,6 +10,79 @@ services:
       - "8080:8080"
     environment:
       PORT: "8080"
-      SCOUT_SELF_URL: "http://127.0.0.1:8080"
-      RUST_LOG: "info"
+      SCOUT_SELF_URL: ${SCOUT_SELF_URL:-http://127.0.0.1:8080}
+      RUST_LOG: ${RUST_LOG:-info}
+      DATABASE_URL: postgres://scout:scout@postgres:5432/scout
+      SCOUT_S3_ENDPOINT: http://minio:9000
+      SCOUT_S3_BUCKET: scout-raw
+      AWS_ACCESS_KEY_ID: ${SCOUT_S3_ACCESS_KEY:-scout}
+      AWS_SECRET_ACCESS_KEY: ${SCOUT_S3_SECRET_KEY:-scout-secret}
+      AWS_REGION: ${SCOUT_S3_REGION:-us-east-1}
+      SCOUT_OPERATOR_EMAIL: ${SCOUT_OPERATOR_EMAIL:-operator@scout.local}
+      SCOUT_OPERATOR_PASSWORD: ${SCOUT_OPERATOR_PASSWORD:-change-me-now}
+      SCOUT_RETENTION_DAYS: "30"
+      SCOUT_CONFIDENCE_THRESHOLD: "0.5"
+      SCOUT_INGEST_MAX_IN_FLIGHT: "256"
+      SCOUT_SESSION_TTL_DAYS: "7"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: scout
+      POSTGRES_PASSWORD: scout
+      POSTGRES_DB: scout
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scout -d scout"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${SCOUT_S3_ACCESS_KEY:-scout}
+      MINIO_ROOT_PASSWORD: ${SCOUT_S3_SECRET_KEY:-scout-secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Creates the raw-payload bucket once and exits; the app waits for it so the
+  # first ingest cannot race bucket creation.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing local/scout-raw &&
+        mc anonymous set none local/scout-raw
+    environment:
+      MINIO_ROOT_USER: ${SCOUT_S3_ACCESS_KEY:-scout}
+      MINIO_ROOT_PASSWORD: ${SCOUT_S3_SECRET_KEY:-scout-secret}
+    restart: "no"
+
+volumes:
+  postgres-data:
+  minio-data:
