@@ -23,6 +23,8 @@ pub struct AppState {
     /// this is false; the PostgreSQL adapter drives it from its pool health and
     /// the in-crate tests flip it to exercise the failure path.
     pub storage_ready: Arc<AtomicBool>,
+    /// Whether the Sentry-compatible `/api/0/` surface is enabled.
+    pub compat_enabled: bool,
 }
 
 impl AppState {

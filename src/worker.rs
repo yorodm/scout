@@ -193,6 +193,7 @@ async fn group(
             let issue = Issue {
                 id,
                 project_id,
+                number: store.next_issue_number(project_id),
                 fingerprint: derived.fingerprint.clone(),
                 title: derived.title.clone(),
                 culprit: derived.culprit.clone(),

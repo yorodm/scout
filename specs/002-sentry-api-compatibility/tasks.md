@@ -30,11 +30,11 @@ crate (constitution V).
 **Purpose**: Create the compatibility module tree, configuration switch, schema parity, and the two
 primitives every story needs (error envelope, cursor codec).
 
-- [ ] T001 Create `src/compat/{mod,auth,error,cursor,projection,query,handlers,tokens}.rs` with module declarations and declare `mod compat;` in `src/main.rs`
-- [ ] T002 [P] Add `sentry_compat_enabled` read from `SCOUT_SENTRY_API_COMPAT_ENABLED` (default `false`) via the existing `env_flag` helper in `src/config.rs`, and wire `AppState.compat_enabled` in `src/state.rs` and `src/main.rs`
-- [ ] T003 [P] Add the idempotent migration `migrations/0007_sentry_compat.sql` (organisations.slug, issues.number, api_tokens, unique indexes, backfills) exactly as specified in `data-model.md`
-- [ ] T004 [P] Implement `CompatError` with the `{"detail": "<message>"}` envelope and statuses `400|401|403|404|409|501` in `src/compat/error.rs`, with unit tests for every variant
-- [ ] T005 [P] Implement the opaque cursor codec in `src/compat/cursor.rs`: base64url-unpadded `{v,q,s,k,i}`, query fingerprint over normalised `(query, sort, ids, hashes, org, project)`, decode errors → `CompatError::BadRequest`, with unit tests for round-trip and mismatch
+- [X] T001 Create `src/compat/{mod,auth,error,cursor,projection,query,handlers,tokens}.rs` with module declarations and declare `mod compat;` in `src/main.rs`
+- [X] T002 [P] Add `sentry_compat_enabled` read from `SCOUT_SENTRY_API_COMPAT_ENABLED` (default `false`) via the existing `env_flag` helper in `src/config.rs`, and wire `AppState.compat_enabled` in `src/state.rs` and `src/main.rs`
+- [X] T003 [P] Add the idempotent migration `migrations/0007_sentry_compat.sql` (organisations.slug, issues.number, api_tokens, unique indexes, backfills) exactly as specified in `data-model.md`
+- [X] T004 [P] Implement `CompatError` with the `{"detail": "<message>"}` envelope and statuses `400|401|403|404|409|501` in `src/compat/error.rs`, with unit tests for every variant
+- [X] T005 [P] Implement the opaque cursor codec in `src/compat/cursor.rs`: base64url-unpadded `{v,q,s,k,i}`, query fingerprint over normalised `(query, sort, ids, hashes, org, project)`, decode errors → `CompatError::BadRequest`, with unit tests for round-trip and mismatch
 
 ---
 
@@ -45,16 +45,16 @@ primitives every story needs (error envelope, cursor codec).
 
 **⚠️ CRITICAL**: Complete this phase before any user story work.
 
-- [ ] T006 Add `ApiToken { id, user_id, label, token_hash, token_prefix, created_at, last_used_at, revoked_at }` to `src/models.rs`: `label` is required at 1–100 characters after trim; `token_hash` is the SHA-256 hex of the full plaintext (`scout_pat_…`), unique, and skipped from all serialisation; `token_prefix` is the first 14 characters; `revoked_at` is set once and revocation is terminal; there is no scope and no expiry field
-- [ ] T007 [P] Add `Organisation.slug` with `#[serde(default)]` and the slug derivation helper (lowercase, `[a-z0-9-]`, collapse runs, trim, ≤48 chars, `-2`/`-3` suffix on case-insensitive collision, empty name → `org`) in `src/models.rs`
-- [ ] T008 [P] Add `Issue.number: u64` to `src/models.rs` and assign it at both issue-creation sites (`src/store.rs` grouping path and `src/worker.rs` classifier path): assigned when the row is first created, immutable afterwards, unique within its project, backfilled in `first_seen` order, and `max(number) + 1` for new issues
-- [ ] T009 Add token storage to `src/store.rs`: `api_tokens` collection with a `token_hash` index; `create_token`, `token_by_hash` (returns `None` for revoked tokens), `tokens_for_user`, `tokens_for_org`, `revoke_token` (terminal); `last_used_at` is written at most once per hour; no expiry check is applied because tokens do not expire
-- [ ] T010 Backfill slugs and issue numbers in `src/store.rs` (`Store::empty` and `store::seed`) and derive the slug when an organisation is created in `src/api.rs` (`create_org`)
-- [ ] T011 Implement bearer authentication in `src/compat/auth.rs`: parse `Authorization: Bearer scout_pat_…`, SHA-256 via `auth::hash_token`, identical `401 {"detail":"Invalid token"}` for missing/malformed/unknown/revoked, disabled users rejected
-- [ ] T012 Add project/org resolution in `src/compat/auth.rs`: org by slug or UUID, project by slug, UUID, or `dsn_id`, soft-deleted or unknown → `404`, no role or cross-project → `404`
-- [ ] T013 Add `Scope` (event:read|write|admin, project:read|write|admin|releases, org:read|admin|integrations) and the live `Role`/`OrgRole` mapping table from `data-model.md` in `src/compat/auth.rs`, plus a `require(scope)` helper returning `403`, with unit tests for each role
-- [ ] T014 Register the `web::scope("/api/0")` and the disabled-gate middleware (disabled → `404 {"detail":"Not Found"}` before auth) in `src/compat/mod.rs` and `.configure(crate::compat::config)` in `src/main.rs`
-- [ ] T015 [P] Add an in-crate helper that issues a token and returns `(plaintext, ApiToken)` for tests in `src/tests.rs`, reusing `auth::new_token`/`auth::hash_token`
+- [X] T006 Add `ApiToken { id, user_id, label, token_hash, token_prefix, created_at, last_used_at, revoked_at }` to `src/models.rs`: `label` is required at 1–100 characters after trim; `token_hash` is the SHA-256 hex of the full plaintext (`scout_pat_…`), unique, and skipped from all serialisation; `token_prefix` is the first 14 characters; `revoked_at` is set once and revocation is terminal; there is no scope and no expiry field
+- [X] T007 [P] Add `Organisation.slug` with `#[serde(default)]` and the slug derivation helper (lowercase, `[a-z0-9-]`, collapse runs, trim, ≤48 chars, `-2`/`-3` suffix on case-insensitive collision, empty name → `org`) in `src/models.rs`
+- [X] T008 [P] Add `Issue.number: u64` to `src/models.rs` and assign it at both issue-creation sites (`src/store.rs` grouping path and `src/worker.rs` classifier path): assigned when the row is first created, immutable afterwards, unique within its project, backfilled in `first_seen` order, and `max(number) + 1` for new issues
+- [X] T009 Add token storage to `src/store.rs`: `api_tokens` collection with a `token_hash` index; `create_token`, `token_by_hash` (returns `None` for revoked tokens), `tokens_for_user`, `tokens_for_org`, `revoke_token` (terminal); `last_used_at` is written at most once per hour; no expiry check is applied because tokens do not expire
+- [X] T010 Backfill slugs and issue numbers in `src/store.rs` (`Store::empty` and `store::seed`) and derive the slug when an organisation is created in `src/api.rs` (`create_org`)
+- [X] T011 Implement bearer authentication in `src/compat/auth.rs`: parse `Authorization: Bearer scout_pat_…`, SHA-256 via `auth::hash_token`, identical `401 {"detail":"Invalid token"}` for missing/malformed/unknown/revoked, disabled users rejected
+- [X] T012 Add project/org resolution in `src/compat/auth.rs`: org by slug or UUID, project by slug, UUID, or `dsn_id`, soft-deleted or unknown → `404`, no role or cross-project → `404`
+- [X] T013 Add `Scope` (event:read|write|admin, project:read|write|admin|releases, org:read|admin|integrations) and the live `Role`/`OrgRole` mapping table from `data-model.md` in `src/compat/auth.rs`, plus a `require(scope)` helper returning `403`, with unit tests for each role
+- [X] T014 Register the `web::scope("/api/0")` and the disabled-gate middleware (disabled → `404 {"detail":"Not Found"}` before auth) in `src/compat/mod.rs` and `.configure(crate::compat::config)` in `src/main.rs`
+- [X] T015 [P] Add an in-crate helper that issues a token and returns `(plaintext, ApiToken)` for tests in `src/tests.rs`, reusing `auth::new_token`/`auth::hash_token`
 
 **Checkpoint**: Foundation ready — the four story phases can proceed.
 
@@ -71,19 +71,19 @@ state and history appear in the native API/UI.
 
 ### Tests for User Story 1 ⚠️ (write first, expect failure)
 
-- [ ] T016 [P] [US1] Contract test for `GET /api/0/projects/{org}/{project}/issues/`: field set, `statusDetails`, `userCount`, `annotations`, `permalink`, `Link` and `X-Hits` headers in `src/tests.rs`
-- [ ] T017 [P] [US1] Contract test for `PUT .../issues/`: multi-id update, cross-project ids skipped, state history names the token owner, missing `status` → `400`, `assignedTo` → `400`, unknown status → `400`, `DELETE` → `501` in `src/tests.rs`
-- [ ] T018 [P] [US1] Pagination test: 1,000 issues traversed exactly once, `limit` clamps (0, negative, 101, non-numeric → 100/≤100), cursor replay against a different query → `400`, exhausted cursor → `[]` with `results="false"` in `src/tests.rs`
-- [ ] T019 [P] [US1] Projection unit tests for status mapping in both directions, `shortId`, RFC 3339 `Z` timestamps, `metadata`/`tags`, and ignored `ignoreCount` in `src/compat/projection.rs`
+- [X] T016 [P] [US1] Contract test for `GET /api/0/projects/{org}/{project}/issues/`: field set, `statusDetails`, `userCount`, `annotations`, `permalink`, `Link` and `X-Hits` headers in `src/tests.rs`
+- [X] T017 [P] [US1] Contract test for `PUT .../issues/`: multi-id update, cross-project ids skipped, state history names the token owner, missing `status` → `400`, `assignedTo` → `400`, unknown status → `400`, `DELETE` → `501` in `src/tests.rs`
+- [X] T018 [P] [US1] Pagination test: 1,000 issues traversed exactly once, `limit` clamps (0, negative, 101, non-numeric → 100/≤100), cursor replay against a different query → `400`, exhausted cursor → `[]` with `results="false"` in `src/tests.rs`
+- [X] T019 [P] [US1] Projection unit tests for status mapping in both directions, `shortId`, RFC 3339 `Z` timestamps, `metadata`/`tags`, and ignored `ignoreCount` in `src/compat/projection.rs`
 
 ### Implementation for User Story 1
 
-- [ ] T020 [US1] Implement the `SentryIssue` projection in `src/compat/projection.rs`: `id` as a string; `shortId = {PROJECT}-{number}`; `statusDetails` always `{}` (plus `ignoreCount` when ignored); `count` a JSON number; `userCount` `0`; `annotations` `[]`; `metadata = {title, value: culprit or ""}`; `permalink = {self_url}/#/issues/{id}`; `firstSeen`/`lastSeen` as RFC 3339 UTC with `Z`; `project = {id, name, slug, platform: null}`; `tags` from the stored tag object with empty values omitted
-- [ ] T021 [US1] Implement the search tokenizer and filters (`is:`, `level:`, `release:`, `environment:`, tag keys, free text over title/culprit/fingerprint, unsupported operators ignored) and the sort map in `src/compat/query.rs`, with unit tests
-- [ ] T022 [US1] Implement the issue list handler (absent/empty `query` defaults to `is:unresolved`; query, sort, `limit`, `cursor`, repeated `id`, `hashes` on `fingerprint`, ignore `statsPeriod`/`shortIdLookup`) with `Link`/`X-Hits` emission in `src/compat/handlers.rs`
-- [ ] T023 [US1] Implement the status mutation handler in `src/compat/handlers.rs`: per-issue state change with one history entry each naming the token owner's email; ids outside the project skipped silently; no `id` means every issue matching the current query; `status` absent → `400` naming the missing field; unknown status value → `400`; unsupported attributes → `400` naming the field
-- [ ] T024 [US1] Implement `DELETE .../issues/` → `501` citing preserved history and raw payloads in `src/compat/handlers.rs`
-- [ ] T025 [US1] Register the three issues routes (with and without trailing slash) in `src/compat/mod.rs`
+- [X] T020 [US1] Implement the `SentryIssue` projection in `src/compat/projection.rs`: `id` as a string; `shortId = {PROJECT}-{number}`; `statusDetails` always `{}` (plus `ignoreCount` when ignored); `count` a JSON number; `userCount` `0`; `annotations` `[]`; `metadata = {title, value: culprit or ""}`; `permalink = {self_url}/#/issues/{id}`; `firstSeen`/`lastSeen` as RFC 3339 UTC with `Z`; `project = {id, name, slug, platform: null}`; `tags` from the stored tag object with empty values omitted
+- [X] T021 [US1] Implement the search tokenizer and filters (`is:`, `level:`, `release:`, `environment:`, tag keys, free text over title/culprit/fingerprint, unsupported operators ignored) and the sort map in `src/compat/query.rs`, with unit tests
+- [X] T022 [US1] Implement the issue list handler (absent/empty `query` defaults to `is:unresolved`; query, sort, `limit`, `cursor`, repeated `id`, `hashes` on `fingerprint`, ignore `statsPeriod`/`shortIdLookup`) with `Link`/`X-Hits` emission in `src/compat/handlers.rs`
+- [X] T023 [US1] Implement the status mutation handler in `src/compat/handlers.rs`: per-issue state change with one history entry each naming the token owner's email; ids outside the project skipped silently; no `id` means every issue matching the current query; `status` absent → `400` naming the missing field; unknown status value → `400`; unsupported attributes → `400` naming the field
+- [X] T024 [US1] Implement `DELETE .../issues/` → `501` citing preserved history and raw payloads in `src/compat/handlers.rs`
+- [X] T025 [US1] Register the three issues routes (with and without trailing slash) in `src/compat/mod.rs`
 
 **Checkpoint**: US1 works standalone; this is the MVP.
 
@@ -99,13 +99,13 @@ paths, verify distinctness, ordering, `query` filtering, pagination cap, and `[]
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T026 [P] [US2] Tag-value contract tests: distinct ascending values, contains filter, empty/object values omitted, non-string scalars stringified, 1,000 cap, missing key → `[]`, issue-scoped path, inaccessible issue → `404` in `src/tests.rs`
+- [X] T026 [P] [US2] Tag-value contract tests: distinct ascending values, contains filter, empty/object values omitted, non-string scalars stringified, 1,000 cap, missing key → `[]`, issue-scoped path, inaccessible issue → `404` in `src/tests.rs`
 
 ### Implementation for User Story 2
 
-- [ ] T027 [US2] Implement tag extraction from `Issue.tags` in `src/compat/projection.rs`: non-string scalars are stringified (`true`, `42`); objects, arrays, null, and empty strings are skipped; values are de-duplicated, sorted ascending, and capped at 1,000
-- [ ] T028 [US2] Implement the project tag-values and issue tag-values handlers, including `query` filtering and cursor/limit handling, in `src/compat/handlers.rs`
-- [ ] T029 [US2] Register the tag-value routes in `src/compat/mod.rs`
+- [X] T027 [US2] Implement tag extraction from `Issue.tags` in `src/compat/projection.rs`: non-string scalars are stringified (`true`, `42`); objects, arrays, null, and empty strings are skipped; values are de-duplicated, sorted ascending, and capped at 1,000
+- [X] T028 [US2] Implement the project tag-values and issue tag-values handlers, including `query` filtering and cursor/limit handling, in `src/compat/handlers.rs`
+- [X] T029 [US2] Register the tag-value routes in `src/compat/mod.rs`
 
 **Checkpoint**: US1 and US2 both work independently.
 
@@ -122,15 +122,15 @@ revoke and get `401`; remove the owner from the project and get `404`; manage th
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T030 [P] [US3] Native token tests: create returns plaintext once (prefix `scout_pat_`), list omits hash/plaintext, revoke is immediate and idempotent, another user's token → `404`, audit rows written in `src/tests.rs`
-- [ ] T031 [P] [US3] Scope matrix tests: viewer read success + mutation `403`, triager mutation success, admin/owner full set, org member `org:read`, non-member `404`, live role removal between requests, org admin can list/revoke member tokens, plain member `403` in `src/tests.rs`
+- [X] T030 [P] [US3] Native token tests: create returns plaintext once (prefix `scout_pat_`), list omits hash/plaintext, revoke is immediate and idempotent, another user's token → `404`, audit rows written in `src/tests.rs`
+- [X] T031 [P] [US3] Scope matrix tests: viewer read success + mutation `403`, triager mutation success, admin/owner full set, org member `org:read`, non-member `404`, live role removal between requests, org admin can list/revoke member tokens, plain member `403` in `src/tests.rs`
 
 ### Implementation for User Story 3
 
-- [ ] T032 [US3] Implement native token endpoints `GET/POST /api/me/tokens` and `DELETE /api/me/tokens/{id}` in `src/compat/tokens.rs`: label validation 1–100 characters after trim (`400` otherwise); plaintext returned only by create; list metadata excludes `token_hash` and the plaintext; revoke is idempotent `204`; audit rows `token.create`/`token.revoke` record the token id and label but never the secret
-- [ ] T033 [US3] Implement org-admin endpoints `GET /api/orgs/{org_id}/tokens` and `DELETE /api/orgs/{org_id}/tokens/{token_id}` (metadata only, member scope, `403` for non-admins) in `src/compat/tokens.rs` and register all token routes in `src/api.rs`
-- [ ] T034 [US3] Build the API-token screen component (list, create form, one-time copy panel, revoke confirmation, empty/error states, keyboard accessible) in `ui/src/components/tokens.rs`
-- [ ] T035 [US3] Add token API client calls and screen state/actions in `ui/src/api.rs` and `ui/src/state.rs`, export the module in `ui/src/components/mod.rs`, and add the `#/tokens` navigation entry in `ui/src/components/app.rs`
+- [X] T032 [US3] Implement native token endpoints `GET/POST /api/me/tokens` and `DELETE /api/me/tokens/{id}` in `src/compat/tokens.rs`: label validation 1–100 characters after trim (`400` otherwise); plaintext returned only by create; list metadata excludes `token_hash` and the plaintext; revoke is idempotent `204`; audit rows `token.create`/`token.revoke` record the token id and label but never the secret
+- [X] T033 [US3] Implement org-admin endpoints `GET /api/orgs/{org_id}/tokens` and `DELETE /api/orgs/{org_id}/tokens/{token_id}` (metadata only, member scope, `403` for non-admins) in `src/compat/tokens.rs` and register all token routes in `src/api.rs`
+- [X] T034 [US3] Build the API-token screen component (list, create form, one-time copy panel, revoke confirmation, empty/error states, keyboard accessible) in `ui/src/components/tokens.rs`
+- [X] T035 [US3] Add token API client calls and screen state/actions in `ui/src/api.rs` and `ui/src/state.rs`, export the module in `ui/src/components/mod.rs`, and add the `#/tokens` navigation entry in `ui/src/components/app.rs`
 
 **Checkpoint**: US1–US3 work; token lifecycle is fully usable from the UI.
 
@@ -146,13 +146,13 @@ matrix in `contracts/sentry-compat-api.md`, and that Scout data is unchanged.
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T036 [P] [US4] Unsupported-surface tests: release commit files `[]`/`404`, service hooks `[]`/`404`, feedback `[]`, app installations `[]`, spike protection `404`, every mutation `501` with a naming `detail`, no data mutation, all errors use the `detail` envelope in `src/tests.rs`
+- [X] T036 [P] [US4] Unsupported-surface tests: release commit files `[]`/`404`, service hooks `[]`/`404`, feedback `[]`, app installations `[]`, spike protection `404`, every mutation `501` with a naming `detail`, no data mutation, all errors use the `detail` envelope in `src/tests.rs`
 
 ### Implementation for User Story 4
 
-- [ ] T037 [US4] Implement the release commit-files handler (known release → `[]`, unknown → `404`) in `src/compat/handlers.rs`
-- [ ] T038 [US4] Implement the service-hook, feedback, spike-protection, app-installation, and external-issue handlers using a single documented exception table in `src/compat/handlers.rs`
-- [ ] T039 [US4] Register the US4 routes (with trailing-slash variants) in `src/compat/mod.rs`
+- [X] T037 [US4] Implement the release commit-files handler (known release → `[]`, unknown → `404`) in `src/compat/handlers.rs`
+- [X] T038 [US4] Implement the service-hook, feedback, spike-protection, app-installation, and external-issue handlers using a single documented exception table in `src/compat/handlers.rs`
+- [X] T039 [US4] Register the US4 routes (with trailing-slash variants) in `src/compat/mod.rs`
 
 **Checkpoint**: All 11 documented paths now answer per contract.
 
@@ -162,15 +162,15 @@ matrix in `contracts/sentry-compat-api.md`, and that Scout data is unchanged.
 
 **Purpose**: Documentation, regression proof, performance evidence, and quality gates.
 
-- [ ] T040 [P] Document `SCOUT_SENTRY_API_COMPAT_ENABLED`, the `/api/0` support matrix, and the token screen in `README.md` and `architecture.md`
-- [ ] T041 [P] Benchmark SC-007 with an ignored-by-default release-mode test (`#[ignore]`, `cargo test --release -- --ignored`) for 1,000-issue list and tag-value requests at p95 ≤500 ms including `X-Hits`, record the measured number in `quickstart.md`, and keep no wall-clock assertions in the normal debug suite (`src/tests.rs`)
-- [ ] T042 [P] Regression test SC-008 in `src/tests.rs`: existing native endpoints and payloads unchanged, the token screen is the only new UI route, and the ingest smoke path (envelope accept + issue visibility) still passes with `SCOUT_SENTRY_API_COMPAT_ENABLED` both off and on
-- [ ] T043 Verify the disabled toggle across every path (`404 {"detail":"Not Found"}` before auth) and confirm no `/api/0/` response is HTML in `src/tests.rs`
-- [ ] T044 Run `quickstart.md` end-to-end, including SC-006 (change visible within 1 s) and SC-009 (create/copy/revoke under a minute)
-- [ ] T045 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, UI `cargo check --target wasm32-unknown-unknown`, and `trunk build --release` from the repository root
-- [ ] T046 Remove scaffolding `#[allow(dead_code)]`, stray TODOs, and unused helpers introduced during setup in `src/compat/`, `src/models.rs`, and `src/store.rs`, then re-run clippy
+- [X] T040 [P] Document `SCOUT_SENTRY_API_COMPAT_ENABLED`, the `/api/0` support matrix, and the token screen in `README.md` and `architecture.md`
+- [X] T041 [P] Benchmark SC-007 with an ignored-by-default release-mode test (`#[ignore]`, `cargo test --release -- --ignored`) for 1,000-issue list and tag-value requests at p95 ≤500 ms including `X-Hits`, record the measured number in `quickstart.md`, and keep no wall-clock assertions in the normal debug suite (`src/tests.rs`)
+- [X] T042 [P] Regression test SC-008 in `src/tests.rs`: existing native endpoints and payloads unchanged, the token screen is the only new UI route, and the ingest smoke path (envelope accept + issue visibility) still passes with `SCOUT_SENTRY_API_COMPAT_ENABLED` both off and on
+- [X] T043 Verify the disabled toggle across every path (`404 {"detail":"Not Found"}` before auth) and confirm no `/api/0/` response is HTML in `src/tests.rs`
+- [X] T044 Run `quickstart.md` end-to-end, including SC-006 (change visible within 1 s) and SC-009 (create/copy/revoke under a minute)
+- [X] T045 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, UI `cargo check --target wasm32-unknown-unknown`, and `trunk build --release` from the repository root
+- [X] T046 Remove scaffolding `#[allow(dead_code)]`, stray TODOs, and unused helpers introduced during setup in `src/compat/`, `src/models.rs`, and `src/store.rs`, then re-run clippy
 - [ ] T047 Apply `migrations/0007_sentry_compat.sql` against the compose PostgreSQL instance, then re-run it to prove idempotency, verify `organisations.slug` uniqueness and `issues.number` per-project uniqueness on seeded duplicates, and roll it back cleanly (`migrations/0007_sentry_compat.sql`, `docker-compose.yml`)
-- [ ] T048 Add a table-driven test enumerating all 11 documented paths (enabled mode) asserting the documented status, a JSON body, and no `5xx` or HTML for each (`src/tests.rs`), closing SC-002
+- [X] T048 Add a table-driven test enumerating all 11 documented paths (enabled mode) asserting the documented status, a JSON body, and no `5xx` or HTML for each (`src/tests.rs`), closing SC-002
 
 ---
 

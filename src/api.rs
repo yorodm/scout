@@ -103,6 +103,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             "/api/issues/{issue_id}/categorisation",
             web::post().to(categorise),
         );
+    crate::compat::tokens::config(cfg);
 }
 
 // --- authentication helpers ------------------------------------------------
@@ -115,7 +116,10 @@ fn bearer(req: &HttpRequest) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn auth_user(req: &HttpRequest, state: &AppState) -> Result<(Uuid, String), ApiError> {
+pub(crate) async fn auth_user(
+    req: &HttpRequest,
+    state: &AppState,
+) -> Result<(Uuid, String), ApiError> {
     let token =
         bearer(req).ok_or_else(|| ApiError::Unauthorized("missing session token".into()))?;
     let store = state.store.read().await;
@@ -574,9 +578,11 @@ pub async fn create_org(
     }
     let mut store = state.store.write().await;
     let org_id = Uuid::new_v4();
+    let slug = store.unique_org_slug(name);
     let organisation = Organisation {
         id: org_id,
         name: name.to_string(),
+        slug,
         sso_provider: None,
         created_by: Some(operator_id),
         created_at: Utc::now(),

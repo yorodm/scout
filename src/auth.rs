@@ -245,6 +245,7 @@ mod tests {
             s3_endpoint: None,
             s3_bucket: None,
             demo_mode: false,
+            sentry_compat_enabled: false,
         }
     }
 

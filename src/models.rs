@@ -7,12 +7,45 @@ use uuid::Uuid;
 pub struct Organisation {
     pub id: Uuid,
     pub name: String,
+    /// Stable, URL-safe identifier used by the Sentry-compatible paths. Derived
+    /// from the name at creation and never recomputed afterwards.
+    #[serde(default)]
+    pub slug: String,
     pub sso_provider: Option<String>,
     /// The deployment operator that created the organisation.
     #[serde(default)]
     pub created_by: Option<Uuid>,
     #[serde(default)]
     pub created_at: DateTime<Utc>,
+}
+
+/// Derive the stable URL slug for an organisation name: lowercase ASCII
+/// alphanumerics joined by single hyphens, trimmed and capped at 48 characters.
+pub fn slugify(name: &str) -> String {
+    let mut out = String::new();
+    let mut pending_dash = false;
+    for ch in name.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !out.is_empty() {
+                out.push('-');
+            }
+            pending_dash = false;
+            out.push(ch);
+        } else {
+            pending_dash = true;
+        }
+    }
+    if out.len() > 48 {
+        out.truncate(48);
+        while out.ends_with('-') {
+            out.pop();
+        }
+    }
+    if out.is_empty() {
+        "org".to_string()
+    } else {
+        out
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,6 +194,29 @@ pub struct Session {
     pub expires_at: DateTime<Utc>,
 }
 
+/// A long-lived API token for the Sentry-compatible surface. Only the SHA-256 of
+/// the plaintext is stored; permissions come from the owner's live roles.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ApiToken {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub label: String,
+    #[serde(default, skip_serializing)]
+    pub token_hash: String,
+    pub token_prefix: String,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_used_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+impl ApiToken {
+    pub fn is_active(&self) -> bool {
+        self.revoked_at.is_none()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
@@ -251,6 +307,10 @@ pub struct StateChange {
 pub struct Issue {
     pub id: Uuid,
     pub project_id: Uuid,
+    /// Per-project monotonic sequence assigned at creation. Immutable and unique
+    /// within the project; used for `shortId`.
+    #[serde(default)]
+    pub number: u64,
     pub fingerprint: String,
     pub title: String,
     pub culprit: Option<String>,

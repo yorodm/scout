@@ -13,6 +13,7 @@ pub enum ViewKind {
     Search,
     Members,
     Settings,
+    Tokens,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -69,6 +70,9 @@ pub struct AppState {
     pub issue: Option<api::IssueDetailResponse>,
     pub members: Vec<Member>,
     pub settings: Option<api::SettingsResponse>,
+    pub tokens: Vec<api::ApiToken>,
+    /// The plaintext of a token created in this browser session; never persisted.
+    pub new_token: Option<api::CreatedApiToken>,
     pub filters: Filters,
     pub log_filters: LogFilters,
     pub search_query: String,
@@ -94,6 +98,8 @@ impl Default for AppState {
             issue: None,
             members: Vec::new(),
             settings: None,
+            tokens: Vec::new(),
+            new_token: None,
             filters: Filters::default(),
             log_filters: LogFilters::default(),
             search_query: String::new(),
@@ -357,6 +363,53 @@ pub async fn load_settings(store: Signal<AppState>) {
     }
 }
 
+// ------------------------------------------------------------------ api tokens
+
+pub async fn load_tokens(store: Signal<AppState>) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::api_tokens(&token).await {
+        Ok(tokens) => store.update(|state| state.tokens = tokens),
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn create_token(store: Signal<AppState>, label: String) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::create_api_token(&token, &label).await {
+        Ok(created) => {
+            store.update(|state| state.new_token = Some(created));
+            toast(
+                store,
+                "Token created — copy it now, it is shown once",
+                "success",
+            );
+            load_tokens(store).await;
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn revoke_token(store: Signal<AppState>, id: String) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::revoke_api_token(&token, &id).await {
+        Ok(()) => {
+            toast(store, "Token revoked", "success");
+            load_tokens(store).await;
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub fn dismiss_new_token(store: Signal<AppState>) {
+    store.update(|state| state.new_token = None);
+}
+
 pub async fn search(store: Signal<AppState>, query: String) {
     let Some(token) = store.with(|state| state.token.clone()) else {
         return;
@@ -395,6 +448,7 @@ pub async fn sync_from_hash(store: Signal<AppState>) {
         ["search", ..] => (ViewKind::Search, None),
         ["members", ..] => (ViewKind::Members, None),
         ["settings", ..] => (ViewKind::Settings, None),
+        ["tokens", ..] => (ViewKind::Tokens, None),
         _ => (ViewKind::Issues, None),
     };
 
@@ -420,6 +474,7 @@ pub async fn sync_from_hash(store: Signal<AppState>) {
         }
         ViewKind::Members => load_members(store).await,
         ViewKind::Settings => load_settings(store).await,
+        ViewKind::Tokens => load_tokens(store).await,
     }
 }
 

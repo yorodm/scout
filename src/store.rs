@@ -41,6 +41,10 @@ pub struct Store {
     pub invitations: HashMap<Uuid, Invitation>,
     pub invitations_by_token: HashMap<String, Uuid>,
     pub recovery_codes: Vec<RecoveryCode>,
+    /// Long-lived API tokens for the Sentry-compatible surface.
+    pub api_tokens: HashMap<Uuid, ApiToken>,
+    /// Token hash → token id, so authentication is a single map lookup.
+    pub api_tokens_by_hash: HashMap<String, Uuid>,
 }
 
 impl Store {
@@ -66,6 +70,8 @@ impl Store {
             invitations: HashMap::new(),
             invitations_by_token: HashMap::new(),
             recovery_codes: Vec::new(),
+            api_tokens: HashMap::new(),
+            api_tokens_by_hash: HashMap::new(),
         }
     }
 
@@ -172,6 +178,159 @@ impl Store {
             .retain(|l| !(l.project_id == project.id && l.timestamp < cutoff));
         keys
     }
+
+    /// Allocate a stable slug for a new organisation, appending `-2`, `-3`, … when
+    /// the derived slug is already taken (case-insensitive).
+    pub fn unique_org_slug(&self, name: &str) -> String {
+        let base = slugify(name);
+        let taken: Vec<String> = self
+            .orgs
+            .values()
+            .map(|org| org.slug.to_ascii_lowercase())
+            .collect();
+        if !taken.iter().any(|slug| slug == &base) {
+            return base;
+        }
+        for suffix in 2..10_000u32 {
+            let candidate = format!("{base}-{suffix}");
+            if !taken.iter().any(|slug| slug == &candidate) {
+                return candidate;
+            }
+        }
+        format!("{base}-{}", Uuid::new_v4().simple())
+    }
+
+    /// Fill in slugs for organisations created before slugs existed. Returns the
+    /// number of organisations updated.
+    pub fn ensure_org_slugs(&mut self) -> usize {
+        let pending: Vec<(Uuid, String)> = self
+            .orgs
+            .values()
+            .filter(|org| org.slug.is_empty())
+            .map(|org| (org.id, org.name.clone()))
+            .collect();
+        let mut updated = 0;
+        for (id, name) in pending {
+            let slug = self.unique_org_slug(&name);
+            if let Some(org) = self.orgs.get_mut(&id) {
+                org.slug = slug;
+                updated += 1;
+            }
+        }
+        updated
+    }
+
+    /// Next per-project issue number. Numbers are assigned once at creation and
+    /// never reused.
+    pub fn next_issue_number(&self, project_id: Uuid) -> u64 {
+        self.issues
+            .values()
+            .filter(|issue| issue.project_id == project_id)
+            .map(|issue| issue.number)
+            .max()
+            .unwrap_or(0)
+            + 1
+    }
+
+    /// Issue a hashed API token. The plaintext is returned once and never stored.
+    pub fn create_api_token(&mut self, user_id: Uuid, label: &str) -> (String, ApiToken) {
+        let plaintext = format!("scout_pat_{}", crate::auth::new_token());
+        let token = ApiToken {
+            id: Uuid::new_v4(),
+            user_id,
+            label: label.to_string(),
+            token_hash: crate::auth::hash_token(&plaintext),
+            token_prefix: crate::auth::token_prefix(&plaintext, 14),
+            created_at: Utc::now(),
+            last_used_at: None,
+            revoked_at: None,
+        };
+        self.api_tokens_by_hash
+            .insert(token.token_hash.clone(), token.id);
+        self.api_tokens.insert(token.id, token.clone());
+        (plaintext, token)
+    }
+
+    /// Resolve a presented plaintext token. Revoked tokens resolve to `None`.
+    pub fn active_api_token(&self, plaintext: &str) -> Option<&ApiToken> {
+        let id = self
+            .api_tokens_by_hash
+            .get(&crate::auth::hash_token(plaintext))?;
+        self.api_tokens.get(id).filter(|token| token.is_active())
+    }
+
+    pub fn api_tokens_for_user(&self, user_id: Uuid) -> Vec<ApiToken> {
+        let mut tokens: Vec<ApiToken> = self
+            .api_tokens
+            .values()
+            .filter(|token| token.user_id == user_id)
+            .cloned()
+            .collect();
+        tokens.sort_by_key(|token| std::cmp::Reverse(token.created_at));
+        tokens
+    }
+
+    /// Tokens owned by users who belong to the organisation, with their owner's
+    /// email, newest first. Metadata only.
+    pub fn api_tokens_for_org(&self, org_id: Uuid) -> Vec<(String, ApiToken)> {
+        let project_ids: std::collections::HashSet<Uuid> = self
+            .projects
+            .values()
+            .filter(|project| project.org_id == org_id)
+            .map(|project| project.id)
+            .collect();
+        let mut members: std::collections::HashSet<Uuid> = self
+            .org_members
+            .keys()
+            .filter(|(_, member_org)| *member_org == org_id)
+            .map(|(user, _)| *user)
+            .collect();
+        for (user, project) in self.memberships.keys() {
+            if project_ids.contains(project) {
+                members.insert(*user);
+            }
+        }
+        let mut rows: Vec<(String, ApiToken)> = self
+            .api_tokens
+            .values()
+            .filter(|token| members.contains(&token.user_id))
+            .map(|token| {
+                let email = self
+                    .users
+                    .get(&token.user_id)
+                    .map(|user| user.email.clone())
+                    .unwrap_or_default();
+                (email, token.clone())
+            })
+            .collect();
+        rows.sort_by_key(|(_, token)| std::cmp::Reverse(token.created_at));
+        rows
+    }
+
+    /// Revoke a token. Returns false when the id is unknown.
+    pub fn revoke_api_token(&mut self, token_id: Uuid) -> bool {
+        match self.api_tokens.get_mut(&token_id) {
+            Some(token) => {
+                if token.revoked_at.is_none() {
+                    token.revoked_at = Some(Utc::now());
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Record a successful use, at most once per hour.
+    pub fn touch_api_token(&mut self, token_id: Uuid) {
+        if let Some(token) = self.api_tokens.get_mut(&token_id) {
+            let stale = token
+                .last_used_at
+                .is_none_or(|at| at < Utc::now() - Duration::hours(1));
+            if stale {
+                token.last_used_at = Some(Utc::now());
+            }
+        }
+    }
 }
 
 /// Build the demo store. Raw payloads are returned separately so the caller can
@@ -187,6 +346,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         Organisation {
             id: org_id,
             name: "Acme".into(),
+            slug: "acme".into(),
             sso_provider: None,
             created_by: None,
             created_at: now - Duration::days(60),
@@ -584,6 +744,7 @@ fn seed_issue(
     let issue = Issue {
         id: issue_id,
         project_id: project.id,
+        number: store.next_issue_number(project.id),
         fingerprint: derived.fingerprint.clone(),
         title: derived.title,
         culprit: derived.culprit,
