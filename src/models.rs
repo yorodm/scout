@@ -45,6 +45,19 @@ pub struct User {
     pub id: Uuid,
     pub email: String,
     pub name: String,
+    /// Argon2id PHC string. Never serialised: API responses must not expose it.
+    #[serde(default, skip_serializing)]
+    pub password_hash: Option<String>,
+    /// The single deployment-level principal seeded from the environment.
+    pub is_operator: bool,
+}
+
+/// An authenticated session. Only the SHA-256 of the opaque token is stored, and
+/// the key in `Store::sessions` is that hash.
+#[derive(Clone, Debug)]
+pub struct Session {
+    pub user_id: Uuid,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]

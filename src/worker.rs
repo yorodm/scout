@@ -5,7 +5,11 @@ use tokio::sync::{mpsc::UnboundedReceiver, RwLock};
 use uuid::Uuid;
 
 pub enum Job {
-    GroupEvent { project_id: Uuid, event_id: Uuid },
+    GroupEvent {
+        job_id: Uuid,
+        project_id: Uuid,
+        event_id: Uuid,
+    },
 }
 
 /// One in-process worker, mirroring the "claim a job, group, then classify"
@@ -15,9 +19,10 @@ pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: re
         while let Some(job) = rx.recv().await {
             match job {
                 Job::GroupEvent {
+                    job_id,
                     project_id,
                     event_id,
-                } => process_event(&store, &http, project_id, event_id).await,
+                } => process_event(&store, &http, job_id, project_id, event_id).await,
             }
         }
     });
@@ -26,14 +31,25 @@ pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: re
 async fn process_event(
     store: &Arc<RwLock<Store>>,
     http: &reqwest::Client,
+    job_id: Uuid,
     project_id: Uuid,
     event_id: Uuid,
 ) {
+    let started = std::time::Instant::now();
     let Some((issue_id, derived, project, event, needs_suggestion)) =
         group(store, project_id, event_id).await
     else {
+        tracing::warn!(job_id = %job_id, project_id = %project_id, event_id = %event_id, "grouping skipped: event not found");
         return;
     };
+    tracing::debug!(
+        job_id = %job_id,
+        project_id = %project_id,
+        event_id = %event_id,
+        issue_id = %issue_id,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "event grouped"
+    );
 
     // No model configured, a suggestion already exists, or a human already
     // decided: nothing to ask the model for.
@@ -42,9 +58,17 @@ async fn process_event(
     }
 
     let received_by = format!("/api/{}/envelope/", project.dsn_id);
-    let Some(suggestion) =
-        crate::classifier::suggest(http, &project, &derived, &event, &received_by).await
-    else {
+    let suggestion =
+        crate::classifier::suggest(http, &project, &derived, &event, &received_by).await;
+    tracing::debug!(
+        job_id = %job_id,
+        project_id = %project_id,
+        issue_id = %issue_id,
+        outcome = if suggestion.is_some() { "suggested" } else { "no_suggestion" },
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "classifier finished"
+    );
+    let Some(suggestion) = suggestion else {
         return;
     };
 

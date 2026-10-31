@@ -68,6 +68,7 @@ async fn state_for(self_url: &str, max_in_flight: usize) -> web::Data<AppState> 
         jobs,
         self_url: self_url.to_string(),
         ingest_gate: Arc::new(Semaphore::new(max_in_flight.max(1))),
+        session_ttl_days: 7,
         objects,
         storage_ready: Arc::new(AtomicBool::new(true)),
     })
@@ -172,7 +173,7 @@ where
 {
     let req = test::TestRequest::post()
         .uri("/api/login")
-        .set_json(json!({ "email": email }))
+        .set_json(json!({ "email": email, "password": crate::store::DEMO_PASSWORD }))
         .to_request();
     let (status, body) = call_json(app, req).await;
     assert_eq!(status, StatusCode::OK, "login for {email} failed: {body}");
@@ -1213,4 +1214,75 @@ async fn attachments_and_release_survive_grouping() {
     assert_eq!(detail["attachments"][0]["filename"], "crash.log");
     assert_eq!(detail["attachments"][0]["size"], payload.len());
     assert_eq!(detail["event"]["attachment_count"], 1);
+}
+
+// --- sessions and credentials ---------------------------------------------
+
+#[actix_web::test]
+async fn login_requires_a_valid_password_and_logout_revokes_the_session() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state).await;
+
+    let wrong_password = test::TestRequest::post()
+        .uri("/api/login")
+        .set_json(json!({ "email": "demo@scout.local", "password": "not-the-password" }))
+        .to_request();
+    let (status, body) = call_json(&app, wrong_password).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let unknown_email = test::TestRequest::post()
+        .uri("/api/login")
+        .set_json(json!({ "email": "nobody@scout.local", "password": "not-the-password" }))
+        .to_request();
+    let (status, unknown_body) = call_json(&app, unknown_email).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        body, unknown_body,
+        "a wrong password and an unknown email must be indistinguishable"
+    );
+
+    let auth = login(&app, "demo@scout.local").await;
+    assert!(
+        auth["user"].get("password_hash").is_none(),
+        "password hashes must never be serialised: {auth}"
+    );
+    assert_eq!(auth["user"]["is_operator"], false);
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let logout = test::TestRequest::post()
+        .uri("/api/logout")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let (status, _) = call_json(&app, logout).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "logout must revoke the token"
+    );
+}
+
+#[actix_web::test]
+async fn expired_sessions_are_rejected() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "triager@scout.local").await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    {
+        let mut store = state.store.write().await;
+        let session = store
+            .sessions
+            .get_mut(&crate::auth::hash_token(&token))
+            .expect("the session is stored under its hash");
+        session.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    }
+
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

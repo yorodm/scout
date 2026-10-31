@@ -50,8 +50,25 @@ pub async fn ingest_envelope(
         }
     }
 
+    let event_count = events.len();
+    let log_count = logs.len();
+    tracing::debug!(
+        project_id = %project.id,
+        project = %project.slug,
+        events = event_count,
+        logs = log_count,
+        ignored,
+        "envelope accepted"
+    );
+
     let event_ids = persist_events(&state, &project, events, &attachments, bytes).await?;
     let log_count = persist_logs(&state, &project, logs).await?;
+    tracing::debug!(
+        project_id = %project.id,
+        event_ids = ?event_ids,
+        logs = log_count,
+        "envelope persisted"
+    );
 
     Ok(HttpResponse::Ok().json(json!({
         "id": event_ids.first(),
@@ -78,6 +95,7 @@ pub async fn ingest_store(
         return Err(ApiError::BadRequest("event must be a JSON object".into()));
     }
     let ids = persist_events(&state, &project, vec![event], &[], bytes).await?;
+    tracing::debug!(project_id = %project.id, event_id = ?ids.first(), "event stored");
     Ok(HttpResponse::Ok().json(json!({ "id": ids.first() })))
 }
 
@@ -104,6 +122,7 @@ pub async fn ingest_logs(
         _ => vec![value.clone()],
     };
     let count = persist_logs(&state, &project, logs).await?;
+    tracing::debug!(project_id = %project.id, accepted = count, "logs stored");
     Ok(HttpResponse::Ok().json(json!({ "accepted": count })))
 }
 
@@ -274,6 +293,7 @@ async fn persist_events(
                 .seen_event_ids
                 .insert((project.id, sentry_id.clone()), id);
             jobs.push(Job::GroupEvent {
+                job_id: Uuid::new_v4(),
                 project_id: project.id,
                 event_id: id,
             });

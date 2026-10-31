@@ -1,12 +1,12 @@
 //! Credential and token primitives.
 //!
 //! Passwords use Argon2id; opaque tokens are generated from the OS and stored
-//! only as SHA-256 hashes (Additional Constraint: hashed credentials). These
-//! primitives are consumed by the persistent store and session API as they are
-//! wired in; until then the module is compiled and unit-tested on its own.
+//! only as SHA-256 hashes (Additional Constraint: hashed credentials). This
+//! module also owns the idempotent deployment-operator bootstrap.
 
-#![allow(dead_code)]
-
+use crate::config::Config;
+use crate::models::User;
+use crate::store::Store;
 use argon2::password_hash::{
     rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
 };
@@ -14,6 +14,7 @@ use argon2::Argon2;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 /// Hash a password with Argon2id. The returned string is the PHC encoding, so
 /// the salt and parameters travel with the hash.
@@ -51,11 +52,80 @@ pub fn hash_token(token: &str) -> String {
 
 /// First `len` characters of a token, for identifying a key in the UI without
 /// exposing the secret.
+#[allow(dead_code)] // used by ingest-key creation in the administration slice
 pub fn token_prefix(token: &str, len: usize) -> String {
     token.chars().take(len).collect()
 }
 
+/// Outcome of the startup bootstrap.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BootstrapOutcome {
+    /// A new operator was created from the environment.
+    Created(String),
+    /// An operator already existed; its password was left untouched.
+    Existing,
+}
+
+/// Create the deployment operator when none exists.
+///
+/// FR-030: values are read from the environment only on first start, an existing
+/// operator's password is never reset, and startup fails with an actionable
+/// message when no operator exists and either value is missing or blank.
+pub fn bootstrap_operator(store: &mut Store, config: &Config) -> Result<BootstrapOutcome, String> {
+    if let Some(existing) = store.users.values().find(|user| user.is_operator) {
+        if config.operator_email.is_some() || config.operator_password.is_some() {
+            tracing::warn!(
+                operator = %existing.email,
+                "deployment operator already exists; bootstrap values are ignored and the password is unchanged"
+            );
+        }
+        return Ok(BootstrapOutcome::Existing);
+    }
+
+    let email = config
+        .operator_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // Passwords are compared verbatim, so only reject an absent or blank value.
+    let password = config
+        .operator_password
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+
+    let (Some(email), Some(password)) = (email, password) else {
+        return Err(
+            "no deployment operator exists: set SCOUT_OPERATOR_EMAIL and \
+SCOUT_OPERATOR_PASSWORD (neither may be blank) and restart"
+                .into(),
+        );
+    };
+
+    let email = email.to_ascii_lowercase();
+    let password_hash = hash_password(password)
+        .map_err(|e| format!("could not hash the operator password: {e}"))?;
+    let user = User {
+        id: Uuid::new_v4(),
+        email: email.clone(),
+        name: "Deployment operator".into(),
+        password_hash: Some(password_hash),
+        is_operator: true,
+    };
+    store.users.insert(user.id, user.clone());
+    store.users_by_email.insert(email.clone(), user.id);
+    crate::audit::record(
+        store,
+        None,
+        None,
+        "system",
+        "operator.bootstrapped",
+        Some(email.clone()),
+    );
+    Ok(BootstrapOutcome::Created(email))
+}
+
 /// A single-use recovery code in `XXXXX-XXXXX` form. Only the hash is stored.
+#[allow(dead_code)] // used by account creation/reissue in the recovery slice
 pub fn new_recovery_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let bytes: [u8; 10] = rand::random();
@@ -69,6 +139,86 @@ pub fn new_recovery_code() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn config(email: Option<&str>, password: Option<&str>) -> Config {
+        Config {
+            port: 8080,
+            self_url: "http://127.0.0.1:1".into(),
+            ingest_max_in_flight: 256,
+            retention_days: 30,
+            confidence_threshold: 0.5,
+            session_ttl_days: 7,
+            operator_email: email.map(str::to_string),
+            operator_password: password.map(str::to_string),
+            database_url: None,
+            s3_endpoint: None,
+            s3_bucket: None,
+        }
+    }
+
+    fn operator_hash(store: &Store) -> String {
+        store
+            .user_by_email("ops@example.com")
+            .expect("operator account")
+            .password_hash
+            .clone()
+            .expect("operator password hash")
+    }
+
+    #[test]
+    fn operator_bootstrap_is_idempotent_and_never_resets_the_password() {
+        let (mut store, _raw) = crate::store::seed("http://127.0.0.1:1");
+
+        let outcome = bootstrap_operator(
+            &mut store,
+            &config(Some(" Ops@Example.com "), Some("first-password")),
+        )
+        .expect("bootstrap the operator");
+        assert_eq!(outcome, BootstrapOutcome::Created("ops@example.com".into()));
+        assert_eq!(
+            store.users.values().filter(|user| user.is_operator).count(),
+            1
+        );
+        let hash = operator_hash(&store);
+        assert!(verify_password("first-password", &hash));
+        assert!(store
+            .audit
+            .iter()
+            .any(|entry| entry.action == "operator.bootstrapped" && entry.org_id.is_none()));
+
+        // A later start with different values must not reset the password.
+        let outcome = bootstrap_operator(
+            &mut store,
+            &config(Some("ops@example.com"), Some("second-password")),
+        )
+        .expect("bootstrap again");
+        assert_eq!(outcome, BootstrapOutcome::Existing);
+        let hash = operator_hash(&store);
+        assert!(verify_password("first-password", &hash));
+        assert!(!verify_password("second-password", &hash));
+        assert_eq!(
+            store.users.values().filter(|user| user.is_operator).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_or_blank_bootstrap_values_fail_without_creating_an_operator() {
+        let (mut store, _raw) = crate::store::seed("http://127.0.0.1:1");
+
+        for (email, password) in [
+            (None, None),
+            (Some("  "), Some("secret")),
+            (Some("ops@example.com"), Some("   ")),
+        ] {
+            let error = bootstrap_operator(&mut store, &config(email, password))
+                .expect_err("missing bootstrap values must fail startup");
+            assert!(error.contains("SCOUT_OPERATOR_EMAIL"), "error: {error}");
+            assert!(error.contains("SCOUT_OPERATOR_PASSWORD"), "error: {error}");
+        }
+        assert!(store.users.values().all(|user| !user.is_operator));
+        assert!(store.audit.is_empty());
+    }
 
     #[test]
     fn argon2_round_trip_and_rejection() {

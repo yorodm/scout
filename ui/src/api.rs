@@ -346,8 +346,13 @@ pub async fn demo_accounts() -> Result<DemoAccountsResponse, String> {
     get("/api/demo/accounts", None).await
 }
 
-pub async fn login(email: &str) -> Result<LoginResponse, String> {
-    post("/api/login", None, &serde_json::json!({ "email": email })).await
+pub async fn login(email: &str, password: &str) -> Result<LoginResponse, String> {
+    post(
+        "/api/login",
+        None,
+        &serde_json::json!({ "email": email, "password": password }),
+    )
+    .await
 }
 
 pub async fn me(token: &str) -> Result<MeResponse, String> {

@@ -12,6 +12,8 @@ pub struct AppState {
     pub self_url: String,
     /// Global in-flight bound for ingest requests. Saturation returns 429.
     pub ingest_gate: Arc<Semaphore>,
+    /// Lifetime of an issued session token.
+    pub session_ttl_days: i64,
     /// Immutable raw payloads (write-once). Retention is the only deleter.
     pub objects: Arc<Objects>,
     /// Whether the metadata store can accept writes. `503` is returned while

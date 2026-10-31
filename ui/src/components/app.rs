@@ -93,7 +93,8 @@ fn Login() -> View {
                         r#type="button",
                         on:click=move |_| {
                             let email = email_for_click.clone();
-                            spawn_local(state::login(store, email));
+                            // Seeded demo accounts share one known password.
+                            spawn_local(state::login(store, email, "scout-demo".into()));
                         },
                     ) {
                         (avatar_view)
@@ -124,7 +125,9 @@ fn Login() -> View {
                 h2(style="font-size:14px;margin-bottom:12px") { "Sign in as a demo account" }
                 (account_cards)
                 div(class="login-note") {
-                    "Prototype: sessions are in-memory and seeded accounts have no passwords. Signing in scopes every request to the projects and role shown above. Restarting the server resets all data."
+                    "Prototype: sessions are in-memory and seeded accounts share the password "
+                    code { "scout-demo" }
+                    ". Signing in scopes every request to the projects and role shown above. Restarting the server resets all data."
                 }
             }
         }

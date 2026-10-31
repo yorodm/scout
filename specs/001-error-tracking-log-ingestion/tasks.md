@@ -60,8 +60,8 @@
 - [ ] T019 Implement the PostgreSQL adapter in `src/store_postgres.rs` using `sqlx::PgPool`, including all unique constraints and transactions from data-model.md.
 - [ ] T020 Wire adapter selection (`SCOUT_STORE=memory|postgres`) in `src/state.rs` and `src/main.rs`; tests default to memory.
 - [ ] T021 Implement ingest-key hashing, lookup, revocation, and `last_used_at` in `src/store_postgres.rs` and `src/ingest.rs`.
-- [ ] T022 Implement Argon2id password verification, session issue/redeem/expiry, and `POST /api/login`, `POST /api/logout`, `GET /api/me` in `src/auth.rs` and `src/api.rs`.
-- [ ] T023 Implement idempotent deployment-operator seeding in `src/auth.rs` and `src/main.rs`: read `SCOUT_OPERATOR_EMAIL`/`SCOUT_OPERATOR_PASSWORD`, create only when no `users.is_operator` exists, hash with Argon2id, never reset an existing password on later starts, and fail startup with an actionable error naming the missing value when no operator exists and either bootstrap value is missing or blank.
+- [X] T022 Implement Argon2id password verification, session issue/redeem/expiry, and `POST /api/login`, `POST /api/logout`, `GET /api/me` in `src/auth.rs` and `src/api.rs`.
+- [X] T023 Implement idempotent deployment-operator seeding in `src/auth.rs` and `src/main.rs`: read `SCOUT_OPERATOR_EMAIL`/`SCOUT_OPERATOR_PASSWORD`, create only when no `users.is_operator` exists, hash with Argon2id, never reset an existing password on later starts, and fail startup with an actionable error naming the missing value when no operator exists and either bootstrap value is missing or blank.
 - [ ] T024 Implement `org_admin_setup` token issuance and redemption primitives in `src/auth.rs` and `src/store_postgres.rs`: SHA-256 hashed, single-use, 7-day expiry, and acceptance grants `org_admin`; for an existing account require a bearer session, accept no password in the request, and leave the password unchanged, while a new account sets its password.
 - [X] T025 Implement `src/objects.rs` write-once object semantics and wire raw object retrieval through it.
 - [ ] T026 Implement job insertion and `SELECT … FOR UPDATE SKIP LOCKED` claiming in `src/store_postgres.rs` and `src/worker.rs`.
@@ -69,7 +69,7 @@
 - [X] T028 Implement the configurable global in-flight ingest cap in `src/ingest.rs` with a default of 256; return `429` with `Retry-After`.
 - [ ] T029 Run migrations at startup under a PostgreSQL advisory lock in `src/main.rs`.
 - [ ] T030 Extend `GET /api/health` in `src/api.rs` to report database and object-store reachability, returning `503` when either is down.
-- [ ] T031 Add structured tracing fields (request id, project id, event id, job id) in `src/main.rs` and the ingest/worker paths.
+- [X] T031 Add structured tracing fields (request id, project id, event id, job id) in `src/main.rs` and the ingest/worker paths.
 - [ ] T032 Record admin and operator actions through `src/audit.rs` for role, key, model, retention, organisation creation, and initial-admin setup changes; allow `org_id` to be null for deployment-level actions such as operator bootstrap.
 
 ### Shared models and test harness
@@ -256,8 +256,8 @@
 
 ### Tests for User Story 5
 
-- [ ] T132 [US5] Add login success/failure, session expiry, and logout tests in `src/tests.rs`.
-- [ ] T133 [US5] Add operator bootstrap tests in `src/tests.rs`: fresh seed creates the operator, later starts do not reset the password, env values are ignored once an operator exists, and missing/blank bootstrap values fail startup with an actionable error.
+- [X] T132 [US5] Add login success/failure, session expiry, and logout tests in `src/tests.rs`.
+- [X] T133 [US5] Add operator bootstrap tests in `src/tests.rs`: fresh seed creates the operator, later starts do not reset the password, env values are ignored once an operator exists, and missing/blank bootstrap values fail startup with an actionable error.
 - [ ] T134 [US5] Add organisation creation and initial-admin setup-token tests in `src/tests.rs`, including single use, expiry, `org_admin` membership, existing-account bearer-session acceptance with no password field and no password change, and `organisation.created`/`org_admin_setup.issued` audit rows.
 - [ ] T135 [US5] Add invitation create/preview/accept/revoke and single-use tests in `src/tests.rs`.
 - [ ] T136 [US5] Add recovery-code tests in `src/tests.rs`: success, reuse rejection, unknown code, and authenticated reissue (including the operator) invalidating prior unused codes.

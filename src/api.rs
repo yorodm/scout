@@ -135,6 +135,13 @@ fn memberships_json(store: &crate::store::Store, user_id: Uuid) -> Vec<Value> {
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub email: String,
+    pub password: String,
+}
+
+fn invalid_credentials() -> ApiError {
+    // The same response for an unknown email and a wrong password, so account
+    // existence cannot be probed.
+    ApiError::Unauthorized("invalid email or password".into())
 }
 
 pub async fn login(
@@ -145,9 +152,15 @@ pub async fn login(
     let user = store
         .user_by_email(&body.email)
         .cloned()
-        .ok_or_else(|| ApiError::NotFound("no demo account with that email".into()))?;
-    let token = Uuid::new_v4().simple().to_string();
-    store.sessions.insert(token.clone(), user.id);
+        .ok_or_else(invalid_credentials)?;
+    let Some(hash) = user.password_hash.as_deref() else {
+        // An account that only authenticates through OIDC has no local password.
+        return Err(invalid_credentials());
+    };
+    if !crate::auth::verify_password(&body.password, hash) {
+        return Err(invalid_credentials());
+    }
+    let token = store.issue_session(user.id, state.session_ttl_days);
     let memberships = memberships_json(&store, user.id);
     Ok(HttpResponse::Ok().json(json!({
         "token": token,
@@ -161,7 +174,7 @@ pub async fn logout(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     if let Some(token) = bearer(&req) {
-        state.store.write().await.sessions.remove(&token);
+        state.store.write().await.revoke_session(&token);
     }
     Ok(HttpResponse::Ok().json(json!({ "ok": true })))
 }
@@ -181,7 +194,7 @@ pub async fn me(req: HttpRequest, state: web::Data<AppState>) -> Result<HttpResp
 pub async fn demo_accounts(state: web::Data<AppState>) -> Result<HttpResponse, ApiError> {
     let store = state.store.read().await;
     let mut accounts = Vec::new();
-    for user in store.users.values() {
+    for user in store.users.values().filter(|user| !user.is_operator) {
         let memberships = memberships_json(&store, user.id);
         accounts.push(json!({
             "email": user.email,
@@ -194,7 +207,19 @@ pub async fn demo_accounts(state: web::Data<AppState>) -> Result<HttpResponse, A
 }
 
 pub async fn reset_demo(state: web::Data<AppState>) -> HttpResponse {
-    let (fresh, raws) = crate::store::seed(&state.self_url);
+    // A demo reset must not delete the deployment operator: it cannot be
+    // recreated without a restart and its password must never be reset here.
+    let operator = {
+        let store = state.store.read().await;
+        store.users.values().find(|user| user.is_operator).cloned()
+    };
+    let (mut fresh, raws) = crate::store::seed(&state.self_url);
+    if let Some(operator) = operator {
+        fresh
+            .users_by_email
+            .insert(operator.email.to_ascii_lowercase(), operator.id);
+        fresh.users.insert(operator.id, operator);
+    }
     for (key, data) in raws {
         if let Err(error) = state.objects.put_create(&key, data).await {
             return HttpResponse::InternalServerError()

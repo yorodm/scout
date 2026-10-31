@@ -39,9 +39,16 @@ Build the UI, then run the single Actix binary:
 rustup target add wasm32-unknown-unknown
 # Install Trunk once (prebuilt release is fastest).
 (cd ui && trunk build --release)
+export SCOUT_OPERATOR_EMAIL=operator@scout.local
+export SCOUT_OPERATOR_PASSWORD=change-me-now
 cargo run
 # open http://localhost:8080
 ```
+
+Scout refuses to start when no deployment operator exists and either bootstrap value is missing or
+blank. The operator is seeded once with an Argon2id password hash; later starts never reset it. Set
+`SCOUT_SESSION_TTL_DAYS`, `SCOUT_RETENTION_DAYS`, `SCOUT_CONFIDENCE_THRESHOLD`, and
+`SCOUT_INGEST_MAX_IN_FLIGHT` to override their defaults (7, 30, 0.5, and 256).
 
 `cargo run` serves the API and the contents of `ui/dist`. If `ui/dist/index.html` is missing, the
 server returns a page explaining how to build it instead of failing.
@@ -64,19 +71,26 @@ Trunk rebuilds the WASM bundle and Tailwind CSS on change. The proxy configurati
 
 ```sh
 curl http://localhost:8080/api/health
-# {"service":"scout","status":"ok","version":"0.1.0"}
+# {"object_store":"memory","service":"scout","status":"ok","storage":"ok","version":"0.1.0"}
 ```
+
+Health returns `503` with `"status":"degraded"` when metadata storage or object storage is
+unreachable.
 
 ### Demo accounts
 
-Sign in from the UI. There are no passwords in the prototype; the session token is in-memory and is
-invalidated on restart.
+Seeded demo accounts share the password `scout-demo`. Sign-in returns an opaque bearer token; only
+its SHA-256 hash is stored, and it expires after `SCOUT_SESSION_TTL_DAYS` (7 by default).
+Signing out revokes the token.
 
 | Account | `scout-web` | `platform-api` |
 | --- | --- | --- |
 | `demo@scout.local` | owner | admin |
 | `triager@scout.local` | triager | — |
 | `viewer@scout.local` | viewer | — |
+
+The deployment operator (`SCOUT_OPERATOR_EMAIL`) is a separate, deployment-level principal: it can
+create organisations but cannot read a project's issues, logs, or raw payloads.
 
 ### Seeded ingest keys
 
@@ -153,7 +167,7 @@ These are deliberate and visible, not silent gaps:
 | Metadata | In-memory `Store` behind ordinary methods | Postgres adapter + migrations |
 | Raw payloads | In-memory `Event.raw`, append-only semantics | S3/MinIO adapter; same immutable key/value contract |
 | UI | Sycamore 0.9 CSR + Tailwind CSS, built by Trunk | Add SSR/hydration if needed; refine Tailwind component layer |
-| Sessions | In-memory bearer tokens, no passwords | Password hashing, cookies, OIDC/SSO provider |
+| Sessions | Hashed opaque tokens with expiry; password sign-in | Cookies, OIDC/SSO provider |
 | Invites | Direct membership by seeded email | Email invitations and acceptance tokens |
 | Retention | Sweep on ingest; per-project day window | Scheduled sweeper + object-store lifecycle rules |
 | Classifier | Built-in mock endpoint at `/mock-jev` | Any Jev-compatible endpoint per project |

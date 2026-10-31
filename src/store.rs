@@ -2,7 +2,18 @@ use crate::models::*;
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use uuid::Uuid;
+
+/// Demo-only credential for the seeded accounts. Real accounts are created by
+/// operator provisioning and invitation acceptance, which set their own password.
+pub const DEMO_PASSWORD: &str = "scout-demo";
+
+fn demo_password_hash() -> String {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| crate::auth::hash_password(DEMO_PASSWORD).expect("hash demo password"))
+        .clone()
+}
 
 pub fn event_hex_id() -> String {
     Uuid::new_v4().simple().to_string()
@@ -19,7 +30,7 @@ pub struct Store {
     pub users: HashMap<Uuid, User>,
     pub users_by_email: HashMap<String, Uuid>,
     pub memberships: HashMap<(Uuid, Uuid), Role>,
-    pub sessions: HashMap<String, Uuid>,
+    pub sessions: HashMap<String, Session>,
     pub issues: HashMap<Uuid, Issue>,
     pub issues_by_fingerprint: HashMap<(Uuid, String), Uuid>,
     pub events: HashMap<Uuid, Event>,
@@ -47,7 +58,30 @@ impl Store {
     }
 
     pub fn user_for_token(&self, token: &str) -> Option<Uuid> {
-        self.sessions.get(token).copied()
+        let session = self.sessions.get(&crate::auth::hash_token(token))?;
+        if session.expires_at <= Utc::now() {
+            return None;
+        }
+        Some(session.user_id)
+    }
+
+    /// Issue a hashed session token. The plaintext token is returned once and is
+    /// the only thing the caller can ever present.
+    pub fn issue_session(&mut self, user_id: Uuid, ttl_days: i64) -> String {
+        let token = crate::auth::new_token();
+        let now = Utc::now();
+        self.sessions.insert(
+            crate::auth::hash_token(&token),
+            Session {
+                user_id,
+                expires_at: now + Duration::days(ttl_days),
+            },
+        );
+        token
+    }
+
+    pub fn revoke_session(&mut self, token: &str) {
+        self.sessions.remove(&crate::auth::hash_token(token));
     }
 
     pub fn user_by_email(&self, email: &str) -> Option<&User> {
@@ -168,20 +202,27 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         store.keys.insert(key.into(), ingest_key);
     }
 
+    let demo_hash = demo_password_hash();
     let demo = User {
         id: Uuid::new_v4(),
         email: "demo@scout.local".into(),
         name: "Dana Demo".into(),
+        password_hash: Some(demo_hash.clone()),
+        is_operator: false,
     };
     let triager = User {
         id: Uuid::new_v4(),
         email: "triager@scout.local".into(),
         name: "Toni Triager".into(),
+        password_hash: Some(demo_hash.clone()),
+        is_operator: false,
     };
     let viewer = User {
         id: Uuid::new_v4(),
         email: "viewer@scout.local".into(),
         name: "Vic Viewer".into(),
+        password_hash: Some(demo_hash),
+        is_operator: false,
     };
     for user in [&demo, &triager, &viewer] {
         store.users.insert(user.id, user.clone());
