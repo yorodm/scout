@@ -14,6 +14,9 @@ pub struct AppState {
     pub ingest_gate: Arc<Semaphore>,
     /// Lifetime of an issued session token.
     pub session_ttl_days: i64,
+    /// Defaults applied when a project is created through the API.
+    pub retention_days: u32,
+    pub confidence_threshold: f64,
     /// Immutable raw payloads (write-once). Retention is the only deleter.
     pub objects: Arc<Objects>,
     /// Whether the metadata store can accept writes. `503` is returned while

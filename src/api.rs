@@ -1,6 +1,7 @@
 use crate::error::ApiError;
 use crate::models::*;
 use crate::state::AppState;
+use crate::store::Store;
 use actix_web::{web, HttpRequest, HttpResponse};
 use chrono::Utc;
 use serde::Deserialize;
@@ -12,6 +13,37 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .route("/api/login", web::post().to(login))
         .route("/api/logout", web::post().to(logout))
         .route("/api/me", web::get().to(me))
+        .route(
+            "/api/me/recovery-codes",
+            web::post().to(reissue_recovery_codes),
+        )
+        .route("/api/recover", web::post().to(recover))
+        .route("/api/orgs", web::get().to(list_orgs))
+        .route("/api/orgs", web::post().to(create_org))
+        .route(
+            "/api/orgs/{org_id}/invitations",
+            web::post().to(create_invitation),
+        )
+        .route(
+            "/api/orgs/{org_id}/invitations/{invitation_id}",
+            web::delete().to(revoke_invitation),
+        )
+        .route(
+            "/api/orgs/{org_id}/projects",
+            web::post().to(create_project),
+        )
+        .route(
+            "/api/invitations/{token}",
+            web::get().to(preview_invitation),
+        )
+        .route(
+            "/api/invitations/{token}/accept",
+            web::post().to(accept_invitation),
+        )
+        .route(
+            "/api/projects/{project_id}/keys/rotate",
+            web::post().to(rotate_key),
+        )
         .route("/api/projects", web::get().to(list_projects))
         .route("/api/projects/{project_id}", web::get().to(get_project))
         .route(
@@ -404,6 +436,617 @@ pub async fn soft_delete_project(
         None,
     );
     Ok(HttpResponse::Ok().json(json!({ "ok": true })))
+}
+
+// --- organisations, invitations, and provisioning --------------------------
+
+async fn auth_operator(req: &HttpRequest, state: &AppState) -> Result<(Uuid, String), ApiError> {
+    let (user_id, email) = auth_user(req, state).await?;
+    let store = state.store.read().await;
+    if !store
+        .users
+        .get(&user_id)
+        .is_some_and(|user| user.is_operator)
+    {
+        return Err(ApiError::Forbidden(
+            "deployment operator role is required".into(),
+        ));
+    }
+    Ok((user_id, email))
+}
+
+async fn auth_org_admin(
+    req: &HttpRequest,
+    state: &AppState,
+    org_id: Uuid,
+) -> Result<(Uuid, String), ApiError> {
+    let (user_id, email) = auth_user(req, state).await?;
+    let store = state.store.read().await;
+    if store.org_role_for(user_id, org_id) != Some(OrgRole::Admin) {
+        return Err(ApiError::Forbidden(
+            "organisation admin role is required".into(),
+        ));
+    }
+    Ok((user_id, email))
+}
+
+fn issue_invitation(
+    store: &mut Store,
+    org_id: Uuid,
+    kind: InvitationKind,
+    project_id: Option<Uuid>,
+    email: &str,
+    role: Option<Role>,
+    created_by: Uuid,
+) -> (Uuid, String) {
+    let token = crate::auth::new_token();
+    let token_hash = crate::auth::hash_token(&token);
+    let id = Uuid::new_v4();
+    store.invitations.insert(
+        id,
+        Invitation {
+            id,
+            org_id,
+            kind,
+            project_id,
+            email: email.to_string(),
+            role,
+            token_hash: token_hash.clone(),
+            created_by,
+            expires_at: Utc::now() + chrono::Duration::days(7),
+            accepted_at: None,
+            accepted_user_id: None,
+            revoked_at: None,
+        },
+    );
+    store.invitations_by_token.insert(token_hash, id);
+    (id, token)
+}
+
+fn invitation_json(store: &Store, invitation: &Invitation) -> Value {
+    let organisation = store
+        .orgs
+        .get(&invitation.org_id)
+        .map(|org| org.name.clone())
+        .unwrap_or_default();
+    let project = invitation
+        .project_id
+        .and_then(|project_id| store.projects.get(&project_id))
+        .map(|project| project.name.clone());
+    json!({
+        "id": invitation.id,
+        "kind": invitation.kind,
+        "email": invitation.email,
+        "organisation": organisation,
+        "project": project,
+        "role": invitation.role,
+        "expires_at": invitation.expires_at,
+        "accepted_at": invitation.accepted_at,
+        "revoked_at": invitation.revoked_at,
+    })
+}
+
+#[derive(Deserialize)]
+pub struct CreateOrgRequest {
+    pub name: String,
+    pub initial_admin_email: String,
+}
+
+pub async fn list_orgs(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    auth_operator(&req, &state).await?;
+    let store = state.store.read().await;
+    let mut organisations: Vec<Value> = store
+        .orgs
+        .values()
+        .map(|org| json!({ "id": org.id, "name": org.name, "created_at": org.created_at }))
+        .collect();
+    organisations.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    Ok(HttpResponse::Ok().json(json!({ "organisations": organisations })))
+}
+
+pub async fn create_org(
+    req: HttpRequest,
+    body: web::Json<CreateOrgRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let (operator_id, email) = auth_operator(&req, &state).await?;
+    let name = body.name.trim();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(ApiError::BadRequest(
+            "organisation name must be 1-120 characters".into(),
+        ));
+    }
+    let admin_email = body.initial_admin_email.trim().to_ascii_lowercase();
+    if !admin_email.contains('@') {
+        return Err(ApiError::BadRequest(
+            "initial_admin_email must be a valid email address".into(),
+        ));
+    }
+    let mut store = state.store.write().await;
+    let org_id = Uuid::new_v4();
+    let organisation = Organisation {
+        id: org_id,
+        name: name.to_string(),
+        sso_provider: None,
+        created_at: Utc::now(),
+    };
+    store.orgs.insert(org_id, organisation.clone());
+    let (_, token) = issue_invitation(
+        &mut store,
+        org_id,
+        InvitationKind::OrgAdminSetup,
+        None,
+        &admin_email,
+        None,
+        operator_id,
+    );
+    crate::audit::record(
+        &mut store,
+        Some(org_id),
+        None,
+        &email,
+        "organisation.created",
+        Some(name.to_string()),
+    );
+    crate::audit::record(
+        &mut store,
+        Some(org_id),
+        None,
+        &email,
+        "org_admin_setup.issued",
+        Some(admin_email),
+    );
+    Ok(HttpResponse::Ok().json(json!({
+        "organisation": organisation,
+        "initial_admin_setup_token": token,
+    })))
+}
+
+pub async fn preview_invitation(
+    path: web::Path<String>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let token = path.into_inner();
+    let store = state.store.read().await;
+    let invitation = store
+        .invitation_by_token(&token)
+        .ok_or_else(|| ApiError::NotFound("invitation not found".into()))?;
+    if !invitation.is_pending() {
+        return Err(ApiError::Gone(
+            "invitation is expired, revoked, or already accepted".into(),
+        ));
+    }
+    let view = invitation_json(&store, invitation);
+    Ok(HttpResponse::Ok().json(json!({
+        "email": view["email"],
+        "organisation": view["organisation"],
+        "project": view["project"],
+        "role": view["role"],
+        "expires_at": view["expires_at"],
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct AcceptInvitationRequest {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+pub async fn accept_invitation(
+    req: HttpRequest,
+    path: web::Path<String>,
+    body: web::Json<AcceptInvitationRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let token = path.into_inner();
+    let mut store = state.store.write().await;
+    let invitation = store
+        .invitation_by_token(&token)
+        .cloned()
+        .ok_or_else(|| ApiError::NotFound("invitation not found".into()))?;
+    if !invitation.is_pending() {
+        return Err(ApiError::Gone(
+            "invitation is expired, revoked, or already accepted".into(),
+        ));
+    }
+
+    let email = invitation.email.to_ascii_lowercase();
+    let existing = store.user_by_email(&email).map(|user| user.id);
+    let session_user = bearer(&req).and_then(|token| store.user_for_token(&token));
+
+    let (user_id, issued_token, recovery_codes) = match existing {
+        Some(existing_id) => {
+            if session_user != Some(existing_id) {
+                return Err(ApiError::Unauthorized(
+                    "sign in to accept this invitation".into(),
+                ));
+            }
+            if body.password.is_some() {
+                return Err(ApiError::BadRequest(
+                    "an existing account cannot set a password here".into(),
+                ));
+            }
+            (existing_id, None, Vec::new())
+        }
+        None => {
+            let password = body.password.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("password is required for a new account".into())
+            })?;
+            let name = body
+                .name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| email.split('@').next().unwrap_or("Member"));
+            let user = crate::auth::create_local_account(&mut store, &email, name, password)
+                .map_err(ApiError::BadRequest)?;
+            let token = store.issue_session(user.id, state.session_ttl_days);
+            let codes = crate::auth::issue_recovery_codes(&mut store, user.id, 10);
+            (user.id, Some(token), codes)
+        }
+    };
+
+    match invitation.kind {
+        InvitationKind::OrgAdminSetup => {
+            store
+                .org_members
+                .insert((user_id, invitation.org_id), OrgRole::Admin);
+        }
+        InvitationKind::ProjectInvite => {
+            let project_id = invitation
+                .project_id
+                .ok_or_else(|| ApiError::BadRequest("invitation has no project".into()))?;
+            let role = invitation
+                .role
+                .ok_or_else(|| ApiError::BadRequest("invitation has no role".into()))?;
+            store.memberships.insert((user_id, project_id), role);
+            store
+                .org_members
+                .entry((user_id, invitation.org_id))
+                .or_insert(OrgRole::Member);
+        }
+    }
+
+    if let Some(stored) = store.invitations.get_mut(&invitation.id) {
+        stored.accepted_at = Some(Utc::now());
+        stored.accepted_user_id = Some(user_id);
+    }
+    let actor = store
+        .users
+        .get(&user_id)
+        .map(|user| user.email.clone())
+        .unwrap_or_default();
+    crate::audit::record(
+        &mut store,
+        Some(invitation.org_id),
+        invitation.project_id,
+        &actor,
+        "invitation.accepted",
+        Some(invitation.id.to_string()),
+    );
+
+    let user = store.users.get(&user_id).cloned();
+    let memberships = memberships_json(&store, user_id);
+    Ok(HttpResponse::Ok().json(json!({
+        "accepted": true,
+        "token": issued_token,
+        "user": user,
+        "memberships": memberships,
+        "recovery_codes": recovery_codes,
+    })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateInvitationRequest {
+    pub email: String,
+    #[serde(default)]
+    pub project_id: Option<Uuid>,
+    #[serde(default)]
+    pub role: Option<Role>,
+}
+
+pub async fn create_invitation(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    body: web::Json<CreateInvitationRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let org_id = path.into_inner();
+    let (actor_id, email) = auth_org_admin(&req, &state, org_id).await?;
+    let invite_email = body.email.trim().to_ascii_lowercase();
+    if !invite_email.contains('@') {
+        return Err(ApiError::BadRequest("email must be a valid address".into()));
+    }
+    let project_id = body
+        .project_id
+        .ok_or_else(|| ApiError::BadRequest("project_id is required".into()))?;
+    let role = body
+        .role
+        .ok_or_else(|| ApiError::BadRequest("role is required".into()))?;
+
+    let mut store = state.store.write().await;
+    {
+        let project = store
+            .projects
+            .get(&project_id)
+            .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
+        if project.org_id != org_id || project.deleted_at.is_some() {
+            return Err(ApiError::BadRequest(
+                "project does not belong to this organisation".into(),
+            ));
+        }
+    }
+    let (id, token) = issue_invitation(
+        &mut store,
+        org_id,
+        InvitationKind::ProjectInvite,
+        Some(project_id),
+        &invite_email,
+        Some(role),
+        actor_id,
+    );
+    let invitation = store.invitations.get(&id).cloned().expect("just inserted");
+    let view = invitation_json(&store, &invitation);
+    crate::audit::record(
+        &mut store,
+        Some(org_id),
+        Some(project_id),
+        &email,
+        "invitation.issued",
+        Some(invite_email),
+    );
+    Ok(HttpResponse::Ok().json(json!({ "invitation": view, "token": token })))
+}
+
+pub async fn revoke_invitation(
+    req: HttpRequest,
+    path: web::Path<(Uuid, Uuid)>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let (org_id, invitation_id) = path.into_inner();
+    let (_, email) = auth_org_admin(&req, &state, org_id).await?;
+    let mut store = state.store.write().await;
+    let project_id = {
+        let invitation = store
+            .invitations
+            .get_mut(&invitation_id)
+            .ok_or_else(|| ApiError::NotFound("invitation not found".into()))?;
+        if invitation.org_id != org_id {
+            return Err(ApiError::NotFound("invitation not found".into()));
+        }
+        if !invitation.is_pending() {
+            return Err(ApiError::Gone(
+                "invitation is expired, revoked, or already accepted".into(),
+            ));
+        }
+        invitation.revoked_at = Some(Utc::now());
+        invitation.project_id
+    };
+    crate::audit::record(
+        &mut store,
+        Some(org_id),
+        project_id,
+        &email,
+        "invitation.revoked",
+        Some(invitation_id.to_string()),
+    );
+    Ok(HttpResponse::Ok().json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateProjectRequest {
+    pub name: String,
+    pub slug: String,
+}
+
+fn next_dsn_id(store: &Store) -> String {
+    let next = store
+        .projects
+        .values()
+        .filter_map(|project| project.dsn_id.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    next.to_string()
+}
+
+pub async fn create_project(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    body: web::Json<CreateProjectRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let org_id = path.into_inner();
+    let (actor_id, email) = auth_org_admin(&req, &state, org_id).await?;
+    let name = body.name.trim();
+    let slug = body.slug.trim().to_ascii_lowercase();
+    if name.is_empty() || slug.is_empty() {
+        return Err(ApiError::BadRequest(
+            "project name and slug are required".into(),
+        ));
+    }
+    if !slug
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(ApiError::BadRequest(
+            "slug may only contain letters, digits, hyphens, and underscores".into(),
+        ));
+    }
+    let host = req.connection_info().host().to_string();
+    let mut store = state.store.write().await;
+    if store.projects.values().any(|project| {
+        project.org_id == org_id && project.slug == slug && project.deleted_at.is_none()
+    }) {
+        return Err(ApiError::Conflict(
+            "a project with that slug already exists".into(),
+        ));
+    }
+    let now = Utc::now();
+    let dsn_id = next_dsn_id(&store);
+    let project = Project {
+        id: Uuid::new_v4(),
+        dsn_id: dsn_id.clone(),
+        slug: slug.clone(),
+        name: name.to_string(),
+        org_id,
+        retention_days: state.retention_days,
+        model: None,
+        confidence_threshold: state.confidence_threshold,
+        deleted_at: None,
+        deleted_by: None,
+        created_at: now,
+    };
+    store.projects.insert(project.id, project.clone());
+    store.projects_by_dsn.insert(dsn_id.clone(), project.id);
+    store.projects_by_dsn.insert(slug, project.id);
+    store
+        .memberships
+        .insert((actor_id, project.id), Role::Owner);
+
+    let plaintext = format!("scout_{}", crate::auth::new_token());
+    store.keys.insert(
+        plaintext.clone(),
+        IngestKey {
+            id: Uuid::new_v4(),
+            project_id: project.id,
+            label: "Default".into(),
+            key: plaintext.clone(),
+            created_at: now,
+            revoked: false,
+        },
+    );
+    let (view, _) = public_project(project.clone());
+    crate::audit::record(
+        &mut store,
+        Some(org_id),
+        Some(project.id),
+        &email,
+        "project.created",
+        Some(project.name.clone()),
+    );
+    Ok(HttpResponse::Ok().json(json!({
+        "project": view,
+        "key": plaintext,
+        "dsn": format!("http://{plaintext}@{host}/{dsn_id}"),
+    })))
+}
+
+#[derive(Deserialize, Default)]
+pub struct RotateKeyRequest {
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+pub async fn rotate_key(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    body: web::Json<RotateKeyRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let project_id = path.into_inner();
+    let (_, email, role) = auth_project(&req, &state, project_id).await?;
+    if !role.can_manage() {
+        return Err(ApiError::Forbidden(
+            "admin role or above is required".into(),
+        ));
+    }
+    let label = body
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .unwrap_or("Rotated")
+        .to_string();
+    let mut store = state.store.write().await;
+    for key in store.keys.values_mut() {
+        if key.project_id == project_id && !key.revoked {
+            key.revoked = true;
+        }
+    }
+    let plaintext = format!("scout_{}", crate::auth::new_token());
+    store.keys.insert(
+        plaintext.clone(),
+        IngestKey {
+            id: Uuid::new_v4(),
+            project_id,
+            label,
+            key: plaintext.clone(),
+            created_at: Utc::now(),
+            revoked: false,
+        },
+    );
+    crate::audit::record(
+        &mut store,
+        None,
+        Some(project_id),
+        &email,
+        "key.rotated",
+        None,
+    );
+    Ok(HttpResponse::Ok().json(json!({ "key": plaintext, "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct RecoverRequest {
+    pub email: String,
+    pub recovery_code: String,
+    pub new_password: String,
+}
+
+pub async fn recover(
+    body: web::Json<RecoverRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let mut store = state.store.write().await;
+    let user_id = crate::auth::redeem_recovery_code(
+        &mut store,
+        &body.email,
+        &body.recovery_code,
+        &body.new_password,
+    )
+    .map_err(|_| ApiError::Unauthorized("invalid email or recovery code".into()))?;
+    // A password reset invalidates existing sessions.
+    store
+        .sessions
+        .retain(|_, session| session.user_id != user_id);
+    let actor = store
+        .users
+        .get(&user_id)
+        .map(|user| user.email.clone())
+        .unwrap_or_default();
+    crate::audit::record(
+        &mut store,
+        None,
+        None,
+        &actor,
+        "account.password_reset",
+        None,
+    );
+    Ok(HttpResponse::Ok().json(json!({ "ok": true })))
+}
+
+pub async fn reissue_recovery_codes(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let (user_id, email) = auth_user(&req, &state).await?;
+    let mut store = state.store.write().await;
+    let codes = crate::auth::issue_recovery_codes(&mut store, user_id, 10);
+    crate::audit::record(
+        &mut store,
+        None,
+        None,
+        &email,
+        "recovery_codes.reissued",
+        None,
+    );
+    Ok(HttpResponse::Ok().json(json!({ "recovery_codes": codes })))
 }
 
 // --- issues ----------------------------------------------------------------
@@ -1204,6 +1847,9 @@ pub async fn update_settings(
         .get_mut(&project_id)
         .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
     project.retention_days = body.retention_days;
+    if let Some(model) = &model {
+        project.confidence_threshold = model.confidence_threshold;
+    }
     project.model = model;
     crate::audit::record(
         &mut store,

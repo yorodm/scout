@@ -487,6 +487,18 @@ Requires admin or owner.
 Requires admin or owner. Revokes the key. Already-stored events are unaffected. **200**
 `{ "ok": true }`.
 
+### `POST /api/projects/{project_id}/keys/rotate`
+
+Requires admin or owner. Creates a replacement key and revokes every previously active key for the
+project (rotation is create-then-revoke, so in-flight senders are never left without a key).
+
+```json
+{ "label": "ci" }
+```
+
+**200** `{ "key": "scout_…", "ok": true }` — the plaintext key is shown once. Writes `key.rotated`
+to the audit log.
+
 ---
 
 ## Health

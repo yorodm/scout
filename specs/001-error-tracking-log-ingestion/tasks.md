@@ -62,7 +62,7 @@
 - [ ] T021 Implement ingest-key hashing, lookup, revocation, and `last_used_at` in `src/store_postgres.rs` and `src/ingest.rs`.
 - [X] T022 Implement Argon2id password verification, session issue/redeem/expiry, and `POST /api/login`, `POST /api/logout`, `GET /api/me` in `src/auth.rs` and `src/api.rs`.
 - [X] T023 Implement idempotent deployment-operator seeding in `src/auth.rs` and `src/main.rs`: read `SCOUT_OPERATOR_EMAIL`/`SCOUT_OPERATOR_PASSWORD`, create only when no `users.is_operator` exists, hash with Argon2id, never reset an existing password on later starts, and fail startup with an actionable error naming the missing value when no operator exists and either bootstrap value is missing or blank.
-- [ ] T024 Implement `org_admin_setup` token issuance and redemption primitives in `src/auth.rs` and `src/store_postgres.rs`: SHA-256 hashed, single-use, 7-day expiry, and acceptance grants `org_admin`; for an existing account require a bearer session, accept no password in the request, and leave the password unchanged, while a new account sets its password.
+- [X] T024 Implement `org_admin_setup` token issuance and redemption primitives in `src/auth.rs` and `src/store_postgres.rs`: SHA-256 hashed, single-use, 7-day expiry, and acceptance grants `org_admin`; for an existing account require a bearer session, accept no password in the request, and leave the password unchanged, while a new account sets its password.
 - [X] T025 Implement `src/objects.rs` write-once object semantics and wire raw object retrieval through it.
 - [ ] T026 Implement job insertion and `SELECT … FOR UPDATE SKIP LOCKED` claiming in `src/store_postgres.rs` and `src/worker.rs`.
 - [X] T027 Add `PayloadTooLarge`, `TooManyRequests`, and `ServiceUnavailable` to `src/error.rs` with `413`, `429` + `Retry-After`, and `503` mappings.
@@ -237,17 +237,17 @@
 
 ### Implementation
 
-- [ ] T116 [P] [US5] Implement invitation persistence, hashed one-time tokens, expiry, and preview/accept/revoke in `src/store_postgres.rs` and `src/auth.rs`.
-- [ ] T117 [P] [US5] Implement single-use recovery codes at account creation, `POST /api/recover`, and authenticated `POST /api/me/recovery-codes` reissue in `src/auth.rs` and `src/api.rs`; reissue revokes prior unused codes and returns the new set once.
-- [ ] T118 [US5] Implement operator-only `GET /api/orgs` and `POST /api/orgs` in `src/api.rs`; creation records `created_by`, creates the initial admin account, and returns `initial_admin_setup_token`. If the email already belongs to an account, the token is bound at acceptance after that account signs in with a bearer session, and never changes the password.
-- [ ] T119 [US5] Implement `org_admin_setup` acceptance through `POST /api/invitations/{token}/accept` in `src/api.rs`: for a new account set the password; for an existing account require a bearer session, reject a password field, and leave the password unchanged; grant `org_admin`, return recovery codes, and create no project membership.
-- [ ] T120 [US5] Implement `POST /api/orgs/{org_id}/invitations`, `GET /api/invitations/{token}`, and `DELETE /api/orgs/{org_id}/invitations/{id}` in `src/api.rs`.
-- [ ] T121 [US5] Implement `POST /api/orgs/{org_id}/projects` in `src/api.rs`, creating the project and its first ingest key.
-- [ ] T122 [US5] Implement member list/add/update/remove in `src/api.rs` with the owner/admin/triager/viewer matrix.
-- [ ] T123 [US5] Enforce last-owner protection on demotion and removal in `src/api.rs`, returning `400`.
-- [ ] T124 [US5] Implement ingest-key list/create/revoke plus rotation as create-new-then-revoke-old in `src/api.rs` and update `contracts/api.md`; return plaintext once and never expose hashes.
+- [X] T116 [P] [US5] Implement invitation persistence, hashed one-time tokens, expiry, and preview/accept/revoke in `src/store_postgres.rs` and `src/auth.rs`.
+- [X] T117 [P] [US5] Implement single-use recovery codes at account creation, `POST /api/recover`, and authenticated `POST /api/me/recovery-codes` reissue in `src/auth.rs` and `src/api.rs`; reissue revokes prior unused codes and returns the new set once.
+- [X] T118 [US5] Implement operator-only `GET /api/orgs` and `POST /api/orgs` in `src/api.rs`; creation records `created_by`, creates the initial admin account, and returns `initial_admin_setup_token`. If the email already belongs to an account, the token is bound at acceptance after that account signs in with a bearer session, and never changes the password.
+- [X] T119 [US5] Implement `org_admin_setup` acceptance through `POST /api/invitations/{token}/accept` in `src/api.rs`: for a new account set the password; for an existing account require a bearer session, reject a password field, and leave the password unchanged; grant `org_admin`, return recovery codes, and create no project membership.
+- [X] T120 [US5] Implement `POST /api/orgs/{org_id}/invitations`, `GET /api/invitations/{token}`, and `DELETE /api/orgs/{org_id}/invitations/{id}` in `src/api.rs`.
+- [X] T121 [US5] Implement `POST /api/orgs/{org_id}/projects` in `src/api.rs`, creating the project and its first ingest key.
+- [X] T122 [US5] Implement member list/add/update/remove in `src/api.rs` with the owner/admin/triager/viewer matrix.
+- [X] T123 [US5] Enforce last-owner protection on demotion and removal in `src/api.rs`, returning `400`.
+- [X] T124 [US5] Implement ingest-key list/create/revoke plus rotation as create-new-then-revoke-old in `src/api.rs` and update `contracts/api.md`; return plaintext once and never expose hashes.
 - [ ] T125 [US5] Implement optional OIDC configuration and the authorisation-code + PKCE flow in `src/auth.rs`, linking only on a verified matching email.
-- [ ] T126 [US5] Record invitation, role, key, model, retention, organisation-creation, project-creation, and initial-admin setup actions through `src/audit.rs`, including `organisation.created`, `project.created`, and `org_admin_setup.issued`.
+- [X] T126 [US5] Record invitation, role, key, model, retention, organisation-creation, project-creation, and initial-admin setup actions through `src/audit.rs`, including `organisation.created`, `project.created`, and `org_admin_setup.issued`.
 - [ ] T127 [P] [US5] Add the password login, recovery, and invitation-accept forms to `ui/src/components/overlays.rs`.
 - [ ] T128 [P] [US5] Extend `MembersView` in `ui/src/components/other.rs` with invites, role changes, removal, and last-owner messaging.
 - [ ] T129 [P] [US5] Extend `SettingsView` in `ui/src/components/other.rs` with key create/rotate/revoke, SSO configuration, a project-creation entry point in `ui/src/components/app.rs`, and an owner-only soft-delete control with confirmation.
@@ -258,12 +258,12 @@
 
 - [X] T132 [US5] Add login success/failure, session expiry, and logout tests in `src/tests.rs`.
 - [X] T133 [US5] Add operator bootstrap tests in `src/tests.rs`: fresh seed creates the operator, later starts do not reset the password, env values are ignored once an operator exists, and missing/blank bootstrap values fail startup with an actionable error.
-- [ ] T134 [US5] Add organisation creation and initial-admin setup-token tests in `src/tests.rs`, including single use, expiry, `org_admin` membership, existing-account bearer-session acceptance with no password field and no password change, and `organisation.created`/`org_admin_setup.issued` audit rows.
-- [ ] T135 [US5] Add invitation create/preview/accept/revoke and single-use tests in `src/tests.rs`.
-- [ ] T136 [US5] Add recovery-code tests in `src/tests.rs`: success, reuse rejection, unknown code, and authenticated reissue (including the operator) invalidating prior unused codes.
-- [ ] T137 [US5] Add the role matrix and last-owner protection tests in `src/tests.rs`.
-- [ ] T138 [US5] Add the live role-change-without-restart test in `src/tests.rs`.
-- [ ] T139 [US5] Add key rotation/revocation ingest tests in `src/tests.rs`.
+- [X] T134 [US5] Add organisation creation and initial-admin setup-token tests in `src/tests.rs`, including single use, expiry, `org_admin` membership, existing-account bearer-session acceptance with no password field and no password change, and `organisation.created`/`org_admin_setup.issued` audit rows.
+- [X] T135 [US5] Add invitation create/preview/accept/revoke and single-use tests in `src/tests.rs`.
+- [X] T136 [US5] Add recovery-code tests in `src/tests.rs`: success, reuse rejection, unknown code, and authenticated reissue (including the operator) invalidating prior unused codes.
+- [X] T137 [US5] Add the role matrix and last-owner protection tests in `src/tests.rs`.
+- [X] T138 [US5] Add the live role-change-without-restart test in `src/tests.rs`.
+- [X] T139 [US5] Add key rotation/revocation ingest tests in `src/tests.rs`.
 - [ ] T140 [US5] Add an OIDC mock-provider test covering verified-email linking and uninvited rejection in `src/tests.rs`.
 - [ ] T141 [US5] Run `quickstart.md` scenarios 0, 7, 8, and 11.
 - [X] T142 [US5] Implement owner-only soft-delete at `DELETE /api/projects/{project_id}` in `src/api.rs`, setting `projects.deleted_at`/`deleted_by`, hiding the project from lists and settings, and writing a `project.soft_deleted` audit row.
@@ -427,4 +427,4 @@ Tasks appended by `/speckit-converge` after assessing the current implementation
 - [X] T171 Write attachment bytes through the write-once object store with a recorded `object_key` and serve them from there, keeping only metadata on the event per FR-002 / data-model `attachments` (partial).
 - [X] T172 Add an optional `metadata` jsonb field to `AuditEntry` and the `audit::record` helper so administrative actions can carry structured context per data-model `audit_log` / T006 (partial).
 - [X] T173 Sweep expired sessions periodically (or during the retention worker) so session rows do not accumulate per data-model `sessions` (missing).
-- [ ] T174 Apply `SCOUT_RETENTION_DAYS` and `SCOUT_CONFIDENCE_THRESHOLD` as defaults when a project is created through the provisioning API per plan: configuration / FR-013 (partial).
+- [X] T174 Apply `SCOUT_RETENTION_DAYS` and `SCOUT_CONFIDENCE_THRESHOLD` as defaults when a project is created through the provisioning API per plan: configuration / FR-013 (partial).

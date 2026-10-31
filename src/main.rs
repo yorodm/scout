@@ -91,6 +91,8 @@ async fn main() -> std::io::Result<()> {
         self_url: self_url.clone(),
         ingest_gate: Arc::new(Semaphore::new(config.ingest_max_in_flight)),
         session_ttl_days: config.session_ttl_days,
+        retention_days: config.retention_days.clamp(1, 3650),
+        confidence_threshold: config.confidence_threshold,
         objects,
         storage_ready: Arc::new(AtomicBool::new(true)),
     });

@@ -24,6 +24,7 @@ pub fn event_hex_id() -> String {
 /// storage layer can be swapped without touching the ingest or API paths.
 pub struct Store {
     pub orgs: HashMap<Uuid, Organisation>,
+    pub org_members: HashMap<(Uuid, Uuid), OrgRole>,
     pub projects: HashMap<Uuid, Project>,
     pub projects_by_dsn: HashMap<String, Uuid>,
     pub keys: HashMap<String, IngestKey>,
@@ -37,6 +38,9 @@ pub struct Store {
     pub seen_event_ids: HashMap<(Uuid, String), Uuid>,
     pub logs: Vec<LogLine>,
     pub audit: Vec<AuditEntry>,
+    pub invitations: HashMap<Uuid, Invitation>,
+    pub invitations_by_token: HashMap<String, Uuid>,
+    pub recovery_codes: Vec<RecoveryCode>,
 }
 
 impl Store {
@@ -45,6 +49,7 @@ impl Store {
     pub fn empty() -> Self {
         Self {
             orgs: HashMap::new(),
+            org_members: HashMap::new(),
             projects: HashMap::new(),
             projects_by_dsn: HashMap::new(),
             keys: HashMap::new(),
@@ -58,6 +63,9 @@ impl Store {
             seen_event_ids: HashMap::new(),
             logs: Vec::new(),
             audit: Vec::new(),
+            invitations: HashMap::new(),
+            invitations_by_token: HashMap::new(),
+            recovery_codes: Vec::new(),
         }
     }
 
@@ -76,6 +84,16 @@ impl Store {
 
     pub fn role_for(&self, user_id: Uuid, project_id: Uuid) -> Option<Role> {
         self.memberships.get(&(user_id, project_id)).copied()
+    }
+
+    pub fn org_role_for(&self, user_id: Uuid, org_id: Uuid) -> Option<OrgRole> {
+        self.org_members.get(&(user_id, org_id)).copied()
+    }
+
+    pub fn invitation_by_token(&self, token: &str) -> Option<&Invitation> {
+        self.invitations_by_token
+            .get(&crate::auth::hash_token(token))
+            .and_then(|id| self.invitations.get(id))
     }
 
     pub fn user_for_token(&self, token: &str) -> Option<Uuid> {
@@ -161,6 +179,7 @@ impl Store {
 pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
     let mut raws = Vec::new();
     let mut store = Store::empty();
+    let now = Utc::now();
 
     let org_id = Uuid::new_v4();
     store.orgs.insert(
@@ -169,10 +188,9 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
             id: org_id,
             name: "Acme".into(),
             sso_provider: None,
+            created_at: now - Duration::days(60),
         },
     );
-
-    let now = Utc::now();
 
     let web_id = Uuid::new_v4();
     let web = Project {
@@ -188,6 +206,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
             model: "jev-latest".into(),
             confidence_threshold: 0.5,
         }),
+        confidence_threshold: 0.5,
         deleted_at: None,
         deleted_by: None,
         created_at: now - Duration::days(46),
@@ -201,6 +220,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         org_id,
         retention_days: 14,
         model: None,
+        confidence_threshold: 0.5,
         deleted_at: None,
         deleted_by: None,
         created_at: now - Duration::days(21),
@@ -266,6 +286,9 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         .memberships
         .insert((triager.id, web_id), Role::Triager);
     store.memberships.insert((viewer.id, web_id), Role::Viewer);
+    // The demo owner also administers the demo organisation, so the
+    // provisioning endpoints are usable in demo mode.
+    store.org_members.insert((demo.id, org_id), OrgRole::Admin);
 
     // --- seed issues and their original payloads ---------------------------
     let checkout_event = event_json(

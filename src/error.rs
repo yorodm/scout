@@ -7,6 +7,8 @@ pub enum ApiError {
     Forbidden(String),
     NotFound(String),
     BadRequest(String),
+    Conflict(String),
+    Gone(String),
     PayloadTooLarge(String),
     TooManyRequests {
         message: String,
@@ -22,6 +24,8 @@ impl fmt::Display for ApiError {
             | ApiError::Forbidden(message)
             | ApiError::NotFound(message)
             | ApiError::BadRequest(message)
+            | ApiError::Conflict(message)
+            | ApiError::Gone(message)
             | ApiError::PayloadTooLarge(message)
             | ApiError::ServiceUnavailable(message) => write!(f, "{message}"),
             ApiError::TooManyRequests { message, .. } => write!(f, "{message}"),
@@ -36,6 +40,8 @@ impl ResponseError for ApiError {
             ApiError::Forbidden(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::Gone(_) => StatusCode::GONE,
             ApiError::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::TooManyRequests { .. } => StatusCode::TOO_MANY_REQUESTS,
             ApiError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,

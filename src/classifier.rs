@@ -74,7 +74,7 @@ pub async fn suggest(
             .unwrap_or(0.5)
             .clamp(0.0, 1.0);
         // Below the project's threshold is treated exactly like no answer.
-        if confidence < config.confidence_threshold {
+        if confidence < project.confidence_threshold {
             return None;
         }
         return Some(Suggestion {

@@ -78,6 +78,8 @@ async fn state_for(self_url: &str, max_in_flight: usize) -> web::Data<AppState> 
         self_url: self_url.to_string(),
         ingest_gate: Arc::new(Semaphore::new(max_in_flight.max(1))),
         session_ttl_days: 7,
+        retention_days: 30,
+        confidence_threshold: 0.5,
         objects,
         storage_ready: Arc::new(AtomicBool::new(true)),
     })
@@ -180,6 +182,17 @@ fn delete(uri: &str, token: &str) -> Request {
         .to_request()
 }
 
+fn get_public(uri: &str) -> Request {
+    test::TestRequest::get().uri(uri).to_request()
+}
+
+fn post_public(uri: &str, body: Value) -> Request {
+    test::TestRequest::post()
+        .uri(uri)
+        .set_json(body)
+        .to_request()
+}
+
 fn ingest_request(dsn: &str, key: &str, content_type: &str, body: Vec<u8>, kind: &str) -> Request {
     test::TestRequest::post()
         .uri(&format!("/api/{dsn}/{kind}"))
@@ -194,13 +207,21 @@ where
     S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
     B: MessageBody,
 {
-    let req = test::TestRequest::post()
-        .uri("/api/login")
-        .set_json(json!({ "email": email, "password": crate::store::DEMO_PASSWORD }))
-        .to_request();
-    let (status, body) = call_json(app, req).await;
+    let (status, body) = login_with(app, email, crate::store::DEMO_PASSWORD).await;
     assert_eq!(status, StatusCode::OK, "login for {email} failed: {body}");
     body
+}
+
+async fn login_with<S, B>(app: &S, email: &str, password: &str) -> (StatusCode, Value)
+where
+    S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
+    B: MessageBody,
+{
+    let req = test::TestRequest::post()
+        .uri("/api/login")
+        .set_json(json!({ "email": email, "password": password }))
+        .to_request();
+    call_json(app, req).await
 }
 
 async fn project_id<S, B>(app: &S, token: &str, name: &str) -> Uuid
@@ -2432,4 +2453,448 @@ async fn soft_deleted_project_is_hidden_and_rejects_ingest() {
     // Deleting again is a 404, not a second audit row.
     let (status, _) = call_json(&app, delete(&format!("/api/projects/{project}"), token)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// --- provisioning, invitations, and recovery codes --------------------------
+
+const OPERATOR_PASSWORD: &str = "operator-secret";
+
+fn operator_config() -> crate::config::Config {
+    crate::config::Config {
+        port: 8080,
+        self_url: "http://127.0.0.1:1".into(),
+        ingest_max_in_flight: 256,
+        retention_days: 30,
+        confidence_threshold: 0.5,
+        session_ttl_days: 7,
+        operator_email: Some("ops@test.local".into()),
+        operator_password: Some(OPERATOR_PASSWORD.into()),
+        database_url: None,
+        s3_endpoint: None,
+        s3_bucket: None,
+        demo_mode: false,
+    }
+}
+
+async fn bootstrap_operator(state: &web::Data<AppState>) {
+    let mut store = state.store.write().await;
+    crate::auth::bootstrap_operator(&mut store, &operator_config()).expect("bootstrap operator");
+}
+
+#[actix_web::test]
+async fn operator_provisions_an_org_and_its_initial_admin() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+
+    let (status, auth) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "operator login failed: {auth}");
+    assert_eq!(auth["user"]["is_operator"], true);
+    let operator_token = auth["token"].as_str().unwrap();
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            "/api/orgs",
+            operator_token,
+            json!({ "name": "Beta", "initial_admin_email": "admin@beta.test" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create org failed: {body}");
+    let org_id = body["organisation"]["id"].as_str().unwrap().to_string();
+    let setup_token = body["initial_admin_setup_token"]
+        .as_str()
+        .expect("a setup token")
+        .to_string();
+
+    let (status, preview) =
+        call_json(&app, get_public(&format!("/api/invitations/{setup_token}"))).await;
+    assert_eq!(status, StatusCode::OK, "preview failed: {preview}");
+    assert_eq!(preview["organisation"], "Beta");
+    assert_eq!(preview["email"], "admin@beta.test");
+
+    let (status, accepted) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{setup_token}/accept"),
+            json!({ "name": "Beta Admin", "password": "beta-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "accept failed: {accepted}");
+    assert_eq!(accepted["user"]["email"], "admin@beta.test");
+    assert_eq!(accepted["recovery_codes"].as_array().unwrap().len(), 10);
+    let admin_token = accepted["token"]
+        .as_str()
+        .expect("a session for the new admin")
+        .to_string();
+
+    // Setup tokens are single use.
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{setup_token}/accept"),
+            json!({ "name": "Again", "password": "again-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+
+    // The initial admin signs in and creates the first project.
+    let (status, _) = login_with(&app, "admin@beta.test", "beta-pw").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/projects"),
+            &admin_token,
+            json!({ "name": "billing", "slug": "billing" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create project failed: {body}");
+    assert_eq!(body["project"]["retention_days"], 30);
+    assert_eq!(body["project"]["confidence_threshold"], 0.5);
+    let project_id = Uuid::parse_str(body["project"]["id"].as_str().unwrap()).unwrap();
+    let dsn = body["project"]["dsn_id"].as_str().unwrap().to_string();
+    let key = body["key"].as_str().unwrap().to_string();
+
+    // The freshly created key ingests unmodified Sentry traffic.
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            &dsn,
+            &key,
+            "application/x-sentry-envelope",
+            envelope(&[event(
+                &hex_id(98),
+                "provisioned path",
+                &["provisioned-group"],
+            )]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+    wait_for_issue_count(
+        &app,
+        &admin_token,
+        project_id,
+        "IntegrationError: provisioned path",
+        1,
+    )
+    .await;
+
+    // Only the operator may create organisations.
+    let (status, _) = call_json(
+        &app,
+        post_json(
+            "/api/orgs",
+            &admin_token,
+            json!({ "name": "Nope", "initial_admin_email": "x@y.z" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let store = state.store.read().await;
+    for action in [
+        "organisation.created",
+        "org_admin_setup.issued",
+        "invitation.accepted",
+        "project.created",
+    ] {
+        assert!(
+            store.audit.iter().any(|entry| entry.action == action),
+            "missing audit row {action}"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn existing_account_binds_org_admin_with_a_session_and_keeps_its_password() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+    let (_, operator) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    let operator_token = operator["token"].as_str().unwrap();
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            "/api/orgs",
+            operator_token,
+            json!({ "name": "Gamma", "initial_admin_email": "demo@scout.local" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create org failed: {body}");
+    let org_id = Uuid::parse_str(body["organisation"]["id"].as_str().unwrap()).unwrap();
+    let setup_token = body["initial_admin_setup_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let accept_uri = format!("/api/invitations/{setup_token}/accept");
+
+    let (status, _) = call_json(
+        &app,
+        post_public(&accept_uri, json!({ "password": "stolen" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an existing account must sign in first"
+    );
+
+    let demo = login(&app, "demo@scout.local").await;
+    let demo_token = demo["token"].as_str().unwrap();
+    let demo_id = Uuid::parse_str(demo["user"]["id"].as_str().unwrap()).unwrap();
+
+    let (status, _) = call_json(
+        &app,
+        post_json(&accept_uri, demo_token, json!({ "password": "changed" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = call_json(&app, post_json(&accept_uri, demo_token, json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "accept failed: {body}");
+    assert!(
+        body["recovery_codes"].as_array().unwrap().is_empty(),
+        "an existing account gets no new recovery-code set"
+    );
+    assert_eq!(
+        state.store.read().await.org_role_for(demo_id, org_id),
+        Some(crate::models::OrgRole::Admin)
+    );
+    let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "the password must be unchanged");
+}
+
+#[actix_web::test]
+async fn project_invitations_preview_accept_and_revoke() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let demo = login(&app, "demo@scout.local").await;
+    let token = demo["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+    let org_id = state.store.read().await.projects[&web].org_id;
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/invitations"),
+            token,
+            json!({ "email": "invitee@test.local", "project_id": web, "role": "triager" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "invite failed: {body}");
+    let invite_token = body["token"].as_str().unwrap().to_string();
+
+    let (status, preview) = call_json(
+        &app,
+        get_public(&format!("/api/invitations/{invite_token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "preview failed: {preview}");
+    assert_eq!(preview["role"], "triager");
+    assert_eq!(preview["project"], "scout-web");
+
+    let (status, accepted) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{invite_token}/accept"),
+            json!({ "name": "In Vitee", "password": "invitee-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "accept failed: {accepted}");
+    let invitee_token = accepted["token"].as_str().unwrap();
+    let (status, list) = call_json(&app, get("/api/projects", invitee_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let project = list["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["id"] == web.to_string())
+        .expect("the invited project");
+    assert_eq!(project["role"], "triager");
+
+    // Reuse is rejected.
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{invite_token}/accept"),
+            json!({ "name": "Again", "password": "again-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+
+    // Revocation invalidates a pending invitation.
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/invitations"),
+            token,
+            json!({ "email": "revoked@test.local", "project_id": web, "role": "viewer" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "invite failed: {body}");
+    let revoked_token = body["token"].as_str().unwrap().to_string();
+    let invitation_id = body["invitation"]["id"].as_str().unwrap().to_string();
+    let (status, _) = call_json(
+        &app,
+        delete(
+            &format!("/api/orgs/{org_id}/invitations/{invitation_id}"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call_json(
+        &app,
+        get_public(&format!("/api/invitations/{revoked_token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+}
+
+#[actix_web::test]
+async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let demo = login(&app, "demo@scout.local").await;
+    let token = demo["token"].as_str().unwrap();
+
+    let (status, body) =
+        call_json(&app, post_json("/api/me/recovery-codes", token, json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "reissue failed: {body}");
+    let codes: Vec<String> = body["recovery_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| code.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(codes.len(), 10);
+
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": codes[0], "new_password": "reset-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the old password no longer works"
+    );
+    let (status, auth) = login_with(&app, "demo@scout.local", "reset-pw").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A used code cannot be reused.
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": codes[0], "new_password": "again-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // An unknown code and an unknown email fail the same way.
+    for body in [
+        json!({ "email": "demo@scout.local", "recovery_code": "AAAAA-BBBBB", "new_password": "nope-pw" }),
+        json!({ "email": "nobody@test.local", "recovery_code": codes[1], "new_password": "nope-pw" }),
+    ] {
+        let (status, _) = call_json(&app, post_public("/api/recover", body)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // Reissuing revokes every remaining unused code.
+    let token = auth["token"].as_str().unwrap();
+    let (status, body) =
+        call_json(&app, post_json("/api/me/recovery-codes", token, json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "reissue failed: {body}");
+    let new_codes: Vec<String> = body["recovery_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| code.as_str().unwrap().to_string())
+        .collect();
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": codes[1], "new_password": "third-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the previous unused set is invalidated"
+    );
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": new_codes[0], "new_password": "third-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn key_rotation_revokes_the_previous_key() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let demo = login(&app, "demo@scout.local").await;
+    let token = demo["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/projects/{web}/keys/rotate"),
+            token,
+            json!({ "label": "ci" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rotation failed: {body}");
+    let new_key = body["key"].as_str().unwrap().to_string();
+
+    let (status, _) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(99), "rotated old", &["rotate-old"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the old key is revoked");
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            &new_key,
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(100), "rotated new", &["rotate-new"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the new key works: {body}");
 }

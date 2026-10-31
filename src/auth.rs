@@ -5,7 +5,7 @@
 //! module also owns the idempotent deployment-operator bootstrap.
 
 use crate::config::Config;
-use crate::models::User;
+use crate::models::{RecoveryCode, User};
 use crate::store::Store;
 use argon2::password_hash::{
     rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
@@ -13,6 +13,7 @@ use argon2::password_hash::{
 use argon2::Argon2;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use chrono::Utc;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -125,7 +126,6 @@ SCOUT_OPERATOR_PASSWORD (neither may be blank) and restart"
 }
 
 /// A single-use recovery code in `XXXXX-XXXXX` form. Only the hash is stored.
-#[allow(dead_code)] // used by account creation/reissue in the recovery slice
 pub fn new_recovery_code() -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let bytes: [u8; 10] = rand::random();
@@ -134,6 +134,96 @@ pub fn new_recovery_code() -> String {
         .map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char)
         .collect();
     format!("{}-{}", &code[..5], &code[5..])
+}
+
+/// Create a local account with a hashed password. Callers must have already
+/// authorised the creation (invitation acceptance or initial-admin setup).
+pub fn create_local_account(
+    store: &mut Store,
+    email: &str,
+    name: &str,
+    password: &str,
+) -> Result<User, String> {
+    let email = email.trim().to_ascii_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err("a valid email address is required".into());
+    }
+    if store.user_by_email(&email).is_some() {
+        return Err("an account with that email already exists".into());
+    }
+    if password.is_empty() {
+        return Err("a password is required for a new account".into());
+    }
+    let password_hash = hash_password(password)?;
+    let user = User {
+        id: Uuid::new_v4(),
+        email: email.clone(),
+        name: name.trim().to_string(),
+        password_hash: Some(password_hash),
+        is_operator: false,
+    };
+    store.users.insert(user.id, user.clone());
+    store.users_by_email.insert(email, user.id);
+    Ok(user)
+}
+
+/// Issue a fresh set of recovery codes, revoking every unused code first. The
+/// plaintext codes are returned once; only hashes are stored.
+pub fn issue_recovery_codes(store: &mut Store, user_id: Uuid, count: usize) -> Vec<String> {
+    let now = Utc::now();
+    for code in &mut store.recovery_codes {
+        if code.user_id == user_id && code.used_at.is_none() && code.revoked_at.is_none() {
+            code.revoked_at = Some(now);
+        }
+    }
+    let mut plain = Vec::with_capacity(count);
+    for _ in 0..count {
+        let code = new_recovery_code();
+        store.recovery_codes.push(RecoveryCode {
+            id: Uuid::new_v4(),
+            user_id,
+            code_hash: hash_token(&code),
+            created_at: now,
+            used_at: None,
+            revoked_at: None,
+        });
+        plain.push(code);
+    }
+    plain
+}
+
+/// Consume a recovery code and set a new password. Any failure is reported as the
+/// same error so codes and accounts cannot be probed.
+pub fn redeem_recovery_code(
+    store: &mut Store,
+    email: &str,
+    code: &str,
+    new_password: &str,
+) -> Result<Uuid, String> {
+    let user_id = store
+        .user_by_email(email)
+        .map(|user| user.id)
+        .ok_or_else(|| "invalid email or recovery code".to_string())?;
+    if new_password.is_empty() {
+        return Err("a new password is required".into());
+    }
+    let code_hash = hash_token(code.trim());
+    let now = Utc::now();
+    let entry = store.recovery_codes.iter_mut().find(|entry| {
+        entry.user_id == user_id
+            && entry.code_hash == code_hash
+            && entry.used_at.is_none()
+            && entry.revoked_at.is_none()
+    });
+    let Some(entry) = entry else {
+        return Err("invalid email or recovery code".into());
+    };
+    let password_hash = hash_password(new_password)?;
+    entry.used_at = Some(now);
+    if let Some(user) = store.users.get_mut(&user_id) {
+        user.password_hash = Some(password_hash);
+    }
+    Ok(user_id)
 }
 
 #[cfg(test)]

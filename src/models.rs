@@ -8,6 +8,79 @@ pub struct Organisation {
     pub id: Uuid,
     pub name: String,
     pub sso_provider: Option<String>,
+    #[serde(default)]
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrgRole {
+    Admin,
+    Member,
+}
+
+impl std::fmt::Display for OrgRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrgRole::Admin => write!(f, "org_admin"),
+            OrgRole::Member => write!(f, "org_member"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvitationKind {
+    ProjectInvite,
+    OrgAdminSetup,
+}
+
+impl std::fmt::Display for InvitationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InvitationKind::ProjectInvite => write!(f, "project_invite"),
+            InvitationKind::OrgAdminSetup => write!(f, "org_admin_setup"),
+        }
+    }
+}
+
+/// A one-time invitation. Only the SHA-256 of the token is stored.
+#[derive(Clone, Debug)]
+pub struct Invitation {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub kind: InvitationKind,
+    pub project_id: Option<Uuid>,
+    pub email: String,
+    pub role: Option<Role>,
+    /// Kept alongside the `invitations_by_token` key for PostgreSQL parity.
+    #[allow(dead_code)]
+    pub token_hash: String,
+    #[allow(dead_code)]
+    pub created_by: Uuid,
+    pub expires_at: DateTime<Utc>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub accepted_user_id: Option<Uuid>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+impl Invitation {
+    pub fn is_pending(&self) -> bool {
+        self.accepted_at.is_none() && self.revoked_at.is_none() && self.expires_at > Utc::now()
+    }
+}
+
+/// A single-use recovery code; only its SHA-256 is stored.
+#[derive(Clone, Debug)]
+pub struct RecoveryCode {
+    #[allow(dead_code)]
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub code_hash: String,
+    #[allow(dead_code)]
+    pub created_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
 }
 
 fn default_confidence_threshold() -> f64 {
@@ -34,6 +107,10 @@ pub struct Project {
     pub org_id: Uuid,
     pub retention_days: u32,
     pub model: Option<ModelConfig>,
+    /// Authoritative suggestion threshold for the project; new projects use
+    /// `SCOUT_CONFIDENCE_THRESHOLD` and settings updates carry it through.
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
     /// Set when an owner soft-deletes the project. Rows, objects, and logs stay
     /// and remain subject to retention.
     #[serde(default)]
