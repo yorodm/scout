@@ -468,7 +468,8 @@ async fn ingest_rejects_unknown_and_mismatched_keys() {
         .write()
         .await
         .keys
-        .get_mut("scout_demo_key")
+        .values_mut()
+        .find(|key| key.key_hash == crate::auth::hash_token("scout_demo_key"))
         .expect("seeded demo key")
         .revoked = true;
     let (status, revoked) = call_json(
@@ -1009,9 +1010,14 @@ async fn revoked_key_cannot_ingest() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "key creation failed: {body}");
-    let key = body["key"]["key"].as_str().unwrap().to_string();
-    let key_id = body["key"]["id"].as_str().unwrap().to_string();
+    let key = body["key"].as_str().unwrap().to_string();
+    let key_id = body["id"].as_str().unwrap().to_string();
     assert!(key.starts_with("scout_"));
+    assert_eq!(body["key_prefix"], key.chars().take(12).collect::<String>());
+    assert!(
+        body.get("key_hash").is_none(),
+        "hashes must never be returned"
+    );
 
     let (status, body) = call_json(
         &app,
@@ -2503,6 +2509,10 @@ async fn operator_provisions_an_org_and_its_initial_admin() {
     .await;
     assert_eq!(status, StatusCode::OK, "create org failed: {body}");
     let org_id = body["organisation"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        body["organisation"]["created_by"], auth["user"]["id"],
+        "the creating operator must be recorded"
+    );
     let setup_token = body["initial_admin_setup_token"]
         .as_str()
         .expect("a setup token")
@@ -2897,4 +2907,142 @@ async fn key_rotation_revokes_the_previous_key() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "the new key works: {body}");
+}
+
+// --- additional convergence items -------------------------------------------
+
+#[actix_web::test]
+async fn api_never_exposes_ingest_key_plaintext() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let demo = login(&app, "demo@scout.local").await;
+    let token = demo["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+
+    for uri in [
+        "/api/projects".to_string(),
+        format!("/api/projects/{web}"),
+        format!("/api/projects/{web}/settings"),
+        format!("/api/projects/{web}/keys"),
+    ] {
+        let (status, body) = call_json(&app, get(&uri, token)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        let text = body.to_string();
+        assert!(
+            !text.contains("scout_demo_key") && !text.contains("scout_platform_key"),
+            "{uri} leaked a plaintext ingest key: {body}"
+        );
+        assert!(
+            !text.contains("key_hash"),
+            "{uri} leaked a key hash: {body}"
+        );
+    }
+
+    let (status, settings) =
+        call_json(&app, get(&format!("/api/projects/{web}/settings"), token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        settings["key_prefix"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("scout_"),
+        "the prefix remains available for identification: {settings}"
+    );
+
+    // Seeded keys still authenticate ingest through the hash lookup.
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(120), "hashed key works", &["hashed-key"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "hashed key lookup failed: {body}");
+
+    // Creation reveals the plaintext once and never the hash.
+    let (status, created) = call_json(
+        &app,
+        post_json(
+            &format!("/api/projects/{web}/keys"),
+            token,
+            json!({ "label": "ci" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create key failed: {created}");
+    let plaintext = created["key"].as_str().expect("plaintext once").to_string();
+    assert!(plaintext.starts_with("scout_"));
+    assert!(created.get("key_hash").is_none());
+
+    let (status, listed) = call_json(&app, get(&format!("/api/projects/{web}/keys"), token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !listed.to_string().contains(&plaintext),
+        "the plaintext must never be retrievable again: {listed}"
+    );
+    assert!(listed["keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|key| key["key_prefix"] == created["key_prefix"]));
+}
+
+#[actix_web::test]
+async fn disabled_account_cannot_sign_in() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+
+    {
+        let mut store = state.store.write().await;
+        let user_id = store
+            .user_by_email("demo@scout.local")
+            .expect("demo account")
+            .id;
+        store.users.get_mut(&user_id).unwrap().disabled_at = Some(chrono::Utc::now());
+    }
+
+    let (status, body) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body: {body}");
+    assert!(body["error"].as_str().unwrap_or("").contains("disabled"));
+
+    {
+        let mut store = state.store.write().await;
+        let user_id = store
+            .user_by_email("demo@scout.local")
+            .expect("demo account")
+            .id;
+        store.users.get_mut(&user_id).unwrap().disabled_at = None;
+    }
+    let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn retention_sweep_also_removes_expired_sessions() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+
+    let expired = crate::auth::new_token();
+    let expired_hash = crate::auth::hash_token(&expired);
+    state.store.write().await.sessions.insert(
+        expired_hash.clone(),
+        crate::models::Session {
+            user_id: Uuid::new_v4(),
+            expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+        },
+    );
+
+    let (sessions_removed, _objects_removed) =
+        crate::worker::sweep_once(&state.store, &state.objects).await;
+
+    assert_eq!(sessions_removed, 1);
+    assert!(!state
+        .store
+        .read()
+        .await
+        .sessions
+        .contains_key(&expired_hash));
 }

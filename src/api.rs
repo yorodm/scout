@@ -215,6 +215,9 @@ pub async fn login(
         .user_by_email(&body.email)
         .cloned()
         .ok_or_else(invalid_credentials)?;
+    if user.disabled_at.is_some() {
+        return Err(ApiError::Forbidden("this account is disabled".into()));
+    }
     let Some(hash) = user.password_hash.as_deref() else {
         // An account that only authenticates through OIDC has no local password.
         return Err(invalid_credentials());
@@ -353,8 +356,10 @@ pub async fn list_projects(
             .iter()
             .filter(|l| l.project_id == *project_id)
             .count();
-        let key = if role.can_manage() {
-            store.active_key_for(*project_id).map(|k| k.key.clone())
+        let key_prefix = if role.can_manage() {
+            store
+                .active_key_for(*project_id)
+                .map(|k| k.key_prefix.clone())
         } else {
             None
         };
@@ -370,7 +375,7 @@ pub async fn list_projects(
             "logs": logs,
             "model_configured": project.model.is_some(),
             "retention_days": project.retention_days,
-            "key": key,
+            "key_prefix": key_prefix,
         }));
     }
     projects.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
@@ -390,8 +395,10 @@ pub async fn get_project(
         .get(&project_id)
         .cloned()
         .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
-    let key = if role.can_manage() {
-        store.active_key_for(project_id).map(|k| k.key.clone())
+    let key_prefix = if role.can_manage() {
+        store
+            .active_key_for(project_id)
+            .map(|k| k.key_prefix.clone())
     } else {
         None
     };
@@ -399,7 +406,7 @@ pub async fn get_project(
     Ok(HttpResponse::Ok().json(json!({
         "project": project,
         "role": role,
-        "key": key,
+        "key_prefix": key_prefix,
         "model_api_key_configured": api_key_configured,
     })))
 }
@@ -541,7 +548,7 @@ pub async fn list_orgs(
     let mut organisations: Vec<Value> = store
         .orgs
         .values()
-        .map(|org| json!({ "id": org.id, "name": org.name, "created_at": org.created_at }))
+        .map(|org| json!({ "id": org.id, "name": org.name, "created_by": org.created_by, "created_at": org.created_at }))
         .collect();
     organisations.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(HttpResponse::Ok().json(json!({ "organisations": organisations })))
@@ -571,6 +578,7 @@ pub async fn create_org(
         id: org_id,
         name: name.to_string(),
         sso_provider: None,
+        created_by: Some(operator_id),
         created_at: Utc::now(),
     };
     store.orgs.insert(org_id, organisation.clone());
@@ -910,13 +918,16 @@ pub async fn create_project(
         .insert((actor_id, project.id), Role::Owner);
 
     let plaintext = format!("scout_{}", crate::auth::new_token());
+    let key_hash = crate::auth::hash_token(&plaintext);
+    let key_id = Uuid::new_v4();
     store.keys.insert(
-        plaintext.clone(),
+        key_id,
         IngestKey {
-            id: Uuid::new_v4(),
+            id: key_id,
             project_id: project.id,
             label: "Default".into(),
-            key: plaintext.clone(),
+            key_hash,
+            key_prefix: crate::auth::token_prefix(&plaintext, 12),
             created_at: now,
             revoked: false,
         },
@@ -970,13 +981,16 @@ pub async fn rotate_key(
         }
     }
     let plaintext = format!("scout_{}", crate::auth::new_token());
+    let key_hash = crate::auth::hash_token(&plaintext);
+    let key_id = Uuid::new_v4();
     store.keys.insert(
-        plaintext.clone(),
+        key_id,
         IngestKey {
-            id: Uuid::new_v4(),
+            id: key_id,
             project_id,
             label,
-            key: plaintext.clone(),
+            key_hash,
+            key_prefix: crate::auth::token_prefix(&plaintext, 12),
             created_at: Utc::now(),
             revoked: false,
         },
@@ -1679,6 +1693,9 @@ pub async fn create_key(
             "admin role or above is required".into(),
         ));
     }
+    let plaintext = format!("scout_{}", Uuid::new_v4().simple());
+    let key_hash = crate::auth::hash_token(&plaintext);
+    let key_prefix = crate::auth::token_prefix(&plaintext, 12);
     let key = IngestKey {
         id: Uuid::new_v4(),
         project_id,
@@ -1687,12 +1704,13 @@ pub async fn create_key(
             .clone()
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "New key".into()),
-        key: format!("scout_{}", Uuid::new_v4().simple()),
+        key_hash: key_hash.clone(),
+        key_prefix: key_prefix.clone(),
         created_at: Utc::now(),
         revoked: false,
     };
     let mut store = state.store.write().await;
-    store.keys.insert(key.key.clone(), key.clone());
+    store.keys.insert(key.id, key.clone());
     crate::audit::record(
         &mut store,
         None,
@@ -1701,7 +1719,16 @@ pub async fn create_key(
         "key.created",
         Some(key.label.clone()),
     );
-    Ok(HttpResponse::Ok().json(json!({ "key": key })))
+    // The plaintext is returned exactly once; every other response exposes only
+    // the prefix and never the hash.
+    Ok(HttpResponse::Ok().json(json!({
+        "key": plaintext,
+        "id": key.id,
+        "label": key.label,
+        "key_prefix": key_prefix,
+        "created_at": key.created_at,
+        "revoked": false,
+    })))
 }
 
 pub async fn revoke_key(
@@ -1765,15 +1792,15 @@ pub async fn get_settings(
             "admin role or above is required".into(),
         ));
     }
-    let host = req.connection_info().host().to_string();
     let store = state.store.read().await;
     let project = store
         .projects
         .get(&project_id)
         .cloned()
         .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
-    let key = store.active_key_for(project_id).map(|k| k.key.clone());
-    let dsn = key.map(|k| format!("http://{k}@{host}/{}", project.dsn_id));
+    let key_prefix = store
+        .active_key_for(project_id)
+        .map(|k| k.key_prefix.clone());
     let mut keys: Vec<IngestKey> = store
         .keys
         .values()
@@ -1781,11 +1808,13 @@ pub async fn get_settings(
         .cloned()
         .collect();
     keys.sort_by_key(|k| std::cmp::Reverse(k.created_at));
+    let dsn_id = project.dsn_id.clone();
     let (project, api_key_configured) = public_project(project);
     Ok(HttpResponse::Ok().json(json!({
         "project": project,
         "role": role,
-        "dsn": dsn,
+        "dsn_id": dsn_id,
+        "key_prefix": key_prefix,
         "keys": keys,
         "model_api_key_configured": api_key_configured,
         "mock_model_endpoint": format!("{}/mock-jev", state.self_url.trim_end_matches('/')),

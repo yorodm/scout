@@ -27,7 +27,7 @@ pub struct Store {
     pub org_members: HashMap<(Uuid, Uuid), OrgRole>,
     pub projects: HashMap<Uuid, Project>,
     pub projects_by_dsn: HashMap<String, Uuid>,
-    pub keys: HashMap<String, IngestKey>,
+    pub keys: HashMap<Uuid, IngestKey>,
     pub users: HashMap<Uuid, User>,
     pub users_by_email: HashMap<String, Uuid>,
     pub memberships: HashMap<(Uuid, Uuid), Role>,
@@ -188,6 +188,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
             id: org_id,
             name: "Acme".into(),
             sso_provider: None,
+            created_by: None,
             created_at: now - Duration::days(60),
         },
     );
@@ -239,15 +240,17 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         (web_id, "scout_demo_key", "Default"),
         (platform_id, "scout_platform_key", "Default"),
     ] {
+        let key_hash = crate::auth::hash_token(key);
         let ingest_key = IngestKey {
             id: Uuid::new_v4(),
             project_id,
             label: label.into(),
-            key: key.into(),
+            key_hash,
+            key_prefix: crate::auth::token_prefix(key, 12),
             created_at: now - Duration::days(40),
             revoked: false,
         };
-        store.keys.insert(key.into(), ingest_key);
+        store.keys.insert(ingest_key.id, ingest_key);
     }
 
     let demo_hash = demo_password_hash();
@@ -257,6 +260,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         name: "Dana Demo".into(),
         password_hash: Some(demo_hash.clone()),
         is_operator: false,
+        disabled_at: None,
     };
     let triager = User {
         id: Uuid::new_v4(),
@@ -264,6 +268,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         name: "Toni Triager".into(),
         password_hash: Some(demo_hash.clone()),
         is_operator: false,
+        disabled_at: None,
     };
     let viewer = User {
         id: Uuid::new_v4(),
@@ -271,6 +276,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         name: "Vic Viewer".into(),
         password_hash: Some(demo_hash),
         is_operator: false,
+        disabled_at: None,
     };
     for user in [&demo, &triager, &viewer] {
         store.users.insert(user.id, user.clone());

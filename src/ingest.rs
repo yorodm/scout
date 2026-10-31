@@ -151,7 +151,12 @@ async fn authenticate(
         .project_by_identifier(project_ref)
         .cloned()
         .ok_or_else(|| ApiError::NotFound("project not found".into()))?;
-    let key = store.keys.get(&key_str).ok_or_else(invalid_key)?;
+    let key_hash = crate::auth::hash_token(&key_str);
+    let key = store
+        .keys
+        .values()
+        .find(|key| key.key_hash == key_hash)
+        .ok_or_else(invalid_key)?;
     // A soft-deleted project rejects every key exactly like an invalid one.
     if key.revoked || key.project_id != project.id || project.deleted_at.is_some() {
         return Err(invalid_key());

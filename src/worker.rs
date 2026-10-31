@@ -31,33 +31,43 @@ pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: re
 }
 
 /// Periodically expire raw payloads and log lines for every project and delete
-/// the objects they referenced. Issue rows and counters are never removed here.
+/// the objects they referenced, and remove expired sessions. Issue rows and
+/// counters are never removed here.
 pub fn spawn_retention(store: Arc<RwLock<Store>>, objects: Arc<Objects>, period: Duration) {
     actix_web::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         loop {
             ticker.tick().await;
-            let keys = {
-                let mut store = store.write().await;
-                let projects: Vec<Project> = store.projects.values().cloned().collect();
-                projects
-                    .iter()
-                    .flat_map(|project| store.apply_retention(project))
-                    .collect::<Vec<_>>()
-            };
-            if !keys.is_empty() {
+            let (sessions, objects_deleted) = sweep_once(&store, &objects).await;
+            if sessions > 0 || objects_deleted > 0 {
                 tracing::debug!(
-                    expired_objects = keys.len(),
-                    "retention sweep expired payloads"
+                    expired_sessions = sessions,
+                    expired_objects = objects_deleted,
+                    "retention sweep completed"
                 );
-            }
-            for key in keys {
-                if let Err(error) = objects.delete(&key).await {
-                    tracing::warn!(%key, %error, "retention could not delete an object");
-                }
             }
         }
     });
+}
+
+/// One retention pass. Returns `(expired_sessions, expired_objects)`.
+pub async fn sweep_once(store: &Arc<RwLock<Store>>, objects: &Arc<Objects>) -> (usize, usize) {
+    let (sessions, keys) = {
+        let mut store = store.write().await;
+        let sessions = store.sweep_sessions();
+        let projects: Vec<Project> = store.projects.values().cloned().collect();
+        let keys: Vec<String> = projects
+            .iter()
+            .flat_map(|project| store.apply_retention(project))
+            .collect();
+        (sessions, keys)
+    };
+    for key in &keys {
+        if let Err(error) = objects.delete(key).await {
+            tracing::warn!(%key, %error, "retention could not delete an object");
+        }
+    }
+    (sessions, keys.len())
 }
 
 async fn process_event(
