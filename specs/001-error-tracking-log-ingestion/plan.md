@@ -14,11 +14,13 @@ Jev-compatible decisions endpoint only *suggests* a category after storage; inge
 The repository already contains a working prototype: Actix API, Sycamore/Tailwind UI, in-memory
 metadata store, and an in-process grouping/classification worker. This plan takes that prototype to
 the specified product: PostgreSQL and object storage replace the in-memory store, a deployment
-operator is bootstrapped from environment variables and creates organisations plus each
-organisation's initial admin, local accounts gain password authentication, token-based invitations,
-and single-use recovery codes, the classifier applies redaction and a per-project confidence
-threshold, triage gains the `ignored` state and decision-based filtering, ingest gains a configurable
-global backpressure cap, and durability/authorisation rules become explicit.
+operator is bootstrapped from environment variables (failing fast when bootstrap values are missing)
+and creates organisations plus each organisation's initial admin, local accounts gain password
+authentication, token-based invitations, and single-use recovery codes that any authenticated account
+can reissue, existing accounts are bound to an initial-admin role only after authenticating and
+consenting, the classifier applies redaction and a per-project confidence threshold, triage gains the
+`ignored` state and decision-based filtering, ingest gains a configurable global backpressure cap, and
+durability/authorisation rules become explicit.
 
 ## Technical Context
 
@@ -53,11 +55,14 @@ items visible in issue/log lists within 10 seconds (SC-005); classifier work ent
 path with a bounded 800 ms attempt (at most one retry).
 
 **Constraints**: 10 MB per ingest request and per attachment (FR-007); no ingest dependency on the
-classifier (FR-009, FR-018); a global in-flight ingest concurrency cap returning `429` with
-`Retry-After` (FR-035); raw payloads are write-once and never rewritten (FR-034); one compose file
-for app, PostgreSQL, and object storage (FR-032); the deployment operator is seeded from environment
-variables only when none exists, and later starts never reset its password (FR-030); no Node.js in
-the build; UI served by the same binary; migrations idempotent and safe for concurrent starts.
+classifier (FR-009, FR-018); a global in-flight ingest concurrency cap (default 256) returning `429`
+with `Retry-After` (FR-035); raw payloads are write-once and never rewritten (FR-034); one compose
+file for app, PostgreSQL, and object storage (FR-032); the deployment operator is seeded from
+environment variables only when none exists, and startup fails with an actionable error when no
+operator exists and bootstrap values are missing (FR-030); an existing account is bound to an
+initial-admin role only after authentication and consent, without a password change (FR-025,
+FR-030); no Node.js in the build; UI served by the same binary; migrations idempotent and safe for
+concurrent starts.
 
 **Scale/Scope**: Planning target for one deployment: up to 50 projects, up to 1,000 members, 30-day
 default retention, 50 million stored events per month. These are sizing assumptions, not new product
@@ -173,8 +178,10 @@ constraints.
    with `429` + `Retry-After`; keep the prototype's in-process channel as the test-only default.
 4. **Authentication and provisioning**: Argon2id password hashing, opaque session tokens stored
    hashed with expiry, invite tokens redeemed at account creation, single-use recovery codes for
-   password reset, the idempotent environment-seeded deployment operator, one-time setup tokens for
-   an organisation's initial admin, and optional OIDC account linking by verified email.
+   password reset plus authenticated reissue, the idempotent environment-seeded deployment operator
+   with fail-fast missing-value handling, one-time setup tokens for an organisation's initial admin
+   (binding an existing account only after authentication and consent, without changing its
+   password), and optional OIDC account linking by verified email.
 5. **Classifier hardening**: redact sensitive fields before building the ≤2 KB summary; apply the
    per-project confidence threshold (default 0.5); enforce the 800 ms budget and single retry.
 6. **API and UI alignment**: operator organisation creation and initial-admin setup screens, settings

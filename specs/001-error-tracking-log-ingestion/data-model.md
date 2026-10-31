@@ -148,9 +148,12 @@ Logout deletes the row. Expired rows are swept periodically.
 | `code_hash` | text | not null, unique; SHA-256 of the single-use code |
 | `created_at` | timestamptz | not null |
 | `used_at` | timestamptz | nullable |
+| `revoked_at` | timestamptz | nullable; set when the account reissues its codes |
 
 A set of single-use codes is issued when a local account is created and shown once. Redemption sets a
-new password and marks the code used; the remaining codes stay valid until used or replaced.
+new password and marks the code used; the remaining codes stay valid until used or replaced. An
+authenticated account can reissue the set: prior unused codes are revoked and the new set is shown
+once.
 
 ### `issues`
 
@@ -267,7 +270,7 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
 | Column | Type | Constraints |
 |--------|------|-------------|
 | `id` | uuid | PK |
-| `org_id` | uuid | FK → organisations, not null |
+| `org_id` | uuid | FK → organisations, nullable; null for deployment-level actions (operator bootstrap) |
 | `project_id` | uuid | nullable |
 | `actor_user_id` | uuid | nullable |
 | `action` | text | e.g. `role.granted`, `key.revoked`, `model.updated` |
@@ -297,6 +300,12 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
   before project invitations are issued.
 - `org_admin_setup` tokens are single-use, hashed at rest, and expire after 7 days; accepting one
   creates or binds the initial admin and grants `org_admin`.
+- If an `org_admin_setup` token's email belongs to an existing account, acceptance requires that
+  account to authenticate and consent; `accepted_user_id` is set and `password_hash` is unchanged.
+- Reissuing recovery codes revokes all prior unused codes and returns the new set once; only hashes
+  are stored.
+- On startup, if no operator exists and either bootstrap value is missing or blank, startup fails and
+  no partial operator row is created.
 - Operator-created accounts are limited to the initial organisation admin; all other accounts are
   created by invitation.
 
@@ -313,9 +322,12 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
 | Invitation | pending | invitee redeems | accepted | `accepted_at` set; membership created |
 | Invitation | pending | admin revokes / expires | revoked / expired | Token no longer redeemable |
 | Deployment operator | — | startup, no operator exists | active | Seeded from env; password hashed |
+| Deployment operator | — | startup, no operator and vars missing | startup fails | Actionable error; no row created |
 | Deployment operator | active | later startup with env set | unchanged | Password not reset; warning logged |
 | Organisation | — | operator creates | active | `created_by` set; initial-admin setup token issued |
-| Initial admin setup | pending | token redeemed | accepted | User created or bound; `org_admin` granted |
+| Initial admin setup | pending | new account redeems | accepted | User created; password set; `org_admin` granted |
+| Initial admin setup | pending | existing account authenticates and consents | accepted | `accepted_user_id` set; password unchanged |
+| Recovery code | active | authenticated reissue | revoked | Prior unused codes invalidated; new set shown once |
 | Ingest key | — | owner/admin creates | active | Plaintext shown once |
 | Ingest key | active | owner/admin revokes | revoked | Terminal; already-stored events unaffected |
 | Session | — | successful sign-in | active | Opaque token returned once |

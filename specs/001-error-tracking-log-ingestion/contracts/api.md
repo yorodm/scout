@@ -22,8 +22,9 @@ Statuses used: `400` bad request, `401` unauthenticated, `403` authenticated but
 
 On startup, if no user has `is_operator = true`, Scout creates the deployment operator from
 `SCOUT_OPERATOR_EMAIL` and `SCOUT_OPERATOR_PASSWORD`. The password is hashed with Argon2id and never
-logged. Later starts ignore the variables and do not reset the stored password. The operator signs in
-through `POST /api/login`; its user object has `is_operator: true`.
+logged. If no operator exists and either value is missing or blank, startup fails with an actionable
+error naming the missing values. Later starts ignore the variables and do not reset the stored
+password. The operator signs in through `POST /api/login`; its user object has `is_operator: true`.
 
 ### `POST /api/login`
 
@@ -67,7 +68,21 @@ an unknown code, or a used code returns `401` with the same body. No email is se
 
 When an account is created (by invitation acceptance, initial-admin setup, or operator bootstrap),
 the creation response includes a `recovery_codes` array. The codes are shown once and stored only as
-hashes.
+hashes. Every authenticated account can also reissue its codes through the endpoint below.
+
+### `POST /api/me/recovery-codes`
+
+Requires a bearer session. Generates a fresh set of single-use recovery codes for the caller, revokes
+all prior unused codes, and returns the new set once.
+
+**200**
+
+```json
+{ "recovery_codes": ["code-one", "code-two", "…"] }
+```
+
+Available to every account, including the deployment operator. No email is sent, and the codes are
+never logged.
 
 ---
 
@@ -127,9 +142,11 @@ Creates a local account (or attaches the invitation to an existing account with 
 which must first authenticate), applies the project role, and returns a session in the same shape as
 `POST /api/login`.
 
-This endpoint also accepts an `org_admin_setup` token returned by `POST /api/orgs`. In that case it
-creates (or binds) the initial admin, grants `org_admin` on the organisation, returns `recovery_codes`,
-and creates no project membership. The token is single-use and expires after 7 days.
+This endpoint also accepts an `org_admin_setup` token returned by `POST /api/orgs`. For a new
+account it creates the account, sets the password, grants `org_admin`, and returns `recovery_codes`.
+For an existing account, that person must authenticate first; the endpoint then grants `org_admin`
+without changing the password. In both cases no project membership is created. The token is
+single-use and expires after 7 days.
 
 ### `DELETE /api/orgs/{org_id}/invitations/{invitation_id}`
 
@@ -160,9 +177,11 @@ Requires the deployment operator. Creates an organisation and its initial admin 
 }
 ```
 
-If an account with `initial_admin_email` already exists, it is bound instead of created. The operator
-shares the setup token out of band; the admin redeems it with `POST /api/invitations/{token}/accept`
-to set a password and receive recovery codes. The operator cannot create any other accounts.
+If an account with `initial_admin_email` already exists, the setup token binds it only after that
+person authenticates and consents; the token then grants `org_admin` and does **not** change their
+password. If no account exists, redeeming the token creates it and sets a password. The operator
+shares the setup token out of band; the admin redeems it with
+`POST /api/invitations/{token}/accept`. The operator cannot create any other accounts.
 
 ### `GET /api/projects`
 

@@ -123,9 +123,11 @@ Issue opaque session tokens (256-bit random), store only their SHA-256 hash with
 days) and rotate on sign-in. There is no public sign-up: an account is created by redeeming a
 one-time invitation token, or as an organisation's initial admin created by the deployment operator
 (R15). Invitation tokens are 256-bit random, stored hashed,
-scoped to an organisation plus an optional project/role, and expire after 7 days. Admin-generated
+scope to an organisation plus an optional project/role, and expire after 7 days. Admin-generated
 links are shared out of band; Scout sends no email. At account creation, issue a set of single-use
-recovery codes, stored hashed; redeeming one sets a new password without email.
+recovery codes, stored hashed; redeeming one sets a new password without email. Any authenticated
+account can reissue its recovery codes; the new set is returned once and prior unused codes are
+invalidated.
 
 **Rationale**: Implements the clarified FR-028/FR-030 and keeps the single deployment free of SMTP.
 Hashing credentials and session/invite tokens means a database read does not yield usable secrets.
@@ -212,10 +214,10 @@ changing the logging shape); no audit trail (insufficient for team access admini
 
 ## R13. Ingest backpressure
 
-**Decision**: Apply one global in-flight concurrency cap to ingest requests. Requests that would
-exceed the cap are rejected immediately with `429` and a `Retry-After` header rather than waiting or
-queuing without bound. The cap is configured by the operator with a generous default (sized so normal
-traffic at the R11 target does not trip it) and is not a per-project quota.
+**Decision**: Apply one global in-flight concurrency cap to ingest requests, defaulting to **256**
+in-flight requests. Requests that would exceed the cap are rejected immediately with `429` and a
+`Retry-After` header rather than waiting or queuing without bound. The cap is configured by the
+operator and is not a per-project quota.
 
 **Rationale**: A single cap protects PostgreSQL and object storage from a runaway SDK or a burst
 that would otherwise exhaust connections and memory, while keeping the first slice simple. `429` with
@@ -252,14 +254,18 @@ immutable-payload principle); treating the suggestion as the outcome (violates F
 ## R15. Operator provisioning and first organisation
 
 **Decision**: At startup, read `SCOUT_OPERATOR_EMAIL` and `SCOUT_OPERATOR_PASSWORD`. If no user has
-`is_operator = true`, create one with an Argon2id password hash and the flag. If an operator already
-exists, ignore the environment values and do not reset the password; log a warning that the bootstrap
-variables were ignored. The operator authenticates through the normal local login and is not scoped
-to any organisation. It can create an organisation with `POST /api/orgs`, which also creates (or
-reuses by email) the organisation's initial admin account and returns a one-time setup token using
-the invitation token mechanics. The initial admin redeems the token to set a password and receive
-recovery codes, then holds the `org_admin` role. The operator cannot create any other accounts;
-everyone else joins by invitation. Passwords and tokens are never logged.
+`is_operator = true`, create one with an Argon2id password hash and the flag. If no operator exists
+and either value is missing or blank, fail startup with an actionable error naming the missing
+values. If an operator already exists, ignore the environment values and do not reset the password;
+log a warning that the bootstrap variables were ignored. The operator authenticates through the
+normal local login and is not scoped to any organisation. It can create an organisation with
+`POST /api/orgs`, which also creates the organisation's initial admin and returns a one-time setup
+token using the invitation token mechanics. If the email already belongs to an account, the token
+binds it only after that person authenticates and consents and never changes the password; otherwise
+redeeming the token sets a password and issues recovery codes. The initial admin then holds the
+`org_admin` role. The operator cannot create any other accounts; everyone else joins by invitation.
+The operator account can obtain a fresh recovery-code set through the authenticated reissue endpoint.
+Passwords and tokens are never logged.
 
 **Rationale**: Implements FR-025, FR-028, FR-030, and SC-011 without SMTP or a CLI. Idempotent
 seeding avoids surprising password resets; returning a setup token avoids the operator choosing or

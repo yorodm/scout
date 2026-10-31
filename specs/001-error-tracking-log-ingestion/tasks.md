@@ -61,8 +61,8 @@
 - [ ] T020 Wire adapter selection (`SCOUT_STORE=memory|postgres`) in `src/state.rs` and `src/main.rs`; tests default to memory.
 - [ ] T021 Implement ingest-key hashing, lookup, revocation, and `last_used_at` in `src/store_postgres.rs` and `src/ingest.rs`.
 - [ ] T022 Implement Argon2id password verification, session issue/redeem/expiry, and `POST /api/login`, `POST /api/logout`, `GET /api/me` in `src/auth.rs` and `src/api.rs`.
-- [ ] T023 Implement idempotent deployment-operator seeding in `src/auth.rs` and `src/main.rs`: read `SCOUT_OPERATOR_EMAIL`/`SCOUT_OPERATOR_PASSWORD`, create only when no `users.is_operator` exists, hash with Argon2id, and never reset an existing password on later starts.
-- [ ] T024 Implement `org_admin_setup` token issuance and redemption primitives in `src/auth.rs` and `src/store_postgres.rs`: SHA-256 hashed, single-use, 7-day expiry, and acceptance grants `org_admin`.
+- [ ] T023 Implement idempotent deployment-operator seeding in `src/auth.rs` and `src/main.rs`: read `SCOUT_OPERATOR_EMAIL`/`SCOUT_OPERATOR_PASSWORD`, create only when no `users.is_operator` exists, hash with Argon2id, never reset an existing password on later starts, and fail startup with an actionable error naming the missing value when no operator exists and either bootstrap value is missing or blank.
+- [ ] T024 Implement `org_admin_setup` token issuance and redemption primitives in `src/auth.rs` and `src/store_postgres.rs`: SHA-256 hashed, single-use, 7-day expiry, and acceptance grants `org_admin`; for an existing account require authentication and consent and leave the password unchanged, while a new account sets its password.
 - [ ] T025 Implement `src/objects.rs` write-once object semantics and wire raw object retrieval through it.
 - [ ] T026 Implement job insertion and `SELECT … FOR UPDATE SKIP LOCKED` claiming in `src/store_postgres.rs` and `src/worker.rs`.
 - [ ] T027 Add `PayloadTooLarge`, `TooManyRequests`, and `ServiceUnavailable` to `src/error.rs` with `413`, `429` + `Retry-After`, and `503` mappings.
@@ -70,7 +70,7 @@
 - [ ] T029 Run migrations at startup under a PostgreSQL advisory lock in `src/main.rs`.
 - [ ] T030 Extend `GET /api/health` in `src/api.rs` to report database and object-store reachability, returning `503` when either is down.
 - [ ] T031 Add structured tracing fields (request id, project id, event id, job id) in `src/main.rs` and the ingest/worker paths.
-- [ ] T032 Record admin and operator actions through `src/audit.rs` for role, key, model, retention, organisation creation, and initial-admin setup changes.
+- [ ] T032 Record admin and operator actions through `src/audit.rs` for role, key, model, retention, organisation creation, and initial-admin setup changes; allow `org_id` to be null for deployment-level actions such as operator bootstrap.
 
 ### Shared models and test harness
 
@@ -238,9 +238,9 @@
 ### Implementation
 
 - [ ] T116 [P] [US5] Implement invitation persistence, hashed one-time tokens, expiry, and preview/accept/revoke in `src/store_postgres.rs` and `src/auth.rs`.
-- [ ] T117 [P] [US5] Implement single-use recovery codes at account creation and `POST /api/recover` in `src/auth.rs` and `src/api.rs`.
-- [ ] T118 [US5] Implement operator-only `GET /api/orgs` and `POST /api/orgs` in `src/api.rs`; creation records `created_by`, creates or binds the initial admin, and returns `initial_admin_setup_token`.
-- [ ] T119 [US5] Implement `org_admin_setup` acceptance through `POST /api/invitations/{token}/accept` in `src/api.rs`: set the password, grant `org_admin`, return recovery codes, and create no project membership.
+- [ ] T117 [P] [US5] Implement single-use recovery codes at account creation, `POST /api/recover`, and authenticated `POST /api/me/recovery-codes` reissue in `src/auth.rs` and `src/api.rs`; reissue revokes prior unused codes and returns the new set once.
+- [ ] T118 [US5] Implement operator-only `GET /api/orgs` and `POST /api/orgs` in `src/api.rs`; creation records `created_by`, creates the initial admin or binds an existing account only after authentication/consent (never changing its password), and returns `initial_admin_setup_token`.
+- [ ] T119 [US5] Implement `org_admin_setup` acceptance through `POST /api/invitations/{token}/accept` in `src/api.rs`: for a new account set the password; for an existing account require authentication and consent and leave the password unchanged; grant `org_admin`, return recovery codes, and create no project membership.
 - [ ] T120 [US5] Implement `POST /api/orgs/{org_id}/invitations`, `GET /api/invitations/{token}`, and `DELETE /api/orgs/{org_id}/invitations/{id}` in `src/api.rs`.
 - [ ] T121 [US5] Implement `POST /api/orgs/{org_id}/projects` in `src/api.rs`, creating the project and its first ingest key.
 - [ ] T122 [US5] Implement member list/add/update/remove in `src/api.rs` with the owner/admin/triager/viewer matrix.
@@ -257,10 +257,10 @@
 ### Tests for User Story 5
 
 - [ ] T132 [US5] Add login success/failure, session expiry, and logout tests in `src/tests.rs`.
-- [ ] T133 [US5] Add operator bootstrap tests in `src/tests.rs`: fresh seed creates the operator, later starts do not reset the password, and env values are ignored once an operator exists.
-- [ ] T134 [US5] Add organisation creation and initial-admin setup-token tests, including single use, expiry, and `org_admin` membership, in `src/tests.rs`.
+- [ ] T133 [US5] Add operator bootstrap tests in `src/tests.rs`: fresh seed creates the operator, later starts do not reset the password, env values are ignored once an operator exists, and missing/blank bootstrap values fail startup with an actionable error.
+- [ ] T134 [US5] Add organisation creation and initial-admin setup-token tests in `src/tests.rs`, including single use, expiry, `org_admin` membership, and existing-account authentication/consent with no password change.
 - [ ] T135 [US5] Add invitation create/preview/accept/revoke and single-use tests in `src/tests.rs`.
-- [ ] T136 [US5] Add recovery-code success, reuse rejection, and unknown-code tests in `src/tests.rs`.
+- [ ] T136 [US5] Add recovery-code tests in `src/tests.rs`: success, reuse rejection, unknown code, and authenticated reissue (including the operator) invalidating prior unused codes.
 - [ ] T137 [US5] Add the role matrix and last-owner protection tests in `src/tests.rs`.
 - [ ] T138 [US5] Add the live role-change-without-restart test in `src/tests.rs`.
 - [ ] T139 [US5] Add key rotation/revocation ingest tests in `src/tests.rs`.
@@ -311,8 +311,8 @@
 - [ ] T159 Resolve the project-deletion assumption in `spec.md` and `contracts/api.md`: either add the requirement and endpoint or remove "deletion" from the owner capability (analyze finding I1).
 - [ ] T160 Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` across `src/` and `ui/src/`; fix all failures.
 - [ ] T161 Run the `ui/Trunk.toml` build: `(cd ui && cargo check --target wasm32-unknown-unknown)` and `(cd ui && trunk build --release)`.
-- [ ] T162 Walk every scenario in `quickstart.md` and record pass/fail, including SC-001 through SC-011.
-- [ ] T163 Re-run `/speckit-analyze` and verify U1, U2, C1–C5, A1, D1, and I1 are closed in `tasks.md`, `spec.md`, and `contracts/`.
+- [ ] T162 Walk every scenario in `quickstart.md` and record pass/fail, including SC-001 through SC-012.
+- [ ] T163 Re-run `/speckit-analyze` and verify F1–F5 are closed and F6–F11 are either closed or explicitly deferred in `tasks.md`, `spec.md`, and `contracts/`.
 
 ---
 

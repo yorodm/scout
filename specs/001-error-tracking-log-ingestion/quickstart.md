@@ -44,9 +44,11 @@ Expected: `scout`, `postgres`, and `minio` become healthy. The UI is reachable a
 
 On first start, the deployment operator is created from `SCOUT_OPERATOR_EMAIL` and
 `SCOUT_OPERATOR_PASSWORD` if no operator exists. Later starts ignore these variables and do not reset
-the password. For local exploration, the prototype also seeds demo, triager, and viewer accounts on
-the `scout-web` project. Production deployments create accounts through the initial-admin setup token
-and invitations; see [contracts/api.md](./contracts/api.md#authentication).
+the password. If no operator exists and either value is missing or blank, startup fails with an
+actionable error naming the missing value. For local exploration, the prototype also seeds demo,
+triager, and viewer accounts on the `scout-web` project. Production deployments create accounts
+through the initial-admin setup token and invitations; see
+[contracts/api.md](./contracts/api.md#authentication).
 
 ## Scenario 0 — Bootstrap and first organisation (SC-011)
 
@@ -68,7 +70,8 @@ curl -sS -X POST 'http://localhost:8080/api/orgs' \
   -d '{"name":"Acme","initial_admin_email":"admin@example.com"}'
 ```
 
-4. Share the returned `initial_admin_setup_token` out of band. Redeem it to set the admin password:
+4. Share the returned `initial_admin_setup_token` out of band. For a new email, redeem it to set the
+   admin password:
 
 ```sh
 curl -sS -X POST 'http://localhost:8080/api/invitations/<setup-token>/accept' \
@@ -76,14 +79,27 @@ curl -sS -X POST 'http://localhost:8080/api/invitations/<setup-token>/accept' \
   -d '{"name":"Acme Admin","password":"admin-password"}'
 ```
 
-5. Sign in as `admin@example.com`; the response includes `org_admin` access and `recovery_codes`.
-6. Restart the stack with the same operator variables and sign in with the **changed** operator
+5. If the email already belongs to an account, that person signs in first; accepting the token then
+   grants `org_admin` without changing their password.
+6. Sign in as the initial admin; the response includes `org_admin` access and `recovery_codes`.
+7. As any signed-in account, reissue recovery codes:
+
+```sh
+curl -sS -X POST 'http://localhost:8080/api/me/recovery-codes' \
+  -H "Authorization: Bearer <token>"
+```
+
+Prior unused codes stop working and the new set is returned once.
+8. Restart the stack with the same operator variables and sign in with the **changed** operator
    password (if changed). The restart must not reset it.
+9. On a fresh database, start with `SCOUT_OPERATOR_EMAIL` or `SCOUT_OPERATOR_PASSWORD` unset. Startup
+   fails with an actionable error naming the missing value.
 
 Expected: the operator can create the organisation and obtain a one-time setup token; the token works
-once; the initial admin can sign in, create a project, and issue its first ingest key. Reusing or
-expiring the setup token returns `410` and grants nothing. The operator cannot create any other
-accounts.
+once; the initial admin can sign in, create a project, and issue its first ingest key. An existing
+account is bound only after authentication and consent, with no password change. Recovery codes can
+be reissued by any authenticated account. Reusing or expiring the setup token returns `410` and grants
+nothing. Missing bootstrap values fail startup, and the operator cannot create any other accounts.
 
 ## Scenario 1 — Fresh deployment to first issue (SC-001)
 
@@ -189,7 +205,8 @@ information is returned. Demoting or removing the last owner returns `400`.
 Expected: the token works once and creates the account with the project role; reuse, expiry, or
 revocation returns `410` and grants nothing. Passwords are never echoed, and no email is sent. The
 creation response includes single-use recovery codes; redeeming one at `POST /api/recover` sets a new
-password without email and cannot be reused.
+password without email and cannot be reused. Any signed-in account can reissue its codes with
+`POST /api/me/recovery-codes`, which invalidates prior unused codes.
 
 ## Scenario 9 — Retention
 
@@ -222,3 +239,4 @@ items visible within 10 seconds. This is the planning target from
 | Suggestion missing | endpoint unreachable, returned an unknown category, or confidence is below the threshold (default 0.5) |
 | UI shows the "not built" page | run `trunk build --release` in `ui/` and restart, or set `SCOUT_UI_DIR` |
 | Health reports a failing dependency | PostgreSQL/MinIO credentials or readiness in `docker-compose.yml` |
+| Startup fails on a fresh install | set both `SCOUT_OPERATOR_EMAIL` and `SCOUT_OPERATOR_PASSWORD` for the first start |
