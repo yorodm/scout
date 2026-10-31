@@ -9,8 +9,6 @@ use uuid::Uuid;
 
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.route("/api/health", web::get().to(health))
-        .route("/api/demo/accounts", web::get().to(demo_accounts))
-        .route("/api/demo/reset", web::post().to(reset_demo))
         .route("/api/login", web::post().to(login))
         .route("/api/logout", web::post().to(logout))
         .route("/api/me", web::get().to(me))
@@ -134,6 +132,16 @@ fn memberships_json(store: &crate::store::Store, user_id: Uuid) -> Vec<Value> {
         .collect()
 }
 
+// --- demo-only routes ------------------------------------------------------
+
+/// Registered only when `SCOUT_DEMO_MODE` is enabled. These routes are not part
+/// of the product contract: `demo_accounts` lists every seeded account and
+/// `reset_demo` wipes the store without authentication.
+pub fn demo_config(cfg: &mut web::ServiceConfig) {
+    cfg.route("/api/demo/accounts", web::get().to(demo_accounts))
+        .route("/api/demo/reset", web::post().to(reset_demo));
+}
+
 // --- session ---------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -153,6 +161,9 @@ pub async fn login(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let mut store = state.store.write().await;
+    // Expired rows are rejected on lookup; sweep them on each successful sign-in
+    // so they do not accumulate between restarts.
+    store.sweep_sessions();
     let user = store
         .user_by_email(&body.email)
         .cloned()
@@ -447,7 +458,7 @@ pub async fn get_issue(
                     json!({
                         "filename": a.filename,
                         "content_type": a.content_type,
-                        "size": a.data.len(),
+                        "size": a.size,
                     })
                 })
                 .collect()
@@ -722,6 +733,8 @@ pub async fn search(
                     .unwrap_or("")
                     .to_ascii_lowercase()
                     .contains(&needle)
+                // FR-012 includes the grouping identity in issue search.
+                || i.fingerprint.to_ascii_lowercase().contains(&needle)
         })
         .cloned()
         .collect();
@@ -735,6 +748,8 @@ pub async fn search(
         .filter(|l| {
             l.message.to_ascii_lowercase().contains(&needle)
                 || l.source.to_ascii_lowercase().contains(&needle)
+                // FR-012 includes level and attributes.
+                || l.level.to_ascii_lowercase().contains(&needle)
                 || l.attributes
                     .to_string()
                     .to_ascii_lowercase()
@@ -860,13 +875,14 @@ pub async fn update_member(
         ));
     }
     store.memberships.insert((user_id, project_id), body.role);
-    crate::audit::record(
+    crate::audit::record_with(
         &mut store,
         None,
         Some(project_id),
         &email,
         "member.role_changed",
         Some(user_id.to_string()),
+        json!({ "previous_role": current.to_string(), "role": body.role.to_string() }),
     );
     Ok(HttpResponse::Ok().json(json!({ "ok": true, "role": body.role })))
 }

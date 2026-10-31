@@ -248,15 +248,38 @@ async fn persist_events(
         }
     }
 
+    // Write every raw object and attachment before touching metadata. Any failure
+    // removes what this request already wrote and returns 503.
     let mut written: Vec<String> = Vec::new();
-    for (_, _, _, key) in &pending {
-        if let Err(error) = state.objects.put_create(key, raw.clone()).await {
-            for written_key in &written {
-                let _ = state.objects.delete(written_key).await;
-            }
+    let mut stored_attachments: Vec<Vec<Attachment>> = Vec::with_capacity(pending.len());
+    for (event_id, _, _, raw_key) in &pending {
+        if let Err(error) = state.objects.put_create(raw_key, raw.clone()).await {
+            cleanup_objects(state, &written).await;
             return Err(error.into());
         }
-        written.push(key.clone());
+        written.push(raw_key.clone());
+
+        let mut per_event = Vec::with_capacity(attachments.len());
+        for (index, attachment) in attachments.iter().enumerate() {
+            let key = crate::objects::attachment_key(project.id, *event_id, index);
+            if let Err(error) = state
+                .objects
+                .put_create(&key, attachment.data.clone())
+                .await
+            {
+                cleanup_objects(state, &written).await;
+                return Err(error.into());
+            }
+            written.push(key.clone());
+            per_event.push(Attachment {
+                filename: attachment.filename.clone(),
+                content_type: attachment.content_type.clone(),
+                size: attachment.size,
+                object_key: Some(key),
+                data: Vec::new(),
+            });
+        }
+        stored_attachments.push(per_event);
     }
 
     let mut jobs = Vec::new();
@@ -264,14 +287,21 @@ async fn persist_events(
     let expired;
     {
         let mut store = state.store.write().await;
-        for (id, sentry_id, event, key) in pending {
+        for ((id, sentry_id, event, key), event_attachments) in
+            pending.into_iter().zip(stored_attachments)
+        {
             // A concurrent retry may have won the race; reuse its row and drop
-            // the object we just wrote rather than overwriting authoritative data.
+            // the objects we just wrote rather than overwriting authoritative data.
             if store
                 .seen_event_ids
                 .contains_key(&(project.id, sentry_id.clone()))
             {
                 orphans.push(key);
+                orphans.extend(
+                    event_attachments
+                        .iter()
+                        .filter_map(|attachment| attachment.object_key.clone()),
+                );
                 continue;
             }
             store.events.insert(
@@ -286,7 +316,7 @@ async fn persist_events(
                     raw_size,
                     raw_expired_at: None,
                     event,
-                    attachments: attachments.to_vec(),
+                    attachments: event_attachments,
                 },
             );
             store
@@ -307,6 +337,12 @@ async fn persist_events(
         let _ = state.jobs.send(job);
     }
     Ok(ids)
+}
+
+async fn cleanup_objects(state: &AppState, keys: &[String]) {
+    for key in keys {
+        let _ = state.objects.delete(key).await;
+    }
 }
 
 async fn persist_logs(
@@ -526,19 +562,17 @@ pub fn parse_envelope(input: &[u8]) -> Result<ParsedEnvelope, String> {
                 out.events.push(event);
             }
             "attachment" => {
-                out.attachments.push(Attachment {
-                    filename: item
-                        .get("filename")
+                out.attachments.push(Attachment::new(
+                    item.get("filename")
                         .and_then(Value::as_str)
                         .unwrap_or("attachment")
                         .to_string(),
-                    content_type: item
-                        .get("content_type")
+                    item.get("content_type")
                         .and_then(Value::as_str)
                         .unwrap_or("application/octet-stream")
                         .to_string(),
-                    data: payload,
-                });
+                    payload,
+                ));
             }
             "log" => {
                 let log: Value = serde_json::from_slice(&payload)

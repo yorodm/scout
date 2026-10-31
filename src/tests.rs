@@ -117,6 +117,20 @@ async fn init_app_with_state(
     .await
 }
 
+/// Mirrors a deployment with `SCOUT_DEMO_MODE=true`.
+async fn init_app_with_demo(
+    state: web::Data<AppState>,
+) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
+    test::init_service(
+        App::new()
+            .app_data(state)
+            .configure(crate::api::config)
+            .configure(crate::api::demo_config)
+            .configure(crate::ingest::config),
+    )
+    .await
+}
+
 async fn call<S, B>(app: &S, req: Request) -> ServiceResponse<B>
 where
     S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
@@ -1897,4 +1911,214 @@ async fn settings_never_return_the_model_api_key() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+// --- convergence: safety, scoping, and storage ------------------------------
+
+#[actix_web::test]
+async fn demo_routes_are_opt_in_only() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+
+    // Default (production-shaped) wiring must not expose the demo endpoints.
+    for req in [
+        test::TestRequest::get()
+            .uri("/api/demo/accounts")
+            .to_request(),
+        test::TestRequest::post()
+            .uri("/api/demo/reset")
+            .to_request(),
+    ] {
+        let (status, _) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    let demo = init_app_with_demo(state).await;
+    let (status, body) = call_json(
+        &demo,
+        test::TestRequest::get()
+            .uri("/api/demo/accounts")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body["accounts"].as_array().is_some());
+    let (status, _) = call_json(
+        &demo,
+        test::TestRequest::post()
+            .uri("/api/demo/reset")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn search_matches_issue_fingerprint_and_log_level() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    let issues = issues_for(&app, token, project).await;
+    let fingerprint = issues[0]["fingerprint"].as_str().unwrap().to_string();
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/search?q={fingerprint}"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["fingerprint"] == fingerprint),
+        "FR-012 search must match the issue fingerprint"
+    );
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/json",
+            json!({ "message": "level search marker", "level": "critical", "source": "probe" })
+                .to_string()
+                .into_bytes(),
+            "logs",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "log ingest failed: {body}");
+
+    let (status, body) = call_json(
+        &app,
+        get(&format!("/api/projects/{project}/search?q=critical"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|log| log["level"] == "critical"),
+        "FR-012 search must match the log level"
+    );
+}
+
+#[actix_web::test]
+async fn expired_sessions_are_swept_on_login() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+
+    let expired = crate::auth::new_token();
+    let expired_hash = crate::auth::hash_token(&expired);
+    state.store.write().await.sessions.insert(
+        expired_hash.clone(),
+        crate::models::Session {
+            user_id: Uuid::new_v4(),
+            expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+        },
+    );
+    assert!(state
+        .store
+        .read()
+        .await
+        .sessions
+        .contains_key(&expired_hash));
+
+    login(&app, "demo@scout.local").await;
+
+    assert!(
+        !state
+            .store
+            .read()
+            .await
+            .sessions
+            .contains_key(&expired_hash),
+        "an expired session must be removed on the next sign-in"
+    );
+}
+
+#[actix_web::test]
+async fn attachment_bytes_are_written_once_to_object_storage() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "platform-api").await;
+
+    let payload = b"panic log body";
+    let mut raw = Vec::new();
+    raw.extend_from_slice(json!({ "event_id": hex_id(95) }).to_string().as_bytes());
+    raw.push(b'\n');
+    raw.extend_from_slice(br#"{"type":"event"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        event(
+            &hex_id(95),
+            "attachment object check",
+            &["attachment-object"],
+        )
+        .to_string()
+        .as_bytes(),
+    );
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        format!(
+            r#"{{"type":"attachment","length":{},"filename":"panic.log","content_type":"text/plain"}}"#,
+            payload.len()
+        )
+        .as_bytes(),
+    );
+    raw.push(b'\n');
+    raw.extend_from_slice(payload);
+    raw.push(b'\n');
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "2",
+            "scout_platform_key",
+            "application/x-sentry-envelope",
+            raw,
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+
+    let issue = wait_for_issue_count(
+        &app,
+        token,
+        project,
+        "IntegrationError: attachment object check",
+        1,
+    )
+    .await;
+    let last_event = Uuid::parse_str(issue["last_event_id"].as_str().unwrap()).unwrap();
+
+    let attachment = {
+        let store = state.store.read().await;
+        let event = store.events.get(&last_event).expect("the stored event");
+        assert_eq!(event.attachments.len(), 1);
+        let attachment = &event.attachments[0];
+        assert!(
+            attachment.data.is_empty(),
+            "bytes belong to the object store, not the event"
+        );
+        assert_eq!(attachment.size, payload.len() as u64);
+        attachment.clone()
+    };
+    let key = attachment.object_key.expect("an object key");
+    assert_eq!(
+        state.objects.get(&key).await.unwrap(),
+        payload.to_vec(),
+        "the object store holds the exact attachment bytes"
+    );
 }

@@ -153,6 +153,7 @@ mod tests {
             database_url: None,
             s3_endpoint: None,
             s3_bucket: None,
+            demo_mode: false,
         }
     }
 

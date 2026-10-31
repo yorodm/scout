@@ -37,6 +37,12 @@ async fn main() -> std::io::Result<()> {
     let config = Config::from_env();
     let port = config.port;
     let self_url = config.self_url.clone();
+    let demo_mode = config.demo_mode;
+
+    if let Err(error) = config.validate_storage() {
+        tracing::error!("{error}");
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, error));
+    }
 
     let objects = match crate::objects::Objects::from_config(&config) {
         Ok(objects) => Arc::new(objects),
@@ -46,7 +52,13 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    let (mut seeded_store, seeded_raw) = store::seed(&self_url);
+    // Demo fixtures carry known credentials, so they are opt-in only.
+    let (mut seeded_store, seeded_raw) = if demo_mode {
+        store::seed(&self_url)
+    } else {
+        tracing::info!("SCOUT_DEMO_MODE is off: starting with an empty store");
+        (store::Store::empty(), Vec::new())
+    };
     for (key, data) in seeded_raw {
         if let Err(error) = objects.put_create(&key, data).await {
             tracing::warn!("could not seed raw payload {key}: {error}");
@@ -83,11 +95,14 @@ async fn main() -> std::io::Result<()> {
     });
 
     tracing::info!("Scout listening on http://127.0.0.1:{port}");
-    tracing::info!("demo accounts: demo@scout.local · triager@scout.local · viewer@scout.local");
-    tracing::info!("demo password: {}", store::DEMO_PASSWORD);
+    if demo_mode {
+        tracing::warn!(
+            "SCOUT_DEMO_MODE is on: demo data, demo endpoints, and the shared demo password are active"
+        );
+    }
 
     HttpServer::new(move || {
-        App::new()
+        let app = App::new()
             .app_data(state.clone())
             .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
             .app_data(web::JsonConfig::default().limit(10 * 1024 * 1024))
@@ -102,10 +117,17 @@ async fn main() -> std::io::Result<()> {
                 web::post().to(classifier::mock_systemone),
             )
             .route("/mock-jev/outage", web::get().to(classifier::get_outage))
-            .route("/mock-jev/outage", web::post().to(classifier::set_outage))
-            // Keep the static UI last: Files("/") is a catch-all and would
-            // otherwise shadow /api and /mock-jev.
-            .configure(ui::config)
+            .route("/mock-jev/outage", web::post().to(classifier::set_outage));
+        // Demo routes are opt-in: they list seeded accounts and reset the store
+        // without authentication.
+        let app = if demo_mode {
+            app.configure(api::demo_config)
+        } else {
+            app
+        };
+        // Keep the static UI last: Files("/") is a catch-all and would
+        // otherwise shadow /api and /mock-jev.
+        app.configure(ui::config)
     })
     .bind(("0.0.0.0", port))?
     .run()

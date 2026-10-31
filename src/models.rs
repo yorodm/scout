@@ -184,7 +184,24 @@ pub struct Issue {
 pub struct Attachment {
     pub filename: String,
     pub content_type: String,
+    pub size: u64,
+    /// Write-once object key, set once the bytes are persisted.
+    pub object_key: Option<String>,
+    /// Parsed bytes; cleared after they are written to object storage.
     pub data: Vec<u8>,
+}
+
+impl Attachment {
+    pub fn new(filename: String, content_type: String, data: Vec<u8>) -> Self {
+        let size = data.len() as u64;
+        Self {
+            filename,
+            content_type,
+            size,
+            object_key: None,
+            data,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -244,5 +261,8 @@ pub struct AuditEntry {
     pub actor: String,
     pub action: String,
     pub target: Option<String>,
+    /// Structured context for the action (for example the previous role).
+    #[serde(default)]
+    pub metadata: Value,
     pub at: DateTime<Utc>,
 }

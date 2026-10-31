@@ -41,6 +41,7 @@ rustup target add wasm32-unknown-unknown
 (cd ui && trunk build --release)
 export SCOUT_OPERATOR_EMAIL=operator@scout.local
 export SCOUT_OPERATOR_PASSWORD=change-me-now
+export SCOUT_DEMO_MODE=true
 cargo run
 # open http://localhost:8080
 ```
@@ -49,6 +50,14 @@ Scout refuses to start when no deployment operator exists and either bootstrap v
 blank. The operator is seeded once with an Argon2id password hash; later starts never reset it. Set
 `SCOUT_SESSION_TTL_DAYS`, `SCOUT_RETENTION_DAYS`, `SCOUT_CONFIDENCE_THRESHOLD`, and
 `SCOUT_INGEST_MAX_IN_FLIGHT` to override their defaults (7, 30, 0.5, and 256).
+
+`SCOUT_DEMO_MODE=true` seeds the demo organisation, accounts, and keys and enables the
+`/api/demo/*` prototype routes, including an unauthenticated store reset. Leave it unset (the
+default) for anything reachable by real users; a fresh deployment then starts with an empty store and
+only the operator account.
+
+Setting `DATABASE_URL` also requires `SCOUT_S3_ENDPOINT` and `SCOUT_S3_BUCKET`; startup fails with an
+actionable error rather than silently keeping raw payloads in memory.
 
 `cargo run` serves the API and the contents of `ui/dist`. If `ui/dist/index.html` is missing, the
 server returns a page explaining how to build it instead of failing.
@@ -79,9 +88,9 @@ unreachable.
 
 ### Demo accounts
 
-Seeded demo accounts share the password `scout-demo`. Sign-in returns an opaque bearer token; only
-its SHA-256 hash is stored, and it expires after `SCOUT_SESSION_TTL_DAYS` (7 by default).
-Signing out revokes the token.
+With `SCOUT_DEMO_MODE=true`, seeded demo accounts share the password `scout-demo`. Sign-in returns an
+opaque bearer token; only its SHA-256 hash is stored, and it expires after `SCOUT_SESSION_TTL_DAYS`
+(7 by default). Signing out revokes the token.
 
 | Account | `scout-web` | `platform-api` |
 | --- | --- | --- |

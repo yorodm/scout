@@ -51,6 +51,11 @@ pub fn raw_key(project_id: uuid::Uuid, event_id: uuid::Uuid) -> String {
     format!("raw/{project_id}/{event_id}")
 }
 
+/// Attachments are write-once too, keyed per event and position.
+pub fn attachment_key(project_id: uuid::Uuid, event_id: uuid::Uuid, index: usize) -> String {
+    format!("attachments/{project_id}/{event_id}/{index}")
+}
+
 pub struct Objects {
     inner: Arc<dyn ObjectStore>,
     backend: &'static str,

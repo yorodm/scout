@@ -40,6 +40,27 @@ pub struct Store {
 }
 
 impl Store {
+    /// An empty metadata store for a real deployment. Demo data is only seeded
+    /// when `SCOUT_DEMO_MODE` is explicitly enabled.
+    pub fn empty() -> Self {
+        Self {
+            orgs: HashMap::new(),
+            projects: HashMap::new(),
+            projects_by_dsn: HashMap::new(),
+            keys: HashMap::new(),
+            users: HashMap::new(),
+            users_by_email: HashMap::new(),
+            memberships: HashMap::new(),
+            sessions: HashMap::new(),
+            issues: HashMap::new(),
+            issues_by_fingerprint: HashMap::new(),
+            events: HashMap::new(),
+            seen_event_ids: HashMap::new(),
+            logs: Vec::new(),
+            audit: Vec::new(),
+        }
+    }
+
     pub fn project_by_identifier(&self, identifier: &str) -> Option<&Project> {
         self.projects_by_dsn
             .get(identifier)
@@ -84,6 +105,14 @@ impl Store {
         self.sessions.remove(&crate::auth::hash_token(token));
     }
 
+    /// Remove expired sessions. Returns the number removed.
+    pub fn sweep_sessions(&mut self) -> usize {
+        let now = Utc::now();
+        let before = self.sessions.len();
+        self.sessions.retain(|_, session| session.expires_at > now);
+        before - self.sessions.len()
+    }
+
     pub fn user_by_email(&self, email: &str) -> Option<&User> {
         self.users_by_email
             .get(&email.to_ascii_lowercase())
@@ -107,6 +136,12 @@ impl Store {
             if let Some(event) = self.events.remove(&id) {
                 self.seen_event_ids
                     .remove(&(event.project_id, event.sentry_event_id));
+                keys.extend(
+                    event
+                        .attachments
+                        .iter()
+                        .filter_map(|attachment| attachment.object_key.clone()),
+                );
                 if let Some(key) = event.raw_object_key {
                     keys.push(key);
                 }
@@ -122,22 +157,7 @@ impl Store {
 /// write them to object storage (which is async) before serving requests.
 pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
     let mut raws = Vec::new();
-    let mut store = Store {
-        orgs: HashMap::new(),
-        projects: HashMap::new(),
-        projects_by_dsn: HashMap::new(),
-        keys: HashMap::new(),
-        users: HashMap::new(),
-        users_by_email: HashMap::new(),
-        memberships: HashMap::new(),
-        sessions: HashMap::new(),
-        issues: HashMap::new(),
-        issues_by_fingerprint: HashMap::new(),
-        events: HashMap::new(),
-        seen_event_ids: HashMap::new(),
-        logs: Vec::new(),
-        audit: Vec::new(),
-    };
+    let mut store = Store::empty();
 
     let org_id = Uuid::new_v4();
     store.orgs.insert(
@@ -283,11 +303,11 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
             by: "system".into(),
             at: now - Duration::hours(3),
         }],
-        vec![Attachment {
-            filename: "checkout-context.txt".into(),
-            content_type: "text/plain".into(),
-            data: b"cart=8f21\ncurrency=undefined\nroute=/checkout\n".to_vec(),
-        }],
+        vec![Attachment::new(
+            "checkout-context.txt".into(),
+            "text/plain".into(),
+            b"cart=8f21\ncurrency=undefined\nroute=/checkout\n".to_vec(),
+        )],
     );
 
     let pool_event = event_json(
@@ -511,6 +531,20 @@ fn seed_issue(
     let raw_object_key = crate::objects::raw_key(project.id, event_id);
     raw_objects.push((raw_object_key.clone(), raw.clone()));
 
+    // Attachment bytes live in object storage too; the event keeps metadata only.
+    let mut stored_attachments = Vec::with_capacity(attachments.len());
+    for (index, attachment) in attachments.into_iter().enumerate() {
+        let key = crate::objects::attachment_key(project.id, event_id, index);
+        raw_objects.push((key.clone(), attachment.data.clone()));
+        stored_attachments.push(crate::models::Attachment {
+            filename: attachment.filename,
+            content_type: attachment.content_type,
+            size: attachment.size,
+            object_key: Some(key),
+            data: Vec::new(),
+        });
+    }
+
     let issue = Issue {
         id: issue_id,
         project_id: project.id,
@@ -553,7 +587,7 @@ fn seed_issue(
             raw_size: raw.len() as u64,
             raw_expired_at: None,
             event,
-            attachments,
+            attachments: stored_attachments,
         },
     );
     store

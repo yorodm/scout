@@ -413,3 +413,18 @@ Task T047: implement the grouping worker in src/worker.rs
 - Commit after each task or logical group; do not commit generated `ui/dist` artifacts unless the release process requires them.
 - Stop at each checkpoint and validate the story independently before moving on.
 - The prototype's existing in-crate tests in `src/tests.rs` should be extended, not replaced.
+
+---
+
+## Phase 10: Convergence
+
+Tasks appended by `/speckit-converge` after assessing the current implementation against `spec.md`, `plan.md`, and this task list. They are additional to the unchecked tasks above; existing task IDs are unchanged.
+
+- [X] T167 CRITICAL: Remove the prototype demo endpoints or require authentication plus an explicit development flag for `GET /api/demo/accounts` and `POST /api/demo/reset` in `src/api.rs`; `reset_demo` currently lets any unauthenticated caller wipe the store per Constitution III / FR-031 (contradicts).
+- [X] T168 Ensure the demo seed in `src/main.rs` (known `scout-demo` password, demo accounts, and demo ingest keys) is never active in a non-test deployment, and document how a first organisation is provisioned without seeded accounts per FR-030 (contradicts).
+- [X] T169 Fail startup with an actionable error when a persistent deployment is configured (`DATABASE_URL` set) but `SCOUT_S3_ENDPOINT`/`SCOUT_S3_BUCKET` are missing, instead of silently using the in-memory object backend in `src/objects.rs` and `src/main.rs` per FR-008 / plan: storage decision (contradicts).
+- [X] T170 Extend unified search in `src/api.rs` to match issue `fingerprint` and log `level` in addition to the current fields per FR-012 (partial).
+- [X] T171 Write attachment bytes through the write-once object store with a recorded `object_key` and serve them from there, keeping only metadata on the event per FR-002 / data-model `attachments` (partial).
+- [X] T172 Add an optional `metadata` jsonb field to `AuditEntry` and the `audit::record` helper so administrative actions can carry structured context per data-model `audit_log` / T006 (partial).
+- [X] T173 Sweep expired sessions periodically (or during the retention worker) so session rows do not accumulate per data-model `sessions` (missing).
+- [ ] T174 Apply `SCOUT_RETENTION_DAYS` and `SCOUT_CONFIDENCE_THRESHOLD` as defaults when a project is created through the provisioning API per plan: configuration / FR-013 (partial).
