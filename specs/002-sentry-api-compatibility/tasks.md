@@ -276,3 +276,17 @@ Task: "Wire token client and nav in ui/src/api.rs and ui/src/components/app.rs"
 - Commit after a logical group and mark tasks `[X]` as they complete.
 - Avoid: fabricating data for unsupported features, changing native endpoints, or adding a `tests/`
   crate.
+
+---
+
+## Phase 8: Convergence
+
+**Purpose**: Close the gaps found by `/speckit-converge` between the implemented code and the
+specification, plan, contracts, and constitution. Ordered by severity.
+
+- [ ] T049 Treat supplied-but-unparseable `id` values as matching nothing in `src/compat/handlers.rs`: the issue list returns an empty page and a status mutation changes nothing, instead of falling back to an unrestricted query per FR-009, FR-013 (partial)
+- [ ] T050 Apply `migrations/0007_sentry_compat.sql` against the compose PostgreSQL instance, re-apply it to prove idempotency, verify `organisations.slug` and `issues.number` uniqueness with seeded duplicates, and roll back per T047, Constitution V (partial)
+- [ ] T051 Make `limit` values of zero or below fall back to the default 100 instead of clamping to 1 in `src/compat/handlers.rs`, and update the limit assertions in `src/tests.rs` to match `contracts/sentry-compat-api.md` per FR-009 (contradicts)
+- [ ] T052 Run the quickstart dashboard token flow and the SC-006/SC-009 timings end to end against a live `cargo run` server, and record the outcome in `specs/002-sentry-api-compatibility/quickstart.md` per T044, SC-009 (partial)
+- [ ] T053 Guarantee the `{"detail": …}` envelope for query-string decoding failures on `/api/0` (for example a scope-level query error handler) so no extractor error escapes as non-JSON per FR-021 (partial)
+- [ ] T054 Extend `src/tests.rs` with the missing coverage: sort values `new`/`user`/`trends`/`recommended`, the `hashes` filter, the 1,000-value tag cap, `statsPeriod`/`shortIdLookup` tolerance, a disabled owner's token, and the disabled toggle across every documented request per plan R14 (partial)
