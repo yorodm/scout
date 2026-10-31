@@ -14,8 +14,10 @@ Jev-compatible decisions endpoint only *suggests* a category after storage; inge
 The repository already contains a working prototype: Actix API, Sycamore/Tailwind UI, in-memory
 metadata store, and an in-process grouping/classification worker. This plan takes that prototype to
 the specified product: PostgreSQL and object storage replace the in-memory store, local accounts gain
-password authentication and token-based invitations, the classifier applies redaction and a
-per-project confidence threshold, and durability/authorisation rules become explicit.
+password authentication, token-based invitations, and single-use recovery codes, the classifier
+applies redaction and a per-project confidence threshold, triage gains the `ignored` state and
+decision-based filtering, ingest gains a configurable global backpressure cap, and
+durability/authorisation rules become explicit.
 
 ## Technical Context
 
@@ -27,10 +29,11 @@ per-project confidence threshold, and durability/authorisation rules become expl
 `wasm-bindgen`, `gloo-net`, `web-sys` for the UI. Trunk 0.22 builds the UI, including Tailwind through
 Trunk's built-in `tailwind-css` pipeline (no Node.js toolchain).
 
-**Storage**: PostgreSQL for organisations, projects, users, roles, invitations, sessions, ingest-key
-hashes, issues, event metadata, suggestions, log lines, and jobs. S3-compatible object storage (AWS S3
-or MinIO) for immutable raw payloads and attachments. The in-memory `Store` remains as a test adapter
-so the in-crate integration suite runs without external services.
+**Storage**: PostgreSQL for organisations, projects, users, roles, invitations, sessions, recovery
+codes, ingest-key hashes, issues, event metadata, suggestions, decisions, log lines, and jobs.
+S3-compatible object storage (AWS S3 or MinIO) for immutable raw payloads and attachments. The
+in-memory `Store` remains as a test adapter so the in-crate integration suite runs without external
+services.
 
 **Testing**: `cargo test` — unit tests plus in-crate integration tests using `actix_web::test`, per the
 project constraint that the backend must not be split into a library crate. No `tests/` integration
@@ -164,7 +167,9 @@ non-blocking classifier all remain within the spec's stated constraints.
    optional OIDC account linking by verified email.
 5. **Classifier hardening**: redact sensitive fields before building the ≤2 KB summary; apply the
    per-project confidence threshold (default 0.5); enforce the 800 ms budget and single retry.
-6. **API and UI alignment**: settings for threshold and retention, invitation screens, member/role
-   management, raw-expired state, and log/search views.
-7. **Verification**: extend `src/tests.rs` for every acceptance scenario, add a compose-based smoke
-   script for PostgreSQL/object-store wiring, and run the quickstart.
+6. **API and UI alignment**: settings for threshold and retention, invitation screens, recovery-code
+   redemption, member/role management, the `ignored` state, decision-based issue filtering,
+   raw-expired state, and log/search views using the defined substring-matching rules.
+7. **Verification**: extend `src/tests.rs` for every acceptance scenario, including `ignored` state
+   transitions, decision-based filtering, and the global concurrency cap (SC-010); add a compose-based
+   smoke script for PostgreSQL/object-store wiring; and run the quickstart.

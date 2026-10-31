@@ -59,7 +59,8 @@ curl -sS -X POST 'http://localhost:8080/api/1/envelope/?sentry_key=scout_demo_ke
 
 Expected: within 10 minutes of the stack starting, the project shows one new issue titled
 `SmokeError: grouping check` with count 3, populated first/last-seen, and an attachment count of 1.
-The response from step 2 includes three event ids.
+The response from step 2 includes three event ids. Resolve, reopen, and ignore the issue in turn; each
+transition appears in its history with the actor and time.
 
 ## Scenario 2 — Grouping at scale (SC-002, SC-009)
 
@@ -112,7 +113,9 @@ The seeded `scout-web` project points at the built-in mock endpoint.
 
 Expected: the suggestion appears within the bounded wait; confirming sets a human decision with
 `overridden: false`; overriding sets `category: "log"` with `overridden: true`; the original
-suggestion remains visible. No item is ever hidden or reclassified automatically.
+suggestion remains visible. No item is ever hidden or reclassified automatically, and the stored
+event, grouping, count, and raw payload are unchanged. The issue list's `category=log` filter returns
+the issue after the override.
 
 ## Scenario 6 — Classifier outage (SC-004)
 

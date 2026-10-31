@@ -174,7 +174,7 @@ new password and marks the code used; the remaining codes stay valid until used 
 | `last_event_id` | uuid | nullable; FK → events (`ON DELETE SET NULL`) |
 
 Unique: `(project_id, fingerprint)`. Indexes: `(project_id, state, last_seen desc)`,
-`(project_id, count desc)`, GIN on `tags`.
+`(project_id, decision_category, last_seen desc)`, `(project_id, count desc)`, GIN on `tags`.
 
 ### `issue_state_changes`
 

@@ -145,15 +145,17 @@ actionable "invitation required" message.
 per-request retention check already present in the prototype) deletes log lines, attachment rows,
 and raw objects older than the cutoff, and clears each event's raw pointer (`raw_expired_at`) while
 leaving event and issue metadata intact. List endpoints report `raw_available = false` once the payload
-is gone. Log and issue search
-uses PostgreSQL: `ILIKE` over message/title/source for short fields plus GIN indexes on `attributes`
-and `tags` JSONB; results are always filtered by `project_id` and the caller's membership.
+is gone. Unified search uses PostgreSQL: case-insensitive substring matching over issue
+title/culprit/fingerprint and log message/source/level/attributes, ordered newest first and capped at
+50 results per kind. JSONB `attributes` and `tags` carry GIN indexes for containment queries; results
+are always filtered by `project_id` and the caller's membership.
 
 **Rationale**: Satisfies FR-024, FR-033, and SC-007 without adding a search cluster. PostgreSQL keeps
 the deployment at three services.
 
 **Alternatives considered**: Elasticsearch/Loki (explicitly the split the product exists to remove);
-keeping expired payloads accessible (violates retention); hard-deleting issues (loses triage history).
+keeping expired payloads accessible (violates retention); hard-deleting issues (loses triage history);
+full-text ranking (deferred; can replace the matcher without changing the API).
 
 ## R9. UI delivery
 
@@ -227,6 +229,25 @@ creates a hard data-loss boundary).
 
 ---
 
+## R14. Triage states and categorisation decisions
+
+**Decision**: Support `open`, `resolved`, and `ignored` issue states. Every change appends an
+`issue_state_changes` row with the actor and time. A confirm/override decision is authoritative
+*metadata*: it determines the item's displayed category and the `category` list filter, but it never
+moves, regroups, or deletes the stored event, issue, count, or raw payload. A suggestion is applied
+only before the issue is first presented and before any human decision.
+
+**Rationale**: `ignored` lets a triager silence noise without claiming a fix, matching common
+error-tracker practice and the prototype. Keeping decisions as metadata preserves raw immutability
+(FR-034), avoids destructive re-filing, and keeps counts and history trustworthy while still making
+the human decision authoritative (FR-015, FR-017, FR-023).
+
+**Alternatives considered**: Only open/resolved (loses a useful triage action); re-filing the stored
+item between issue/log/raw storage (destructive, rewrites grouping and counts, and contradicts the
+immutable-payload principle); treating the suggestion as the outcome (violates FR-015).
+
+---
+
 ## Resolved `NEEDS CLARIFICATION` checklist
 
 | Topic | Resolution |
@@ -239,3 +260,5 @@ creates a hard data-loss boundary).
 | Test placement without a library | R10: in-crate `src/tests.rs` |
 | Observability floor | R12: structured logs, health, audit log |
 | Ingest backpressure | R13: global in-flight cap, `429` + `Retry-After` |
+| Triage states and decision semantics | R14: open/resolved/ignored; decisions are metadata-only |
+| Search matching rules | R8: case-insensitive substring, newest first, 50 per kind |
