@@ -130,6 +130,10 @@ mutation and receive `403`, revoke the token, and confirm the next call returns 
    appears by prefix and label without the secret.
 6. **Given** an existing token listed in the dashboard, **When** the administrator revokes it, **Then**
    it is marked revoked and the next `/api/0/` call using it returns `401`.
+7. **Given** an organisation admin and a token owned by a member, **When** the admin lists the
+   organisation's tokens and revokes that one, **Then** the token is visible only by prefix and the
+   member's next `/api/0/` call returns `401`; a plain member attempting the same action receives
+   `403`.
 
 ---
 
@@ -157,8 +161,8 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
 3. **Given** a request to create a service hook, submit legacy feedback, change spike protection, or
    create an external issue, **When** it is made, **Then** it receives `501` with a `detail` message
    naming the unsupported feature and no data changes.
-4. **Given** a request to permanently delete issues, **When** it is made, **Then** it receives `501`
-   documenting that Scout preserves issue history and raw payloads.
+4. **Given** a request to permanently delete issues, **When** it is made, **Then** it receives the
+   `501` response specified by FR-015, and no issue, event, or raw payload is removed.
 
 ### Edge Cases
 
@@ -167,11 +171,12 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
 - A cursor is malformed, references a different query, or points past the last page.
 - `query` contains unsupported Sentry search tokens (for example `assigned:me`, `bookmarks:me`, or
   wildcard searches); the request must remain usable and the limitation must be visible.
-- `id` is repeated for issues in another project, or omits every id while mutating status.
+- `id` is repeated for issues in another project, or omits every id while mutating status (valid: the
+  mutation then applies to every issue matching the current query).
 - An organisation or project is addressed by an id, a slug, or a numeric DSN id; unknown and
   soft-deleted projects return `404` without leaking existence.
 - The token owner's role changes or is revoked between requests.
-- Tag values contain duplicates, empty strings, non-string values, or exceed one page (1,000 cap).
+- Tag values contain duplicates, empty strings, non-string values, or exceed the 1,000-value total cap.
 - A project has zero issues or a tag key has no values.
 - Two clients page through the same project while new issues arrive.
 - The compatibility layer is disabled, or `/api/0/` is called with a session token instead of an API
@@ -194,7 +199,9 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
   MUST NOT store an independent scope list; its permissions are always derived from the owner's live
   roles (FR-004). Tokens MUST NOT expire automatically: they remain valid until explicitly revoked.
   Management MUST be available both through native API endpoints and through a dashboard API-token
-  screen that can create, list, and revoke tokens.
+  screen that can create, list, and revoke tokens. Organisation admins MUST also be able to list and
+  revoke tokens owned by members of their organisation; other members MUST NOT see another user's
+  tokens.
 - **FR-004**: API tokens MUST inherit the owner's current project roles and organisation roles on every
   request, so role changes and removals take effect without reissuing or restarting.
 - **FR-005**: Sentry scope names MUST be enforced from those roles: `event:read` and `project:read` for
@@ -216,8 +223,12 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
   `level`, `count`, `userCount`, `firstSeen`, `lastSeen`, `metadata`, `permalink`, `project`, `tags`,
   and `annotations`.
 - **FR-009**: Issue list MUST support `query`, `sort` (`date`, `new`, `freq`, `user`, `trends`,
-  `recommended`), `limit` (default 100, maximum 100), `cursor`, repeated `id`, and `hashes`; it MUST
-  accept and ignore `statsPeriod` and `shortIdLookup` without failing.
+  `recommended`), `limit` (default and maximum per FR-019), `cursor`, repeated `id`, and `hashes`. An
+  absent or empty `query` MUST default to `is:unresolved`; the default applies to every request whose
+  `query` contains no explicit `is:` token, including requests filtered by `hashes` or repeated `id`.
+  `hashes` MUST match the issue's stored fingerprint, and an unknown hash MUST yield an empty page
+  rather than an error. The list MUST accept and ignore `statsPeriod` and `shortIdLookup` without
+  failing.
 - **FR-010**: The supported query grammar MUST include `is:unresolved|resolved|ignored`, `level:<l>`,
   `release:<r>`, `environment:<e>`, `<tag>:<value>`, and free-text matching over title, culprit, and
   fingerprint. Unsupported operators MUST be ignored, with the limitation documented; they MUST NOT
@@ -228,9 +239,9 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
 - **FR-012**: Issue statuses MUST map as `unresolved` ↔ open, `resolved` ↔ resolved, `ignored` ↔
   ignored, in both directions; `statusDetails` MUST be present for every issue.
 - **FR-013**: `PUT /api/0/projects/{org}/{project}/issues/` MUST apply `status` to every issue id that
-  belongs to the project (and to every issue matching `status` when no id is supplied), recording one
-  state-history entry per change with the token owner as actor. Ids outside the project MUST be skipped
-  silently. Requests whose body contains no supported attribute MUST return `400`.
+  belongs to the project (and to every issue matching the current query when no id is supplied),
+  recording one state-history entry per change with the token owner as actor. Ids outside the project
+  MUST be skipped silently. Requests whose body contains no supported attribute MUST return `400`.
 - **FR-014**: Supported mutation attributes are `status` only. Unsupported attributes (for example
   `assignedTo`, `isPublic`, `merge`) MUST be rejected with `400` naming the unsupported field; they
   MUST NOT be silently ignored.
@@ -243,9 +254,11 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
   that tag across the project's stored issues as `[{"name": "<value>"}]`.
 - **FR-017**: `GET /api/0/organizations/{org}/issues/{issue}/tags/{key}/values/` MUST return the same
   shape restricted to that issue.
-- **FR-018**: Tag-value responses MUST support `query` as a case-insensitive contains filter, MUST cap
-  at 1,000 values, MUST omit empty values, MUST stringify non-string values consistently, and MUST
-  return an empty list rather than `404` when the key has no values.
+- **FR-018**: Tag-value responses MUST support `query` as a case-insensitive contains filter, MUST omit
+  empty values, MUST stringify non-string values consistently, and MUST return an empty list rather
+  than `404` when the key has no values. They MUST paginate like issue collections (`limit`, `cursor`,
+  `Link`, `results`) with the same default and maximum page size as FR-019; the 1,000 cap is the total
+  number of distinct values considered, not a page size.
 
 **Pagination, errors, and compatibility**
 
@@ -271,8 +284,10 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
 ### Key Entities *(include if feature involves data)*
 
 - **API Token**: A long-lived credential owned by a user, stored as a hash with a display prefix, used
-  as a Sentry bearer token; it has no stored scope list, derives permissions from the owner's live roles,
-  does not expire automatically, and can be revoked from the API or the dashboard.
+  as a Sentry bearer token. It carries a required label of 1–100 characters after trimming, a prefix of
+  the first 14 plaintext characters for identification, a best-effort last-used timestamp, and a
+  terminal revocation timestamp. It has no stored scope list, derives permissions from the owner's live
+  roles, does not expire automatically, and revocation is immediate and terminal.
 - **Sentry Issue Projection**: The Sentry-shaped view of a stored issue, including synthetic `shortId`,
   `permalink`, `statusDetails`, `metadata`, `project`, and `userCount` (reported as 0 because Scout does
   not track distinct users).
@@ -335,3 +350,5 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
   parallel data model is created.
 - The constitution amendment described in the Governance Status section is a prerequisite and has
   been ratified at v1.1.0; this spec does not itself authorise further constitutional change.
+- Sentry path segments keep Sentry's spelling (`organizations`), while Scout prose and native routes
+  use `organisation`; this is deliberate and not terminology drift.

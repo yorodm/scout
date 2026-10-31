@@ -10,6 +10,7 @@ deployment; implementation details live in `tasks.md`, shapes live in
 - Rust stable toolchain and `trunk` (for the UI slice).
 - The repository root as working directory.
 - Port 8080 free.
+- Docker (only for the migration parity check in §9).
 - Demo data is convenient for these checks (it seeds organisations, projects, and issues).
 
 ## 1. Start with the compatibility surface enabled
@@ -64,7 +65,8 @@ curl -s http://127.0.0.1:8080/api/0/projects/<org>/<project>/issues/ \
 ```
 
 Expected: a JSON array of Sentry issue objects (fields per the contract), a `Link` header with
-`rel="next"`, `results="true"`, `cursor="…"`, and an `X-Hits` total.
+`rel="next"`, `results="true"`, `cursor="…"`, and an `X-Hits` total. With no `query` parameter the
+list defaults to unresolved issues, matching Sentry.
 
 - Inspect any element: `shortId` reads `<PROJECT>-<n>`, `statusDetails` is `{}`, `userCount` is `0`,
   `annotations` is `[]`, timestamps end in `Z`, and `permalink` opens the Scout issue detail.
@@ -136,14 +138,32 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 cargo check --target wasm32-unknown-unknown --manifest-path ui/Cargo.toml
 trunk build --release --manifest-path ui/Trunk.toml
+# SC-007 benchmark (ignored by default; record the p95 here after running it)
+cargo test --release -- --ignored sc_007
 ```
+
+- Measured p95 (1,000-issue list / tag values): ____ ms on ____ (date, hardware).
 
 Expected: all pass. The test suite covers projection, authentication and scope denial, list
 filtering/sorting, exactly-once pagination over 1,000 issues, mutations and history, tag values,
 unsupported responses, the disabled toggle, and token management (see R14 in
 [`research.md`](./research.md)).
 
-## 9. Regression check (SC-008)
+## 9. Migration parity
+
+On a host with Docker available, apply and re-apply the PostgreSQL migration added by this feature:
+
+```sh
+docker compose up -d postgres
+# apply migrations/0007_sentry_compat.sql, then run it a second time
+# verify: organisations.slug is unique case-insensitively; issues.number is unique per project
+# rollback: drop api_tokens, the issue number index/column, and the slug index/column
+```
+
+Expected: both applications succeed, the second is a no-op, and the rollback leaves the original
+schema. This is the constitution V gate for migrations.
+
+## 10. Regression check (SC-008)
 
 In the same run, exercise the native surface and confirm nothing changed:
 

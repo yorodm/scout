@@ -64,7 +64,7 @@ Reads a project's issues as Sentry issue objects.
 
 | Parameter | Rule |
 |---|---|
-| `query` | Sentry search subset: `is:unresolved\|resolved\|ignored`, `level:<level>`, `release:<value>`, `environment:<value>`, `<tag-key>:<value>`, plus free text over title, culprit, fingerprint. Unsupported operators are ignored, never `400`. |
+| `query` | Sentry search subset: `is:unresolved\|resolved\|ignored`, `level:<level>`, `release:<value>`, `environment:<value>`, `<tag-key>:<value>`, plus free text over title, culprit, fingerprint. An absent or empty `query` defaults to `is:unresolved`; the default still applies when `hashes` or `id` are supplied. Unsupported operators are ignored, never `400`. |
 | `sort` | `date` (default), `new`, `freq`, `user`, `trends`, `recommended`. `trends`/`recommended` fall back to `date`. |
 | `limit` | Default 100, max 100. |
 | `cursor` | Opaque cursor from a previous page. |
@@ -142,7 +142,10 @@ Distinct values of one tag across the project.
 | Parameter | Rule |
 |---|---|
 | `query` | Case-insensitive contains filter over values. |
-| `limit` / `cursor` | Same pagination contract (cap 1,000 values total). |
+| `limit` / `cursor` | Same pagination contract as issues: default and maximum 100 per page; the 1,000 cap is the total number of distinct values after filtering, not a page size. |
+
+The response emits `Link` with `rel="next"`, `results="true|false"`, and `cursor` exactly as issue
+lists do, but no `X-Hits` header is sent for tag values.
 
 ```json
 [{ "name": "web@1.0.0" }, { "name": "web@1.1.0" }]

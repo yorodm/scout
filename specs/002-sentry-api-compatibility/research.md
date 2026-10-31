@@ -83,7 +83,9 @@ what the implementation followed unless a later task explicitly revisits it.
 
 ## R6. Search grammar and sort mapping
 
-- **Decision**: Tokenise `query` on whitespace, honouring double quotes. A token `key:value` is
+- **Decision**: Tokenise `query` on whitespace, honouring double quotes. An absent or empty `query`
+  means `is:unresolved`, matching Sentry's default for the issues endpoint; the default still applies
+  when `hashes` or `id` are supplied. A token `key:value` is
   interpreted only for `is`, `level`, `release`, `environment`, and any key present in an issue's
   `tags`. `is:` accepts `unresolved|resolved|ignored`; `is:unresolved` matches **open only** (FR-012).
   All other `key:value` tokens are ignored (no `400`). Bare tokens are a case-insensitive needle over
@@ -167,8 +169,9 @@ what the implementation followed unless a later task explicitly revisits it.
 
 - **Decision**: Derive from `Issue.tags` (a JSON object) across the project's issues, stringifying
   string/number/bool values and skipping null/empty. De-duplicate case-sensitively, sort ascending
-  by value, apply `query` as a case-insensitive contains filter, cap at 1,000. The issue-scoped path
-  applies the same derivation to one issue. Missing key → `[]`.
+  by value, apply `query` as a case-insensitive contains filter, and cap the total at 1,000. Values are
+  returned through the same cursor pagination as issue collections (default and maximum 100 per page).
+  The issue-scoped path applies the same derivation to one issue. Missing key → `[]`.
 - **Rationale**: FR-016–FR-018 and the Assumptions note that no separate tag index exists in this
   slice.
 - **Alternatives considered**: Maintaining a tag index — rejected as scope creep; 1,000-value cap

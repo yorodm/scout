@@ -54,7 +54,7 @@ is O(project issues) and bounded by the scale above.
 | II. Raw payloads immutable and authoritative | PASS | No handler writes payloads or objects. `DELETE .../issues/` returns `501` (FR-015) precisely to preserve history and raw data. |
 | III. Project-scoped, server-side authorisation | PASS | Every `/api/0/` request resolves exactly one project server-side, derives Sentry scopes from the token owner's live role, returns `403` for insufficient scope and `404` for inaccessible resources without leaking existence. |
 | IV. One deployment unit, minimal moving parts | PASS | New module inside the existing binary; no broker, search cluster, or IdP. No new dependency. UI stays Sycamore/Trunk. |
-| V. Evidence over assumption: test the real paths | PASS | Contract and behaviour tests drive the real Actix app with `#[actix_web::test]`; no `tests/` crate, no `lib.rs` split. PostgreSQL parity is covered by the migration plus the existing compose smoke path. |
+| V. Evidence over assumption: test the real paths | PASS | Contract and behaviour tests drive the real Actix app with `#[actix_web::test]`; no `tests/` crate, no `lib.rs` split. Migration `0007_sentry_compat.sql` is exercised against the compose PostgreSQL instance by task T047 (apply, idempotent re-run, rollback). |
 | Security and Privacy constraints | PASS | Tokens are SHA-256 hashed, plaintext shown once, prefix stored for identification; no scope list stored; revocation is immediate; no token material is logged. |
 | Performance and Reliability constraints | PASS | Read-only handlers avoid ingest paths; the 10 MB JSON limit and existing error mapping are reused. No `503`/`429` behaviour changes. |
 | Compatibility and Scope constraints (v1.1.0) | PASS | Surface is limited to the 11-path contract, opt-in and default-off, derived from existing data with no parallel model, and answers unsupported capability honestly. Metrics, tracing, SCIM, Teams, and other endpoints stay unimplemented. |
@@ -136,6 +136,10 @@ Re-evaluated after `research.md`, `data-model.md`, `contracts/`, and `quickstart
 
 **Post-design result: PASS.** No new violations, no Complexity Tracking entries beyond the one
 recorded `Issue.number` decision.
+
+**Environment gate**: task T047 (migration parity) needs a Docker-capable host. This workspace has no
+Docker, so `0007_sentry_compat.sql` is designed and scheduled but remains unproven here. The feature is
+not complete until T047 runs elsewhere; do not report constitution V satisfied before it does.
 
 ## Complexity Tracking
 

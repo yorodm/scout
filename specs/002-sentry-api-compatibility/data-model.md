@@ -81,8 +81,9 @@ Existing issues are backfilled in `first_seen` order per project; new issues rec
 - Derived from `Issue.tags[key]` across the addressed scope (project or single issue).
 - Non-string scalars are stringified (`true`, `42`); objects/arrays/null and empty strings are
   skipped.
-- De-duplicated, sorted ascending by `name`, `query` filters case-insensitively by contains, capped
-  at 1,000. Never `404` for a missing key: an empty list.
+- De-duplicated, sorted ascending by `name`, `query` filters case-insensitively by contains, and the
+  distinct set is capped at 1,000. Returned through the shared cursor with a 100-item page size; the
+  1,000 cap is the total distinct set, not a page size. Never `404` for a missing key: an empty list.
 
 ### PaginationCursor
 
@@ -123,18 +124,52 @@ Derived per request from the owner's live roles; never stored.
 
 ## Migration (PostgreSQL parity)
 
-`migrations/0007_sentry_compat.sql`, idempotent:
+`migrations/0007_sentry_compat.sql`, idempotent. Order matters: every backfill completes before its
+unique index is created, otherwise existing rows collide on the default value.
 
 ```sql
+-- 1. Organisation slugs: derive, de-duplicate, then constrain.
 ALTER TABLE organisations ADD COLUMN IF NOT EXISTS slug TEXT;
-UPDATE organisations SET slug = lower(regexp_replace(name, '[^a-zA-Z0-9]+', '-', 'g'))
- WHERE slug IS NULL;
+
+UPDATE organisations AS o
+   SET slug = s.slug
+  FROM (
+      SELECT id,
+             CASE WHEN rn = 1 THEN base ELSE base || '-' || rn END AS slug
+        FROM (
+            SELECT id,
+                   COALESCE(NULLIF(trim(both '-' from
+                       lower(regexp_replace(name, '[^a-zA-Z0-9]+', '-', 'g'))), ''), 'org') AS base,
+                   row_number() OVER (
+                       PARTITION BY COALESCE(NULLIF(trim(both '-' from
+                           lower(regexp_replace(name, '[^a-zA-Z0-9]+', '-', 'g'))), ''), 'org')
+                       ORDER BY created_at, id
+                   ) AS rn
+              FROM organisations
+             WHERE slug IS NULL
+        ) numbered
+  ) AS s
+ WHERE o.id = s.id;
+
 CREATE UNIQUE INDEX IF NOT EXISTS organisations_slug_key ON organisations (lower(slug));
 
-ALTER TABLE issues ADD COLUMN IF NOT EXISTS number BIGINT NOT NULL DEFAULT 0;
-CREATE UNIQUE INDEX IF NOT EXISTS issues_project_number_key ON issues (project_id, number);
--- Backfill numbers per project in first_seen order, skipping already-numbered rows.
+-- 2. Issue numbers: number every project first, then add the constraint.
+ALTER TABLE issues ADD COLUMN IF NOT EXISTS number BIGINT;
 
+UPDATE issues AS i
+   SET number = n.rn
+  FROM (
+      SELECT id,
+             row_number() OVER (PARTITION BY project_id ORDER BY first_seen, id) AS rn
+        FROM issues
+       WHERE number IS NULL
+  ) AS n
+ WHERE i.id = n.id;
+
+ALTER TABLE issues ALTER COLUMN number SET NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS issues_project_number_key ON issues (project_id, number);
+
+-- 3. Tokens.
 CREATE TABLE IF NOT EXISTS api_tokens (
     id           UUID PRIMARY KEY,
     user_id      UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
@@ -148,8 +183,16 @@ CREATE TABLE IF NOT EXISTS api_tokens (
 CREATE INDEX IF NOT EXISTS api_tokens_user_id_idx ON api_tokens (user_id);
 ```
 
-Slug collision resolution is performed in application code for both representations; the SQL
-backfill is the deterministic starting point for existing rows.
+Notes:
+
+- The window functions make the backfill deterministic for existing rows; re-running the migration is
+  a no-op because both backfills only touch `NULL` values and the indexes are conditional.
+- Run the whole file in one transaction (sqlx's migrator does); a failure then rolls back the partial
+  numbering, so the `IS NULL` guards cannot leave duplicate ranks behind.
+- Application code performs the same slug de-duplication on create, so the two representations agree.
+- Numbering starts at the row's `first_seen` rank; new issues use `max(number) + 1` per project.
+- Rollback: drop `api_tokens`, drop `issues_project_number_key` and `issues.number`, drop
+  `organisations_slug_key` and `organisations.slug`.
 
 ## Relationships
 

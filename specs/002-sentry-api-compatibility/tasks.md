@@ -80,7 +80,7 @@ state and history appear in the native API/UI.
 
 - [ ] T020 [US1] Implement the `SentryIssue` projection in `src/compat/projection.rs`: `id` as a string; `shortId = {PROJECT}-{number}`; `statusDetails` always `{}` (plus `ignoreCount` when ignored); `count` a JSON number; `userCount` `0`; `annotations` `[]`; `metadata = {title, value: culprit or ""}`; `permalink = {self_url}/#/issues/{id}`; `firstSeen`/`lastSeen` as RFC 3339 UTC with `Z`; `project = {id, name, slug, platform: null}`; `tags` from the stored tag object with empty values omitted
 - [ ] T021 [US1] Implement the search tokenizer and filters (`is:`, `level:`, `release:`, `environment:`, tag keys, free text over title/culprit/fingerprint, unsupported operators ignored) and the sort map in `src/compat/query.rs`, with unit tests
-- [ ] T022 [US1] Implement the issue list handler (query, sort, `limit`, `cursor`, repeated `id`, `hashes` on `fingerprint`, ignore `statsPeriod`/`shortIdLookup`) with `Link`/`X-Hits` emission in `src/compat/handlers.rs`
+- [ ] T022 [US1] Implement the issue list handler (absent/empty `query` defaults to `is:unresolved`; query, sort, `limit`, `cursor`, repeated `id`, `hashes` on `fingerprint`, ignore `statsPeriod`/`shortIdLookup`) with `Link`/`X-Hits` emission in `src/compat/handlers.rs`
 - [ ] T023 [US1] Implement the status mutation handler in `src/compat/handlers.rs`: per-issue state change with one history entry each naming the token owner's email; ids outside the project skipped silently; no `id` means every issue matching the current query; `status` absent → `400` naming the missing field; unknown status value → `400`; unsupported attributes → `400` naming the field
 - [ ] T024 [US1] Implement `DELETE .../issues/` → `501` citing preserved history and raw payloads in `src/compat/handlers.rs`
 - [ ] T025 [US1] Register the three issues routes (with and without trailing slash) in `src/compat/mod.rs`
@@ -163,12 +163,14 @@ matrix in `contracts/sentry-compat-api.md`, and that Scout data is unchanged.
 **Purpose**: Documentation, regression proof, performance evidence, and quality gates.
 
 - [ ] T040 [P] Document `SCOUT_SENTRY_API_COMPAT_ENABLED`, the `/api/0` support matrix, and the token screen in `README.md` and `architecture.md`
-- [ ] T041 [P] Performance test SC-007: 1,000-issue issue list and tag-value requests at p95 ≤500 ms, with `X-Hits` included in the measurement, in `src/tests.rs`
-- [ ] T042 [P] Regression test SC-008: existing native endpoints and payloads unchanged, the token screen is the only new UI route, in `src/tests.rs`
+- [ ] T041 [P] Benchmark SC-007 with an ignored-by-default release-mode test (`#[ignore]`, `cargo test --release -- --ignored`) for 1,000-issue list and tag-value requests at p95 ≤500 ms including `X-Hits`, record the measured number in `quickstart.md`, and keep no wall-clock assertions in the normal debug suite (`src/tests.rs`)
+- [ ] T042 [P] Regression test SC-008 in `src/tests.rs`: existing native endpoints and payloads unchanged, the token screen is the only new UI route, and the ingest smoke path (envelope accept + issue visibility) still passes with `SCOUT_SENTRY_API_COMPAT_ENABLED` both off and on
 - [ ] T043 Verify the disabled toggle across every path (`404 {"detail":"Not Found"}` before auth) and confirm no `/api/0/` response is HTML in `src/tests.rs`
 - [ ] T044 Run `quickstart.md` end-to-end, including SC-006 (change visible within 1 s) and SC-009 (create/copy/revoke under a minute)
 - [ ] T045 Run `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, UI `cargo check --target wasm32-unknown-unknown`, and `trunk build --release` from the repository root
 - [ ] T046 Remove scaffolding `#[allow(dead_code)]`, stray TODOs, and unused helpers introduced during setup in `src/compat/`, `src/models.rs`, and `src/store.rs`, then re-run clippy
+- [ ] T047 Apply `migrations/0007_sentry_compat.sql` against the compose PostgreSQL instance, then re-run it to prove idempotency, verify `organisations.slug` uniqueness and `issues.number` per-project uniqueness on seeded duplicates, and roll it back cleanly (`migrations/0007_sentry_compat.sql`, `docker-compose.yml`)
+- [ ] T048 Add a table-driven test enumerating all 11 documented paths (enabled mode) asserting the documented status, a JSON body, and no `5xx` or HTML for each (`src/tests.rs`), closing SC-002
 
 ---
 
@@ -208,7 +210,7 @@ only when its phase tests pass through the real Actix app.
 - US2: T026 can be written while US1 handlers are in progress; T027–T029 must be sequential.
 - US3: T030/T031 in parallel; T032 → T033; T034/T035 in parallel with T032 once the contract is fixed.
 - US4: T036 in parallel with T037/T038.
-- Polish: T040, T041, T042, T043 are independent.
+- Polish: T040, T041, T042, T043 are independent; T047 needs T003; T048 needs US1–US4 complete.
 
 ---
 
