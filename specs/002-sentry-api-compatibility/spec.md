@@ -4,20 +4,22 @@
 
 **Created**: 2026-11-01
 
-**Status**: Blocked on constitution amendment (see Governance Note)
+**Status**: Cleared for planning (constitution amended to v1.1.0)
 
 **Input**: User description: "Compatibility with sentry openapi spec https://raw.githubusercontent.com/getsentry/sentry/refs/heads/master/api-docs/openapi.json"
 
-## Governance Note *(blocking)*
+## Governance Status
 
-The ratified constitution (v1.0.0), under **Additional Constraints → Compatibility and Scope**,
-states: *"Scout supports Sentry **ingestion** only. Sentry read-API compatibility, metrics, and
-tracing are out of scope and MUST NOT be implied."*
+The ratified constitution was amended to **v1.1.0** on 2026-11-01. **Additional Constraints →
+Compatibility and Scope** now permits an opt-in, bounded Sentry read-API compatibility surface
+limited to the endpoints, parameters, response shapes, pagination, and error format ratified in this
+specification; Sentry metrics, tracing, SCIM, Teams, and any endpoint outside this contract remain
+out of scope and MUST NOT be implied.
 
-This feature deliberately reverses that boundary. It MUST NOT move to `/speckit-plan` until the
-constitution is formally amended (for example to v1.1.0) to replace that clause with the
-compatibility boundary defined here. The governance amendment is an explicit, separate decision: it
-is not implied by this specification.
+The amendment also adds a Security and Privacy constraint: compatibility API tokens are hashed at
+rest, shown once in plaintext, inherit their owner's live roles, and grant nothing the owner does not
+currently hold. This specification is compliant with both clauses and no further governance action
+is required before `/speckit-plan`.
 
 ## Purpose and scope
 
@@ -34,6 +36,16 @@ ingest endpoints, authentication, and UI remain unchanged. Sentry compatibility 
 Endpoints whose underlying Sentry feature has no Scout equivalent are **not** emulated with invented
 data. They return documented, Sentry-shaped responses (empty collections where a read can be
 honestly satisfied, otherwise an explicit unsupported response) and never mutate state silently.
+
+## Clarifications
+
+### Session 2026-11-01
+
+- Q: Should a Scout API token carry its own fixed permission scopes, or inherit the owner's current project and organisation roles at request time? → A: Inherit the owner's live roles; scopes are computed per request and no per-token scope list is stored.
+- Q: Should Scout API tokens expire automatically, or stay valid until someone revokes them? → A: No automatic expiry; tokens stay valid until explicitly revoked.
+- Q: How should Scout give organisations a URL slug for Sentry-style paths, given that organisations currently have only a name and an identifier? → A: Derive and store a stable slug from the organisation name at creation, with a numeric suffix on collision, and backfill existing organisations.
+- Q: Should the Sentry-compatible read API enforce request rate limits, or rely on revocation and deployment-level protection for this slice? → A: No read-API rate limiting in this slice; document the absence and rely on immediate revocation, live scoping, and deployment-level throttling.
+- Q: Where should people create, list, and revoke Scout API tokens? → A: Native API endpoints plus a dashboard API-token screen.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -92,9 +104,10 @@ and the equivalent issue-scoped path, and verify distinct values, contains filte
 
 ### User Story 3 - Authenticate with Sentry-style tokens and scopes (Priority: P3)
 
-An administrator creates a long-lived API token for a person or automation. Sentry clients present it
-as `Authorization: Bearer <token>`. Requests are authorised by the token owner's current project roles,
-and insufficient scope is rejected without revealing whether a resource exists.
+An administrator creates a long-lived API token for a person or automation, either from the dashboard or
+through the native API. Sentry clients present it as `Authorization: Bearer <token>`. Requests are
+authorised by the token owner's current project roles, and insufficient scope is rejected without
+revealing whether a resource exists.
 
 **Why this priority**: Sentry clients expect a static bearer token rather than a short-lived browser
 session. Scoping keeps the compatibility surface inside Scout's project-authorisation model.
@@ -112,6 +125,11 @@ mutation and receive `403`, revoke the token, and confirm the next call returns 
    project, **Then** the request is denied immediately without reissuing the token.
 4. **Given** a revoked, unknown, or malformed token, **When** any `/api/0/` request is made, **Then**
    the response is `401` with the same body, and a project the owner cannot access is `404`.
+5. **Given** an administrator signed in to the dashboard, **When** they create a token from the
+   API-token screen, **Then** the plaintext is shown once with a copy action and the new token later
+   appears by prefix and label without the secret.
+6. **Given** an existing token listed in the dashboard, **When** the administrator revokes it, **Then**
+   it is marked revoked and the next `/api/0/` call using it returns `401`.
 
 ---
 
@@ -166,12 +184,17 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
 **Surface and authentication**
 
 - **FR-001**: Scout MUST expose a Sentry-compatible API under `/api/0/` alongside its existing `/api`
-  surface, without changing existing endpoints, payloads, or the UI.
+  surface, without changing existing endpoints, payloads, or existing UI screens. The only UI addition
+  is the API-token management screen required by FR-003.
 - **FR-002**: Every `/api/0/` request MUST authenticate with a Scout API token presented as
   `Authorization: Bearer <token>`; missing, malformed, unknown, and revoked tokens MUST all return the
   same `401` body.
 - **FR-003**: A user MUST be able to create, list, and revoke long-lived API tokens; the plaintext
-  token MUST be shown once, only a hash stored, and a stable prefix exposed for identification.
+  token MUST be shown once, only a hash stored, and a stable prefix exposed for identification. A token
+  MUST NOT store an independent scope list; its permissions are always derived from the owner's live
+  roles (FR-004). Tokens MUST NOT expire automatically: they remain valid until explicitly revoked.
+  Management MUST be available both through native API endpoints and through a dashboard API-token
+  screen that can create, list, and revoke tokens.
 - **FR-004**: API tokens MUST inherit the owner's current project roles and organisation roles on every
   request, so role changes and removals take effect without reissuing or restarting.
 - **FR-005**: Sentry scope names MUST be enforced from those roles: `event:read` and `project:read` for
@@ -179,7 +202,9 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
   `project:releases` for admins and owners. Organisation members MUST also receive `org:read`, and
   organisation admins MUST also receive `org:admin` and `org:integrations`. Requests above the granted
   scope MUST return `403`; resources the owner cannot access MUST return `404`.
-- **FR-006**: Organisations MUST be addressable by identifier or slug; projects MUST be addressable by
+- **FR-006**: Each organisation MUST have a stored, stable slug derived from its name at creation
+  (lowercase, hyphenated, with a numeric suffix on collision), and existing organisations MUST be
+  backfilled. Organisations MUST be addressable by identifier or slug; projects MUST be addressable by
   identifier, slug, or DSN id. Soft-deleted or unknown projects MUST return `404`.
 - **FR-007**: When the compatibility surface is disabled, every `/api/0/` path MUST return `404`; it
   MUST be disabled by default and enabled by explicit configuration.
@@ -246,7 +271,8 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
 ### Key Entities *(include if feature involves data)*
 
 - **API Token**: A long-lived credential owned by a user, stored as a hash with a display prefix, used
-  as a Sentry bearer token; derives scopes from the owner's live roles and can be revoked.
+  as a Sentry bearer token; it has no stored scope list, derives permissions from the owner's live roles,
+  does not expire automatically, and can be revoked from the API or the dashboard.
 - **Sentry Issue Projection**: The Sentry-shaped view of a stored issue, including synthetic `shortId`,
   `permalink`, `statusDetails`, `metadata`, `project`, and `userCount` (reported as 0 because Scout does
   not track distinct users).
@@ -277,8 +303,10 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
   state history within 1 second.
 - **SC-007**: 95% of issue-list and tag-value requests for a 1,000-issue project complete within
   500 ms on the reference self-hosted deployment.
-- **SC-008**: The existing native dashboard API, ingest endpoints, UI, and test suite continue to pass
-  unchanged, and ingest performance is unaffected.
+- **SC-008**: The existing native dashboard API, ingest endpoints, and existing UI screens continue to
+  pass unchanged; the only UI addition is the API-token screen, and ingest performance is unaffected.
+- **SC-009**: An administrator can create a token, copy it once, and later revoke it entirely from the
+  dashboard in under one minute without calling an API by hand.
 
 ## Assumptions
 
@@ -288,7 +316,11 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
   project data to long-lived tokens and expands the attack surface.
 - Scout API tokens are long-lived, hashed at rest, and inherit permissions from the owner rather than
   carrying an independent scope list; this favours live role enforcement over Sentry's per-token scope
-  editor.
+  editor. They do not expire automatically and are revoked explicitly from the API or dashboard.
+- Organisation slugs are derived from names, stored, and backfilled for existing organisations so that
+  Sentry-style paths work without an extra operator step.
+- No read-API rate limiting is introduced in this slice; a leaked token is contained by immediate
+  revocation, live scoping, and deployment-level throttling, and the absence is documented.
 - Issue ids remain Scout's opaque identifiers; `shortId` is synthesised from the project and a stable
   issue number, and `permalink` points at the Scout UI detail route.
 - `userCount` is always `0`, `annotations` is empty, and assignment/merge/bookmark features are not
@@ -301,5 +333,5 @@ unsupported behaviour, with every error using Sentry's `detail` shape.
   subsystems Scout does not have; their endpoints return documented empty or `501` responses.
 - The compatibility layer reuses Scout's existing organisation, project, issue, and role data; no
   parallel data model is created.
-- The constitution amendment described in the Governance Note is a prerequisite, and this spec does
-  not itself authorise changing the constitution.
+- The constitution amendment described in the Governance Status section is a prerequisite and has
+  been ratified at v1.1.0; this spec does not itself authorise further constitutional change.

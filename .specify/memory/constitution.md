@@ -1,14 +1,3 @@
-<!--
-Sync Impact Report
-==================
-Version change: unratified template → 1.0.0
-Modified principles: none (initial ratification)
-Added sections: Core Principles (I–V), Additional Constraints, Development Workflow &
-  Quality Gates, Governance
-Removed sections: none
-Follow-up TODOs: none
--->
-
 # Scout Constitution
 
 ## Core Principles
@@ -78,6 +67,10 @@ sacrificing the real request path.
   operator password.
 - Every administrative action (roles, keys, model, retention, organisation creation, initial-admin
   setup) MUST be recorded in the audit log.
+- API tokens issued for the Sentry-compatible surface MUST be stored only as strong hashes, shown in
+  plaintext once, and MUST inherit their owner's live project and organisation roles on every
+  request. A token MUST NOT carry an independent scope list and MUST NOT grant any capability its
+  owner does not currently hold.
 
 ### Performance and Reliability
 
@@ -91,8 +84,14 @@ sacrificing the real request path.
 
 ### Compatibility and Scope
 
-- Scout supports Sentry **ingestion** only. Sentry read-API compatibility, metrics, and tracing are
-  out of scope and MUST NOT be implied.
+- Scout supports Sentry **ingestion** and a bounded Sentry **read-API compatibility** surface: only
+  the endpoints, parameters, response shapes, pagination, and error format ratified with feature 002
+  in `specs/002-sentry-api-compatibility/spec.md`. That surface MUST be opt-in and disabled by
+  default, MUST derive every response from existing organisation, project, issue, and role data with
+  no parallel data model, and MUST report unsupported capability honestly with a documented empty
+  collection or an explicit `501` rather than an invented result.
+- Sentry metrics, tracing, SCIM, Teams, and any endpoint outside the ratified compatibility contract
+  remain out of scope and MUST NOT be implied.
 - The classification integration targets a Jev-compatible decisions endpoint per project; with no
   endpoint configured, classification is inert and ingest proceeds normally.
 - Per-project retention defaults to 30 days and applies to raw payloads and log lines; issue metadata
@@ -134,4 +133,4 @@ and Additional Constraints. A change that cannot comply MUST be rejected or acco
 accepted constitution amendment. Runtime guidance lives in `README.md`, `architecture.md`, and the
 active feature's `spec.md`, `plan.md`, and `contracts/`.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-31 | **Last Amended**: 2026-10-31
+**Version**: 1.1.0 | **Ratified**: 2026-10-31 | **Last Amended**: 2026-11-01
