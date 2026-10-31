@@ -8,6 +8,83 @@ pub struct Organisation {
     pub id: Uuid,
     pub name: String,
     pub sso_provider: Option<String>,
+    #[serde(default)]
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OrgRole {
+    Admin,
+    Member,
+}
+
+impl std::fmt::Display for OrgRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrgRole::Admin => write!(f, "org_admin"),
+            OrgRole::Member => write!(f, "org_member"),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvitationKind {
+    ProjectInvite,
+    OrgAdminSetup,
+}
+
+impl std::fmt::Display for InvitationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InvitationKind::ProjectInvite => write!(f, "project_invite"),
+            InvitationKind::OrgAdminSetup => write!(f, "org_admin_setup"),
+        }
+    }
+}
+
+/// A one-time invitation. Only the SHA-256 of the token is stored.
+#[derive(Clone, Debug)]
+pub struct Invitation {
+    pub id: Uuid,
+    pub org_id: Uuid,
+    pub kind: InvitationKind,
+    pub project_id: Option<Uuid>,
+    pub email: String,
+    pub role: Option<Role>,
+    /// Kept alongside the `invitations_by_token` key for PostgreSQL parity.
+    #[allow(dead_code)]
+    pub token_hash: String,
+    #[allow(dead_code)]
+    pub created_by: Uuid,
+    pub expires_at: DateTime<Utc>,
+    pub accepted_at: Option<DateTime<Utc>>,
+    pub accepted_user_id: Option<Uuid>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+impl Invitation {
+    pub fn is_pending(&self) -> bool {
+        self.accepted_at.is_none() && self.revoked_at.is_none() && self.expires_at > Utc::now()
+    }
+}
+
+/// A single-use recovery code; only its SHA-256 is stored.
+#[derive(Clone, Debug)]
+pub struct RecoveryCode {
+    #[allow(dead_code)]
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub code_hash: String,
+    #[allow(dead_code)]
+    pub created_at: DateTime<Utc>,
+    pub used_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
+fn default_confidence_threshold() -> f64 {
+    0.5
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,6 +92,9 @@ pub struct ModelConfig {
     pub endpoint: String,
     pub api_key: Option<String>,
     pub model: String,
+    /// Suggestions below this confidence are discarded.
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -27,6 +107,16 @@ pub struct Project {
     pub org_id: Uuid,
     pub retention_days: u32,
     pub model: Option<ModelConfig>,
+    /// Authoritative suggestion threshold for the project; new projects use
+    /// `SCOUT_CONFIDENCE_THRESHOLD` and settings updates carry it through.
+    #[serde(default = "default_confidence_threshold")]
+    pub confidence_threshold: f64,
+    /// Set when an owner soft-deletes the project. Rows, objects, and logs stay
+    /// and remain subject to retention.
+    #[serde(default)]
+    pub deleted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub deleted_by: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -45,6 +135,19 @@ pub struct User {
     pub id: Uuid,
     pub email: String,
     pub name: String,
+    /// Argon2id PHC string. Never serialised: API responses must not expose it.
+    #[serde(default, skip_serializing)]
+    pub password_hash: Option<String>,
+    /// The single deployment-level principal seeded from the environment.
+    pub is_operator: bool,
+}
+
+/// An authenticated session. Only the SHA-256 of the opaque token is stored, and
+/// the key in `Store::sessions` is that hash.
+#[derive(Clone, Debug)]
+pub struct Session {
+    pub user_id: Uuid,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -152,6 +255,10 @@ pub struct Issue {
     pub breadcrumbs: Vec<Breadcrumb>,
     pub suggestion: Option<Suggestion>,
     pub decision: Option<CategorisationDecision>,
+    /// Set the first time a member opens the issue detail. A late classifier
+    /// answer is discarded once this is set (FR-019).
+    #[serde(default)]
+    pub first_presented_at: Option<DateTime<Utc>>,
     pub state_history: Vec<StateChange>,
     pub last_event_id: Uuid,
 }
@@ -160,7 +267,24 @@ pub struct Issue {
 pub struct Attachment {
     pub filename: String,
     pub content_type: String,
+    pub size: u64,
+    /// Write-once object key, set once the bytes are persisted.
+    pub object_key: Option<String>,
+    /// Parsed bytes; cleared after they are written to object storage.
     pub data: Vec<u8>,
+}
+
+impl Attachment {
+    pub fn new(filename: String, content_type: String, data: Vec<u8>) -> Self {
+        let size = data.len() as u64;
+        Self {
+            filename,
+            content_type,
+            size,
+            object_key: None,
+            data,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -170,8 +294,14 @@ pub struct Event {
     pub project_id: Uuid,
     pub issue_id: Option<Uuid>,
     pub received_at: DateTime<Utc>,
-    /// The exact (decompressed) bytes received, kept immutable.
-    pub raw: Vec<u8>,
+    /// Write-once object key holding the exact (decompressed) bytes received.
+    /// Null once retention has removed the payload.
+    pub raw_object_key: Option<String>,
+    pub raw_size: u64,
+    pub raw_expired_at: Option<DateTime<Utc>>,
+    /// Historical attachment count; attachments themselves expire with the raw
+    /// payload.
+    pub attachment_count: usize,
     pub event: Value,
     pub attachments: Vec<Attachment>,
 }
@@ -191,8 +321,8 @@ impl From<&Event> for EventMeta {
             id: e.id,
             sentry_event_id: e.sentry_event_id.clone(),
             received_at: e.received_at,
-            size: e.raw.len(),
-            attachment_count: e.attachments.len(),
+            size: e.raw_size as usize,
+            attachment_count: e.attachment_count,
         }
     }
 }
@@ -207,4 +337,18 @@ pub struct LogLine {
     pub source: String,
     pub attributes: Value,
     pub received_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: Uuid,
+    pub org_id: Option<Uuid>,
+    pub project_id: Option<Uuid>,
+    pub actor: String,
+    pub action: String,
+    pub target: Option<String>,
+    /// Structured context for the action (for example the previous role).
+    #[serde(default)]
+    pub metadata: Value,
+    pub at: DateTime<Utc>,
 }

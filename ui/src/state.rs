@@ -204,8 +204,8 @@ pub async fn load_accounts(store: Signal<AppState>) {
     }
 }
 
-pub async fn login(store: Signal<AppState>, email: String) {
-    match api::login(&email).await {
+pub async fn login(store: Signal<AppState>, email: String, password: String) {
+    match api::login(&email, &password).await {
         Ok(data) => {
             util::storage_set("scout_token", &data.token);
             store.update(|state| {

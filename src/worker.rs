@@ -1,11 +1,17 @@
 use crate::models::{Issue, IssueState, Project, StateChange};
+use crate::objects::Objects;
 use crate::store::Store;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc::UnboundedReceiver, RwLock};
 use uuid::Uuid;
 
 pub enum Job {
-    GroupEvent { project_id: Uuid, event_id: Uuid },
+    GroupEvent {
+        job_id: Uuid,
+        project_id: Uuid,
+        event_id: Uuid,
+    },
 }
 
 /// One in-process worker, mirroring the "claim a job, group, then classify"
@@ -15,9 +21,40 @@ pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: re
         while let Some(job) = rx.recv().await {
             match job {
                 Job::GroupEvent {
+                    job_id,
                     project_id,
                     event_id,
-                } => process_event(&store, &http, project_id, event_id).await,
+                } => process_event(&store, &http, job_id, project_id, event_id).await,
+            }
+        }
+    });
+}
+
+/// Periodically expire raw payloads and log lines for every project and delete
+/// the objects they referenced. Issue rows and counters are never removed here.
+pub fn spawn_retention(store: Arc<RwLock<Store>>, objects: Arc<Objects>, period: Duration) {
+    actix_web::rt::spawn(async move {
+        let mut ticker = tokio::time::interval(period);
+        loop {
+            ticker.tick().await;
+            let keys = {
+                let mut store = store.write().await;
+                let projects: Vec<Project> = store.projects.values().cloned().collect();
+                projects
+                    .iter()
+                    .flat_map(|project| store.apply_retention(project))
+                    .collect::<Vec<_>>()
+            };
+            if !keys.is_empty() {
+                tracing::debug!(
+                    expired_objects = keys.len(),
+                    "retention sweep expired payloads"
+                );
+            }
+            for key in keys {
+                if let Err(error) = objects.delete(&key).await {
+                    tracing::warn!(%key, %error, "retention could not delete an object");
+                }
             }
         }
     });
@@ -26,14 +63,25 @@ pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: re
 async fn process_event(
     store: &Arc<RwLock<Store>>,
     http: &reqwest::Client,
+    job_id: Uuid,
     project_id: Uuid,
     event_id: Uuid,
 ) {
+    let started = std::time::Instant::now();
     let Some((issue_id, derived, project, event, needs_suggestion)) =
         group(store, project_id, event_id).await
     else {
+        tracing::warn!(job_id = %job_id, project_id = %project_id, event_id = %event_id, "grouping skipped: event not found");
         return;
     };
+    tracing::debug!(
+        job_id = %job_id,
+        project_id = %project_id,
+        event_id = %event_id,
+        issue_id = %issue_id,
+        elapsed_us = started.elapsed().as_micros() as u64,
+        "event grouped"
+    );
 
     // No model configured, a suggestion already exists, or a human already
     // decided: nothing to ask the model for.
@@ -42,19 +90,34 @@ async fn process_event(
     }
 
     let received_by = format!("/api/{}/envelope/", project.dsn_id);
-    let Some(suggestion) =
-        crate::classifier::suggest(http, &project, &derived, &event, &received_by).await
-    else {
+    let suggestion =
+        crate::classifier::suggest(http, &project, &derived, &event, &received_by).await;
+    tracing::debug!(
+        job_id = %job_id,
+        project_id = %project_id,
+        issue_id = %issue_id,
+        outcome = if suggestion.is_some() { "suggested" } else { "no_suggestion" },
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "classifier finished"
+    );
+    let Some(suggestion) = suggestion else {
         return;
     };
 
     let mut store = store.write().await;
     if let Some(issue) = store.issues.get_mut(&issue_id) {
-        // FR-019: a late suggestion must not rewrite a human decision.
-        if issue.decision.is_none() {
+        // FR-019: a late suggestion must not rewrite a human decision or appear
+        // after a member has already seen the issue.
+        if may_apply_suggestion(issue) {
             issue.suggestion = Some(suggestion);
         }
     }
+}
+
+/// FR-019: a late classifier answer may only land while the issue has not been
+/// presented to a member and no human has decided.
+fn may_apply_suggestion(issue: &Issue) -> bool {
+    issue.first_presented_at.is_none() && issue.decision.is_none()
 }
 
 #[allow(clippy::type_complexity)]
@@ -135,6 +198,7 @@ async fn group(
                 breadcrumbs: derived.breadcrumbs.clone(),
                 suggestion: None,
                 decision: None,
+                first_presented_at: None,
                 state_history: vec![StateChange {
                     state: IssueState::Open,
                     by: "system".into(),
@@ -156,7 +220,7 @@ async fn group(
     let needs_suggestion = store
         .issues
         .get(&issue_id)
-        .map(|i| i.suggestion.is_none() && i.decision.is_none())
+        .map(|i| i.suggestion.is_none() && i.decision.is_none() && i.first_presented_at.is_none())
         .unwrap_or(false);
 
     Some((
@@ -166,4 +230,40 @@ async fn group(
         event.event.clone(),
         needs_suggestion,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presented_or_decided_issues_discard_late_suggestions() {
+        let (store, _raw) = crate::store::seed("http://127.0.0.1:1");
+
+        let undecided = store
+            .issues
+            .values()
+            .find(|issue| issue.decision.is_none())
+            .cloned()
+            .expect("a seeded issue without a decision");
+        assert!(may_apply_suggestion(&undecided));
+
+        let mut presented = undecided.clone();
+        presented.first_presented_at = Some(chrono::Utc::now());
+        assert!(
+            !may_apply_suggestion(&presented),
+            "a suggestion must not land after the issue was presented"
+        );
+
+        let decided = store
+            .issues
+            .values()
+            .find(|issue| issue.decision.is_some())
+            .cloned()
+            .expect("a seeded issue with a decision");
+        assert!(
+            !may_apply_suggestion(&decided),
+            "a suggestion must not overwrite a human decision"
+        );
+    }
 }

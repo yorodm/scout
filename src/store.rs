@@ -2,7 +2,18 @@ use crate::models::*;
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 use uuid::Uuid;
+
+/// Demo-only credential for the seeded accounts. Real accounts are created by
+/// operator provisioning and invitation acceptance, which set their own password.
+pub const DEMO_PASSWORD: &str = "scout-demo";
+
+fn demo_password_hash() -> String {
+    static HASH: OnceLock<String> = OnceLock::new();
+    HASH.get_or_init(|| crate::auth::hash_password(DEMO_PASSWORD).expect("hash demo password"))
+        .clone()
+}
 
 pub fn event_hex_id() -> String {
     Uuid::new_v4().simple().to_string()
@@ -13,21 +24,51 @@ pub fn event_hex_id() -> String {
 /// storage layer can be swapped without touching the ingest or API paths.
 pub struct Store {
     pub orgs: HashMap<Uuid, Organisation>,
+    pub org_members: HashMap<(Uuid, Uuid), OrgRole>,
     pub projects: HashMap<Uuid, Project>,
     pub projects_by_dsn: HashMap<String, Uuid>,
     pub keys: HashMap<String, IngestKey>,
     pub users: HashMap<Uuid, User>,
     pub users_by_email: HashMap<String, Uuid>,
     pub memberships: HashMap<(Uuid, Uuid), Role>,
-    pub sessions: HashMap<String, Uuid>,
+    pub sessions: HashMap<String, Session>,
     pub issues: HashMap<Uuid, Issue>,
     pub issues_by_fingerprint: HashMap<(Uuid, String), Uuid>,
     pub events: HashMap<Uuid, Event>,
     pub seen_event_ids: HashMap<(Uuid, String), Uuid>,
     pub logs: Vec<LogLine>,
+    pub audit: Vec<AuditEntry>,
+    pub invitations: HashMap<Uuid, Invitation>,
+    pub invitations_by_token: HashMap<String, Uuid>,
+    pub recovery_codes: Vec<RecoveryCode>,
 }
 
 impl Store {
+    /// An empty metadata store for a real deployment. Demo data is only seeded
+    /// when `SCOUT_DEMO_MODE` is explicitly enabled.
+    pub fn empty() -> Self {
+        Self {
+            orgs: HashMap::new(),
+            org_members: HashMap::new(),
+            projects: HashMap::new(),
+            projects_by_dsn: HashMap::new(),
+            keys: HashMap::new(),
+            users: HashMap::new(),
+            users_by_email: HashMap::new(),
+            memberships: HashMap::new(),
+            sessions: HashMap::new(),
+            issues: HashMap::new(),
+            issues_by_fingerprint: HashMap::new(),
+            events: HashMap::new(),
+            seen_event_ids: HashMap::new(),
+            logs: Vec::new(),
+            audit: Vec::new(),
+            invitations: HashMap::new(),
+            invitations_by_token: HashMap::new(),
+            recovery_codes: Vec::new(),
+        }
+    }
+
     pub fn project_by_identifier(&self, identifier: &str) -> Option<&Project> {
         self.projects_by_dsn
             .get(identifier)
@@ -45,8 +86,49 @@ impl Store {
         self.memberships.get(&(user_id, project_id)).copied()
     }
 
+    pub fn org_role_for(&self, user_id: Uuid, org_id: Uuid) -> Option<OrgRole> {
+        self.org_members.get(&(user_id, org_id)).copied()
+    }
+
+    pub fn invitation_by_token(&self, token: &str) -> Option<&Invitation> {
+        self.invitations_by_token
+            .get(&crate::auth::hash_token(token))
+            .and_then(|id| self.invitations.get(id))
+    }
+
     pub fn user_for_token(&self, token: &str) -> Option<Uuid> {
-        self.sessions.get(token).copied()
+        let session = self.sessions.get(&crate::auth::hash_token(token))?;
+        if session.expires_at <= Utc::now() {
+            return None;
+        }
+        Some(session.user_id)
+    }
+
+    /// Issue a hashed session token. The plaintext token is returned once and is
+    /// the only thing the caller can ever present.
+    pub fn issue_session(&mut self, user_id: Uuid, ttl_days: i64) -> String {
+        let token = crate::auth::new_token();
+        let now = Utc::now();
+        self.sessions.insert(
+            crate::auth::hash_token(&token),
+            Session {
+                user_id,
+                expires_at: now + Duration::days(ttl_days),
+            },
+        );
+        token
+    }
+
+    pub fn revoke_session(&mut self, token: &str) {
+        self.sessions.remove(&crate::auth::hash_token(token));
+    }
+
+    /// Remove expired sessions. Returns the number removed.
+    pub fn sweep_sessions(&mut self) -> usize {
+        let now = Utc::now();
+        let before = self.sessions.len();
+        self.sessions.retain(|_, session| session.expires_at > now);
+        before - self.sessions.len()
     }
 
     pub fn user_by_email(&self, email: &str) -> Option<&User> {
@@ -55,44 +137,49 @@ impl Store {
             .and_then(|id| self.users.get(id))
     }
 
-    /// Remove raw events and log lines that exceed the project's retention
-    /// window. Issues and their counters stay; their raw payload simply becomes
-    /// unavailable, which the UI reports.
-    pub fn apply_retention(&mut self, project: &Project) {
+    /// Expire raw payloads and log lines that exceed the project's retention
+    /// window. The event row, its issue link, and issue counters stay so triage
+    /// history remains; only the raw reference, attachments, and object bytes go.
+    /// Returns the object keys the caller must delete.
+    pub fn apply_retention(&mut self, project: &Project) -> Vec<String> {
         let cutoff = Utc::now() - Duration::days(project.retention_days as i64);
+        let now = Utc::now();
         let expired: Vec<Uuid> = self
             .events
             .values()
-            .filter(|e| e.project_id == project.id && e.received_at < cutoff)
+            .filter(|e| {
+                e.project_id == project.id && e.received_at < cutoff && e.raw_object_key.is_some()
+            })
             .map(|e| e.id)
             .collect();
+        let mut keys = Vec::new();
         for id in expired {
-            if let Some(event) = self.events.remove(&id) {
-                self.seen_event_ids
-                    .remove(&(event.project_id, event.sentry_event_id));
+            if let Some(event) = self.events.get_mut(&id) {
+                keys.extend(
+                    event
+                        .attachments
+                        .iter()
+                        .filter_map(|attachment| attachment.object_key.clone()),
+                );
+                if let Some(key) = event.raw_object_key.take() {
+                    keys.push(key);
+                }
+                event.attachments.clear();
+                event.raw_expired_at = Some(now);
             }
         }
         self.logs
             .retain(|l| !(l.project_id == project.id && l.timestamp < cutoff));
+        keys
     }
 }
 
-pub fn seed(self_url: &str) -> Store {
-    let mut store = Store {
-        orgs: HashMap::new(),
-        projects: HashMap::new(),
-        projects_by_dsn: HashMap::new(),
-        keys: HashMap::new(),
-        users: HashMap::new(),
-        users_by_email: HashMap::new(),
-        memberships: HashMap::new(),
-        sessions: HashMap::new(),
-        issues: HashMap::new(),
-        issues_by_fingerprint: HashMap::new(),
-        events: HashMap::new(),
-        seen_event_ids: HashMap::new(),
-        logs: Vec::new(),
-    };
+/// Build the demo store. Raw payloads are returned separately so the caller can
+/// write them to object storage (which is async) before serving requests.
+pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
+    let mut raws = Vec::new();
+    let mut store = Store::empty();
+    let now = Utc::now();
 
     let org_id = Uuid::new_v4();
     store.orgs.insert(
@@ -101,10 +188,9 @@ pub fn seed(self_url: &str) -> Store {
             id: org_id,
             name: "Acme".into(),
             sso_provider: None,
+            created_at: now - Duration::days(60),
         },
     );
-
-    let now = Utc::now();
 
     let web_id = Uuid::new_v4();
     let web = Project {
@@ -118,7 +204,11 @@ pub fn seed(self_url: &str) -> Store {
             endpoint: format!("{}/mock-jev", self_url.trim_end_matches('/')),
             api_key: None,
             model: "jev-latest".into(),
+            confidence_threshold: 0.5,
         }),
+        confidence_threshold: 0.5,
+        deleted_at: None,
+        deleted_by: None,
         created_at: now - Duration::days(46),
     };
     let platform_id = Uuid::new_v4();
@@ -130,6 +220,9 @@ pub fn seed(self_url: &str) -> Store {
         org_id,
         retention_days: 14,
         model: None,
+        confidence_threshold: 0.5,
+        deleted_at: None,
+        deleted_by: None,
         created_at: now - Duration::days(21),
     };
     for project in [&web, &platform] {
@@ -157,20 +250,27 @@ pub fn seed(self_url: &str) -> Store {
         store.keys.insert(key.into(), ingest_key);
     }
 
+    let demo_hash = demo_password_hash();
     let demo = User {
         id: Uuid::new_v4(),
         email: "demo@scout.local".into(),
         name: "Dana Demo".into(),
+        password_hash: Some(demo_hash.clone()),
+        is_operator: false,
     };
     let triager = User {
         id: Uuid::new_v4(),
         email: "triager@scout.local".into(),
         name: "Toni Triager".into(),
+        password_hash: Some(demo_hash.clone()),
+        is_operator: false,
     };
     let viewer = User {
         id: Uuid::new_v4(),
         email: "viewer@scout.local".into(),
         name: "Vic Viewer".into(),
+        password_hash: Some(demo_hash),
+        is_operator: false,
     };
     for user in [&demo, &triager, &viewer] {
         store.users.insert(user.id, user.clone());
@@ -186,6 +286,9 @@ pub fn seed(self_url: &str) -> Store {
         .memberships
         .insert((triager.id, web_id), Role::Triager);
     store.memberships.insert((viewer.id, web_id), Role::Viewer);
+    // The demo owner also administers the demo organisation, so the
+    // provisioning endpoints are usable in demo mode.
+    store.org_members.insert((demo.id, org_id), OrgRole::Admin);
 
     // --- seed issues and their original payloads ---------------------------
     let checkout_event = event_json(
@@ -212,6 +315,7 @@ pub fn seed(self_url: &str) -> Store {
     );
     seed_issue(
         &mut store,
+        &mut raws,
         &web,
         checkout_event,
         1284,
@@ -229,11 +333,11 @@ pub fn seed(self_url: &str) -> Store {
             by: "system".into(),
             at: now - Duration::hours(3),
         }],
-        vec![Attachment {
-            filename: "checkout-context.txt".into(),
-            content_type: "text/plain".into(),
-            data: b"cart=8f21\ncurrency=undefined\nroute=/checkout\n".to_vec(),
-        }],
+        vec![Attachment::new(
+            "checkout-context.txt".into(),
+            "text/plain".into(),
+            b"cart=8f21\ncurrency=undefined\nroute=/checkout\n".to_vec(),
+        )],
     );
 
     let pool_event = event_json(
@@ -257,6 +361,7 @@ pub fn seed(self_url: &str) -> Store {
     );
     seed_issue(
         &mut store,
+        &mut raws,
         &web,
         pool_event,
         37,
@@ -296,6 +401,7 @@ pub fn seed(self_url: &str) -> Store {
     );
     seed_issue(
         &mut store,
+        &mut raws,
         &web,
         webhook_event,
         12,
@@ -347,6 +453,7 @@ pub fn seed(self_url: &str) -> Store {
     );
     seed_issue(
         &mut store,
+        &mut raws,
         &platform,
         parse_event,
         5,
@@ -390,7 +497,7 @@ pub fn seed(self_url: &str) -> Store {
         log(platform_id, Duration::minutes(21), "warning", "upstream latency above threshold: p95=820ms", "platform-api", json!({"p95_ms":820,"threshold_ms":500})),
     ]);
 
-    store
+    (store, raws)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -431,6 +538,7 @@ fn event_json(
 #[allow(clippy::too_many_arguments)]
 fn seed_issue(
     store: &mut Store,
+    raw_objects: &mut Vec<(String, Vec<u8>)>,
     project: &Project,
     event: Value,
     count: u64,
@@ -450,6 +558,22 @@ fn seed_issue(
     let raw = serde_json::to_vec_pretty(&event).unwrap_or_default();
     let issue_id = Uuid::new_v4();
     let event_id = Uuid::new_v4();
+    let raw_object_key = crate::objects::raw_key(project.id, event_id);
+    raw_objects.push((raw_object_key.clone(), raw.clone()));
+
+    // Attachment bytes live in object storage too; the event keeps metadata only.
+    let mut stored_attachments = Vec::with_capacity(attachments.len());
+    for (index, attachment) in attachments.into_iter().enumerate() {
+        let key = crate::objects::attachment_key(project.id, event_id, index);
+        raw_objects.push((key.clone(), attachment.data.clone()));
+        stored_attachments.push(crate::models::Attachment {
+            filename: attachment.filename,
+            content_type: attachment.content_type,
+            size: attachment.size,
+            object_key: Some(key),
+            data: Vec::new(),
+        });
+    }
 
     let issue = Issue {
         id: issue_id,
@@ -472,6 +596,7 @@ fn seed_issue(
         breadcrumbs: derived.breadcrumbs,
         suggestion,
         decision,
+        first_presented_at: None,
         state_history,
         last_event_id: event_id,
     };
@@ -488,9 +613,12 @@ fn seed_issue(
             project_id: project.id,
             issue_id: Some(issue_id),
             received_at: last_seen,
-            raw,
+            raw_object_key: Some(raw_object_key),
+            raw_size: raw.len() as u64,
+            raw_expired_at: None,
+            attachment_count: stored_attachments.len(),
             event,
-            attachments,
+            attachments: stored_attachments,
         },
     );
     store

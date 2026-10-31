@@ -301,9 +301,55 @@ fn normalize(message: &str) -> String {
 }
 
 /// The compact summary that is allowed to cross the model boundary (max 2 KB).
+/// Object keys whose lowercased name contains one of these are redacted before
+/// the summary leaves the process (contracts/classifier.md).
+const SENSITIVE_KEY_PARTS: &[&str] = &[
+    "authorization",
+    "cookie",
+    "set-cookie",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "access_token",
+    "refresh_token",
+    "ssn",
+    "credit_card",
+    "email",
+];
+
+const SUMMARY_SAMPLE_LIMIT: usize = 2048;
+
+/// Replace sensitive values anywhere in a JSON tree, including inside arrays and
+/// nested objects.
+pub fn redact(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, value) in map {
+                let lower = key.to_ascii_lowercase();
+                if SENSITIVE_KEY_PARTS.iter().any(|part| lower.contains(part)) {
+                    out.insert(key.clone(), json!("[redacted]"));
+                } else {
+                    out.insert(key.clone(), redact(value));
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(redact).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The bounded, redacted payload sample sent to the classifier.
+pub fn payload_sample(event: &Value, limit: usize) -> String {
+    let compact = serde_json::to_string(&redact(event)).unwrap_or_default();
+    compact.chars().take(limit).collect()
+}
+
 pub fn summary(derived: &Derived, event: &Value, received_by: &str) -> Value {
-    let compact = serde_json::to_string(event).unwrap_or_default();
-    let sample: String = compact.chars().take(2048).collect();
     json!({
         "kind": "sentry_event",
         "message": derived.message,
@@ -311,8 +357,9 @@ pub fn summary(derived: &Derived, event: &Value, received_by: &str) -> Value {
         "exception_type": derived.exception_type,
         "level": derived.level,
         "release": derived.release,
+        "environment": derived.environment,
         "received_by": received_by,
-        "payload_sample": sample,
+        "payload_sample": payload_sample(event, SUMMARY_SAMPLE_LIMIT),
     })
 }
 
@@ -377,6 +424,52 @@ mod tests {
         assert_eq!(
             normalize("Timeout after 3000ms on port 8080"),
             "timeout after #ms on port #"
+        );
+    }
+
+    #[test]
+    fn summaries_redact_secrets_and_cap_the_sample() {
+        let event = json!({
+            "message": "boom",
+            "user": { "email": "person@example.com", "id": "u_1" },
+            "headers": {
+                "Authorization": "Bearer super-secret",
+                "cookie": "session=abc",
+                "Accept": "application/json"
+            },
+            "credit_card": "4111111111111111",
+            "note": "keep me"
+        });
+        let derived = derive(&event, Uuid::new_v4());
+        let built = summary(&derived, &event, "/api/1/envelope/");
+        let sample = built["payload_sample"].as_str().unwrap();
+
+        assert!(!sample.contains("person@example.com"));
+        assert!(!sample.contains("super-secret"));
+        assert!(!sample.contains("session=abc"));
+        assert!(!sample.contains("4111111111111111"));
+        assert!(sample.contains("[redacted]"));
+        assert!(sample.contains("keep me"));
+        assert!(
+            sample.contains("application/json"),
+            "non-sensitive values survive"
+        );
+
+        // A large event is truncated so the summary stays bounded.
+        let oversized = json!({
+            "message": "boom",
+            "blob": "x".repeat(5000)
+        });
+        let derived = derive(&oversized, Uuid::new_v4());
+        let oversized_summary = summary(&derived, &oversized, "/api/1/envelope/");
+        assert_eq!(
+            oversized_summary["payload_sample"]
+                .as_str()
+                .unwrap()
+                .chars()
+                .count(),
+            2048,
+            "an oversized event is truncated to the 2 KB limit"
         );
     }
 }

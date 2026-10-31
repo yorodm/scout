@@ -13,9 +13,10 @@ use actix_web::http::StatusCode;
 use actix_web::test;
 use actix_web::{web, App, Error, HttpResponse, HttpServer};
 use serde_json::{json, Value};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, RwLock, Semaphore};
 use uuid::Uuid;
 
 // --- harness ---------------------------------------------------------------
@@ -38,6 +39,15 @@ async fn mock_model(body: web::Json<Value>) -> HttpResponse {
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_ascii_lowercase();
+    if message.contains("malformed response") {
+        return HttpResponse::Ok().body("not json");
+    }
+    if message.contains("low confidence") {
+        return HttpResponse::Ok().json(json!({ "choice": "issue", "confidence": 0.1 }));
+    }
+    if message.contains("unknown category") {
+        return HttpResponse::Ok().json(json!({ "choice": "billing", "confidence": 0.9 }));
+    }
     let category = if message.contains("log") || message.contains("pool") {
         "log"
     } else {
@@ -46,8 +56,16 @@ async fn mock_model(body: web::Json<Value>) -> HttpResponse {
     HttpResponse::Ok().json(json!({ "choice": category, "confidence": 0.9 }))
 }
 
-async fn state_for(self_url: &str) -> web::Data<AppState> {
-    let store = Arc::new(RwLock::new(crate::store::seed(self_url)));
+async fn state_for(self_url: &str, max_in_flight: usize) -> web::Data<AppState> {
+    let objects = Arc::new(crate::objects::Objects::memory());
+    let (seeded, raws) = crate::store::seed(self_url);
+    for (key, data) in raws {
+        objects
+            .put_create(&key, data)
+            .await
+            .expect("seed raw payload");
+    }
+    let store = Arc::new(RwLock::new(seeded));
     let (jobs, rx) = mpsc::unbounded_channel::<Job>();
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(3))
@@ -58,6 +76,12 @@ async fn state_for(self_url: &str) -> web::Data<AppState> {
         store,
         jobs,
         self_url: self_url.to_string(),
+        ingest_gate: Arc::new(Semaphore::new(max_in_flight.max(1))),
+        session_ttl_days: 7,
+        retention_days: 30,
+        confidence_threshold: 0.5,
+        objects,
+        storage_ready: Arc::new(AtomicBool::new(true)),
     })
 }
 
@@ -66,7 +90,12 @@ async fn state_for(self_url: &str) -> web::Data<AppState> {
 async fn init_app(
     self_url: &str,
 ) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
-    let state = state_for(self_url).await;
+    init_app_with_state(state_for(self_url, 256).await).await
+}
+
+async fn init_app_with_state(
+    state: web::Data<AppState>,
+) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
     test::init_service(
         App::new()
             .app_data(state)
@@ -86,6 +115,20 @@ async fn init_app(
                 "/mock-jev/outage",
                 web::post().to(crate::classifier::set_outage),
             ),
+    )
+    .await
+}
+
+/// Mirrors a deployment with `SCOUT_DEMO_MODE=true`.
+async fn init_app_with_demo(
+    state: web::Data<AppState>,
+) -> impl Service<Request, Response = ServiceResponse<BoxBody>, Error = Error> {
+    test::init_service(
+        App::new()
+            .app_data(state)
+            .configure(crate::api::config)
+            .configure(crate::api::demo_config)
+            .configure(crate::ingest::config),
     )
     .await
 }
@@ -139,6 +182,17 @@ fn delete(uri: &str, token: &str) -> Request {
         .to_request()
 }
 
+fn get_public(uri: &str) -> Request {
+    test::TestRequest::get().uri(uri).to_request()
+}
+
+fn post_public(uri: &str, body: Value) -> Request {
+    test::TestRequest::post()
+        .uri(uri)
+        .set_json(body)
+        .to_request()
+}
+
 fn ingest_request(dsn: &str, key: &str, content_type: &str, body: Vec<u8>, kind: &str) -> Request {
     test::TestRequest::post()
         .uri(&format!("/api/{dsn}/{kind}"))
@@ -153,13 +207,21 @@ where
     S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
     B: MessageBody,
 {
-    let req = test::TestRequest::post()
-        .uri("/api/login")
-        .set_json(json!({ "email": email }))
-        .to_request();
-    let (status, body) = call_json(app, req).await;
+    let (status, body) = login_with(app, email, crate::store::DEMO_PASSWORD).await;
     assert_eq!(status, StatusCode::OK, "login for {email} failed: {body}");
     body
+}
+
+async fn login_with<S, B>(app: &S, email: &str, password: &str) -> (StatusCode, Value)
+where
+    S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
+    B: MessageBody,
+{
+    let req = test::TestRequest::post()
+        .uri("/api/login")
+        .set_json(json!({ "email": email, "password": password }))
+        .to_request();
+    call_json(app, req).await
 }
 
 async fn project_id<S, B>(app: &S, token: &str, name: &str) -> Uuid
@@ -213,16 +275,23 @@ where
     panic!("timed out waiting for issue {title:?} to reach count {expected}");
 }
 
-async fn wait_for_suggestion<S, B>(app: &S, token: &str, issue_id: Uuid) -> Value
+/// Poll the issue list (which does not present the issue) until the classifier
+/// answer lands. Opening the detail would freeze suggestions by design (FR-019).
+async fn wait_for_suggestion<S, B>(app: &S, token: &str, project: Uuid, issue_id: Uuid) -> Value
 where
     S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
     B: MessageBody,
 {
+    let target = issue_id.to_string();
     for _ in 0..250 {
-        let (status, body) = call_json(app, get(&format!("/api/issues/{issue_id}"), token)).await;
-        assert_eq!(status, StatusCode::OK, "issue detail failed: {body}");
-        if body["issue"]["suggestion"].is_object() {
-            return body["issue"].clone();
+        let issues = issues_for(app, token, project).await;
+        if let Some(issue) = issues
+            .iter()
+            .find(|issue| issue["id"].as_str() == Some(target.as_str()))
+        {
+            if issue["suggestion"].is_object() {
+                return issue.clone();
+            }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -362,10 +431,11 @@ async fn thousand_identical_events_collapse_to_one_issue() {
 
 #[actix_web::test]
 async fn ingest_rejects_unknown_and_mismatched_keys() {
-    let app = init_app("http://127.0.0.1:1").await;
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
     let body = envelope(&[event(&hex_id(4), "key check", &["key-group"])]);
 
-    let (status, _) = call_json(
+    let (status, unknown) = call_json(
         &app,
         ingest_request(
             "1",
@@ -379,11 +449,33 @@ async fn ingest_rejects_unknown_and_mismatched_keys() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // The platform-api key must not be usable against scout-web.
-    let (status, _) = call_json(
+    let (status, wrong_project) = call_json(
         &app,
         ingest_request(
             "1",
             "scout_platform_key",
+            "application/x-sentry-envelope",
+            body.clone(),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // A revoked key is rejected the same way, with no extra information.
+    state
+        .store
+        .write()
+        .await
+        .keys
+        .get_mut("scout_demo_key")
+        .expect("seeded demo key")
+        .revoked = true;
+    let (status, revoked) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
             "application/x-sentry-envelope",
             body,
             "envelope",
@@ -391,6 +483,13 @@ async fn ingest_rejects_unknown_and_mismatched_keys() {
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    assert_eq!(
+        unknown, wrong_project,
+        "key failures must not be distinguishable"
+    );
+    assert_eq!(unknown, revoked, "key failures must not be distinguishable");
+    assert_eq!(unknown["error"], "invalid or missing ingest key");
 }
 
 #[actix_web::test]
@@ -497,8 +596,13 @@ async fn suggestion_is_attached_from_the_model() {
     assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
 
     let issue = wait_for_issue_count(&app, token, project, "IntegrationError: suggest me", 1).await;
-    let issue =
-        wait_for_suggestion(&app, token, issue["id"].as_str().unwrap().parse().unwrap()).await;
+    let issue = wait_for_suggestion(
+        &app,
+        token,
+        project,
+        issue["id"].as_str().unwrap().parse().unwrap(),
+    )
+    .await;
     assert_eq!(issue["suggestion"]["category"], "issue");
     assert!(issue["suggestion"]["confidence"].as_f64().unwrap() > 0.0);
 }
@@ -587,7 +691,7 @@ async fn confirm_and_override_categorisation() {
     )
     .await;
     let issue_id = issue["id"].as_str().unwrap().to_string();
-    let issue = wait_for_suggestion(&app, token, issue_id.parse().unwrap()).await;
+    let issue = wait_for_suggestion(&app, token, project, issue_id.parse().unwrap()).await;
     assert_eq!(issue["suggestion"]["category"], "issue");
 
     let (status, body) = call_json(
@@ -676,6 +780,40 @@ async fn resolve_and_reopen_issue_records_history() {
             .unwrap()["state"],
         "open"
     );
+
+    // FR-021: ignored is a real state and must be recorded like the others.
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/issues/{issue_id}/state"),
+            token,
+            json!({ "state": "ignored" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ignore failed: {body}");
+    assert_eq!(body["issue"]["state"], "ignored");
+    assert_eq!(
+        body["issue"]["state_history"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["state"],
+        "ignored"
+    );
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/issues/{issue_id}/state"),
+            token,
+            json!({ "state": "open" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "reopen from ignored failed: {body}");
+    assert_eq!(body["issue"]["state"], "open");
+    assert_eq!(body["issue"]["state_history"].as_array().unwrap().len(), 5);
 }
 
 #[actix_web::test]
@@ -723,6 +861,22 @@ async fn viewer_cannot_reach_a_project_they_are_not_in() {
     let (status, _) = call_json(
         &app,
         get(&format!("/api/projects/{platform}/issues"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Detail and raw are project-scoped too.
+    let platform_issue = first_open_issue(&app, demo_token, platform).await;
+    let platform_issue_id = platform_issue["id"].as_str().unwrap();
+    let (status, _) = call_json(
+        &app,
+        get(&format!("/api/issues/{platform_issue_id}"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call_json(
+        &app,
+        get(&format!("/api/issues/{platform_issue_id}/raw"), token),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -990,4 +1144,1757 @@ async fn search_returns_issues_and_logs_together() {
         .unwrap()
         .iter()
         .any(|l| l["message"] == "searchable failure observed"));
+}
+
+// --- ingest limits, durability, backpressure -------------------------------
+
+#[actix_web::test]
+async fn oversized_envelope_is_rejected_before_anything_is_stored() {
+    use std::io::Write;
+
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let before = state.store.read().await.events.len();
+
+    // A gzip body that is small on the wire but expands past 10 MB must still
+    // be rejected: the limit applies to the decompressed payload.
+    let oversized = event(
+        &hex_id(90),
+        &"x".repeat(crate::ingest::MAX_INGEST_BYTES + 1),
+        &["oversized-group"],
+    );
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&envelope(&[oversized])).unwrap();
+    let compressed = encoder.finish().unwrap();
+    assert!(compressed.len() < crate::ingest::MAX_INGEST_BYTES);
+
+    let req = test::TestRequest::post()
+        .uri("/api/2/envelope")
+        .insert_header(("X-Scout-Key", "scout_platform_key"))
+        .insert_header(("Content-Encoding", "gzip"))
+        .insert_header(("Content-Type", "application/x-sentry-envelope"))
+        .set_payload(compressed)
+        .to_request();
+    let res = call(&app, req).await;
+    assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = test::read_body(res).await;
+    assert!(!body.is_empty(), "413 responses should explain the limit");
+
+    assert_eq!(
+        state.store.read().await.events.len(),
+        before,
+        "a rejected request must not create an event"
+    );
+}
+
+#[actix_web::test]
+async fn unavailable_storage_returns_503_and_acknowledges_nothing() {
+    use std::sync::atomic::Ordering;
+
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let before = state.store.read().await.events.len();
+
+    state.storage_ready.store(false, Ordering::Relaxed);
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        envelope(&[event(&hex_id(91), "storage down", &["storage-group"])]),
+        "envelope",
+    );
+    let (status, body) = call_json(&app, req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(state.store.read().await.events.len(), before);
+
+    let (health, health_body) = call_json(
+        &app,
+        test::TestRequest::get().uri("/api/health").to_request(),
+    )
+    .await;
+    assert_eq!(health, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health_body["status"], "degraded");
+
+    state.storage_ready.store(true, Ordering::Relaxed);
+    let (health, _) = call_json(
+        &app,
+        test::TestRequest::get().uri("/api/health").to_request(),
+    )
+    .await;
+    assert_eq!(health, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn saturated_ingest_cap_returns_429_with_retry_after() {
+    let state = state_for("http://127.0.0.1:1", 1).await;
+    let app = init_app_with_state(state.clone()).await;
+
+    // Hold the only permit so the next request cannot acquire one.
+    let held = state
+        .ingest_gate
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("acquire the sole ingest permit");
+
+    let body = envelope(&[event(&hex_id(92), "cap check", &["cap-group"])]);
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        body,
+        "envelope",
+    );
+    let res = call(&app, req).await;
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(res.headers().get("retry-after").unwrap(), "1");
+
+    drop(held);
+
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        envelope(&[event(&hex_id(93), "cap check", &["cap-group"])]),
+        "envelope",
+    );
+    let (status, body) = call_json(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+}
+
+#[actix_web::test]
+async fn attachments_and_release_survive_grouping() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "platform-api").await;
+
+    let event_id = hex_id(94);
+    let payload = b"thread panicked at src/main.rs:42";
+    let mut raw = Vec::new();
+    raw.extend_from_slice(json!({ "event_id": event_id }).to_string().as_bytes());
+    raw.push(b'\n');
+    raw.extend_from_slice(br#"{"type":"event"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        event(&event_id, "attachment check", &["attach-group"])
+            .to_string()
+            .as_bytes(),
+    );
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        format!(
+            r#"{{"type":"attachment","length":{},"filename":"crash.log","content_type":"text/plain"}}"#,
+            payload.len()
+        )
+        .as_bytes(),
+    );
+    raw.push(b'\n');
+    raw.extend_from_slice(payload);
+    raw.push(b'\n');
+
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        raw,
+        "envelope",
+    );
+    let (status, body) = call_json(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+
+    let issue = wait_for_issue_count(
+        &app,
+        token,
+        project,
+        "IntegrationError: attachment check",
+        1,
+    )
+    .await;
+    assert_eq!(issue["release"], "integration@1.0.0");
+    assert_eq!(issue["breadcrumbs"].as_array().unwrap().len(), 1);
+
+    let issue_id = issue["id"].as_str().unwrap();
+    let (status, detail) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "detail: {detail}");
+    assert_eq!(detail["attachments"][0]["filename"], "crash.log");
+    assert_eq!(detail["attachments"][0]["size"], payload.len());
+    assert_eq!(detail["event"]["attachment_count"], 1);
+}
+
+// --- sessions and credentials ---------------------------------------------
+
+#[actix_web::test]
+async fn login_requires_a_valid_password_and_logout_revokes_the_session() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state).await;
+
+    let wrong_password = test::TestRequest::post()
+        .uri("/api/login")
+        .set_json(json!({ "email": "demo@scout.local", "password": "not-the-password" }))
+        .to_request();
+    let (status, body) = call_json(&app, wrong_password).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let unknown_email = test::TestRequest::post()
+        .uri("/api/login")
+        .set_json(json!({ "email": "nobody@scout.local", "password": "not-the-password" }))
+        .to_request();
+    let (status, unknown_body) = call_json(&app, unknown_email).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        body, unknown_body,
+        "a wrong password and an unknown email must be indistinguishable"
+    );
+
+    let auth = login(&app, "demo@scout.local").await;
+    assert!(
+        auth["user"].get("password_hash").is_none(),
+        "password hashes must never be serialised: {auth}"
+    );
+    assert_eq!(auth["user"]["is_operator"], false);
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let logout = test::TestRequest::post()
+        .uri("/api/logout")
+        .insert_header(("Authorization", format!("Bearer {token}")))
+        .to_request();
+    let (status, _) = call_json(&app, logout).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "logout must revoke the token"
+    );
+}
+
+#[actix_web::test]
+async fn expired_sessions_are_rejected() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "triager@scout.local").await;
+    let token = auth["token"].as_str().unwrap().to_string();
+
+    {
+        let mut store = state.store.write().await;
+        let session = store
+            .sessions
+            .get_mut(&crate::auth::hash_token(&token))
+            .expect("the session is stored under its hash");
+        session.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    }
+
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+// --- issue list, detail, and occurrences -----------------------------------
+
+#[actix_web::test]
+async fn issue_list_filters_by_category_level_and_sorts() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    // Only the webhook issue carries a human decision, so `category` must not
+    // match issues that merely have a suggestion.
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/issues?category=issue"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "filtered list failed: {body}");
+    let issues = body["issues"].as_array().unwrap();
+    assert!(!issues.is_empty());
+    for issue in issues {
+        assert_eq!(issue["decision"]["category"], "issue");
+    }
+    assert!(issues
+        .iter()
+        .any(|issue| issue["title"] == "WebhookDeliveryFailed: 503 from inventory-service"));
+    assert!(
+        !issues.iter().any(|issue| issue["title"]
+            == "TypeError: Cannot read properties of undefined (reading 'currency')"),
+        "a suggestion is not a decision"
+    );
+
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/issues?level=fatal"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let issues = body["issues"].as_array().unwrap();
+    assert!(issues.iter().all(|issue| issue["level"] == "fatal"));
+    assert!(issues.iter().any(|issue| issue["title"]
+        == "PoolExhaustedError: timed out waiting for a database connection (30s)"));
+
+    let (status, body) = call_json(
+        &app,
+        get(&format!("/api/projects/{project}/issues?sort=count"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let counts: Vec<u64> = body["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|issue| issue["count"].as_u64())
+        .collect();
+    assert!(
+        counts.windows(2).all(|pair| pair[0] >= pair[1]),
+        "count sort must be descending: {counts:?}"
+    );
+}
+
+#[actix_web::test]
+async fn issue_detail_freezes_first_presented_at_and_reports_raw_availability() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+    let issue = issues_for(&app, token, project)
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue["title"] == "TypeError: Cannot read properties of undefined (reading 'currency')"
+        })
+        .expect("seeded checkout issue");
+    let issue_id = issue["id"].as_str().unwrap();
+    assert!(
+        issue["first_presented_at"].is_null(),
+        "listing must not present the issue"
+    );
+
+    let (status, first) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "detail failed: {first}");
+    let presented = first["issue"]["first_presented_at"]
+        .as_str()
+        .expect("the first read sets first_presented_at")
+        .to_string();
+    assert_eq!(first["raw_available"], true);
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let (status, second) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        second["issue"]["first_presented_at"].as_str(),
+        Some(presented.as_str()),
+        "later reads must not advance the timestamp"
+    );
+}
+
+#[actix_web::test]
+async fn occurrences_are_newest_first_and_project_scoped() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+    let platform = project_id(&app, token, "platform-api").await;
+
+    let issue = issues_for(&app, token, web)
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue["title"] == "TypeError: Cannot read properties of undefined (reading 'currency')"
+        })
+        .expect("seeded checkout issue");
+    let issue_id = Uuid::parse_str(issue["id"].as_str().unwrap()).unwrap();
+
+    // Add two controlled occurrences so ordering does not depend on timing.
+    {
+        let mut store = state.store.write().await;
+        let base = store
+            .events
+            .values()
+            .find(|event| event.issue_id == Some(issue_id))
+            .cloned()
+            .expect("the seeded event is linked to the issue");
+        for (offset, sentry_id) in [(30, hex_id(70)), (5, hex_id(71))] {
+            let mut event = base.clone();
+            event.id = Uuid::new_v4();
+            event.sentry_event_id = sentry_id;
+            event.received_at = chrono::Utc::now() - chrono::Duration::seconds(offset);
+            store.events.insert(event.id, event);
+        }
+    }
+
+    let (status, body) = call_json(
+        &app,
+        get(&format!("/api/issues/{issue_id}/occurrences"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "occurrences failed: {body}");
+    let occurrences = body["occurrences"].as_array().unwrap();
+    assert_eq!(occurrences.len(), 3);
+    let times: Vec<String> = occurrences
+        .iter()
+        .map(|occurrence| occurrence["received_at"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        times.windows(2).all(|pair| pair[0] >= pair[1]),
+        "occurrences must be newest first: {times:?}"
+    );
+
+    // A viewer of scout-web must not read another project's occurrences.
+    let viewer = login(&app, "viewer@scout.local").await;
+    let viewer_token = viewer["token"].as_str().unwrap();
+    let platform_issue = first_open_issue(&app, token, platform).await;
+    let (status, _) = call_json(
+        &app,
+        get(
+            &format!(
+                "/api/issues/{}/occurrences",
+                platform_issue["id"].as_str().unwrap()
+            ),
+            viewer_token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[actix_web::test]
+async fn expired_raw_payload_is_reported_without_failing_the_issue() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+    let issue = issues_for(&app, token, project)
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue["title"] == "TypeError: Cannot read properties of undefined (reading 'currency')"
+        })
+        .expect("seeded checkout issue");
+    let issue_id = issue["id"].as_str().unwrap().to_string();
+
+    {
+        let mut store = state.store.write().await;
+        let last_event = Uuid::parse_str(issue["last_event_id"].as_str().unwrap()).unwrap();
+        let event = store.events.get_mut(&last_event).expect("the last event");
+        event.raw_object_key = None;
+        event.raw_expired_at = Some(chrono::Utc::now());
+    }
+
+    let (status, detail) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "metadata stays readable: {detail}");
+    assert_eq!(detail["raw_available"], false);
+
+    let (status, body) = call_json(&app, get(&format!("/api/issues/{issue_id}/raw"), token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].as_str().unwrap_or("").contains("expired"));
+}
+
+// --- logs and unified search ------------------------------------------------
+
+#[actix_web::test]
+async fn logs_accept_json_ndjson_and_envelope_items() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+
+    let ndjson = b"{\"message\":\"ndjson marker one\",\"level\":\"warning\"}\n{\"message\":\"ndjson marker two\"}\n".to_vec();
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-ndjson",
+            ndjson,
+            "logs",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ndjson ingest failed: {body}");
+    assert_eq!(body["accepted"], 2);
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(br#"{"event_id":"abc"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(br#"{"type":"log"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        json!({ "message": "envelope log marker", "level": "error" })
+            .to_string()
+            .as_bytes(),
+    );
+    raw.push(b'\n');
+    // Unknown item types are counted, not rejected.
+    raw.extend_from_slice(br#"{"type":"span"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(br#"{"span_id":"abc"}"#);
+    raw.push(b'\n');
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            raw,
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "envelope ingest failed: {body}");
+    assert_eq!(body["logs"], 1);
+    assert_eq!(body["ignored"], 1);
+
+    let project = project_id(&app, token, "scout-web").await;
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/logs?q=envelope+log+marker"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let logs = body["logs"].as_array().unwrap();
+    assert_eq!(logs.len(), 1, "envelope logs share the normal log path");
+    assert_eq!(logs[0]["level"], "error");
+}
+
+#[actix_web::test]
+async fn logs_are_newest_first_capped_and_project_scoped() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+    let platform = project_id(&app, token, "platform-api").await;
+
+    // Ingest the same term into two projects; search must stay scoped.
+    for (dsn, key, source) in [
+        ("1", "scout_demo_key", "web-isolation"),
+        ("2", "scout_platform_key", "platform-isolation"),
+    ] {
+        let (status, body) = call_json(
+            &app,
+            ingest_request(
+                dsn,
+                key,
+                "application/json",
+                json!({ "message": "isolation marker", "source": source })
+                    .to_string()
+                    .into_bytes(),
+                "logs",
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "log ingest failed: {body}");
+    }
+
+    for (project, expected_source) in [(web, "web-isolation"), (platform, "platform-isolation")] {
+        let (status, body) = call_json(
+            &app,
+            get(
+                &format!("/api/projects/{project}/search?q=isolation+marker"),
+                token,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let logs = body["logs"].as_array().unwrap();
+        assert_eq!(logs.len(), 1, "search must not cross project boundaries");
+        assert_eq!(logs[0]["source"], expected_source);
+    }
+
+    // Freshest-first ordering and the limit are both enforced.
+    {
+        let mut store = state.store.write().await;
+        let now = chrono::Utc::now();
+        for index in 0..55 {
+            store.logs.push(crate::models::LogLine {
+                id: Uuid::new_v4(),
+                project_id: web,
+                timestamp: now - chrono::Duration::seconds(index),
+                level: "info".into(),
+                message: format!("cap marker {index}"),
+                source: "cap-test".into(),
+                attributes: json!({ "index": index }),
+                received_at: now,
+            });
+        }
+    }
+
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{web}/logs?q=cap+marker&limit=10"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let logs = body["logs"].as_array().unwrap();
+    assert_eq!(logs.len(), 10);
+    let timestamps: Vec<String> = logs
+        .iter()
+        .map(|log| log["timestamp"].as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        timestamps.windows(2).all(|pair| pair[0] >= pair[1]),
+        "logs must be newest first: {timestamps:?}"
+    );
+
+    let (status, body) = call_json(
+        &app,
+        get(&format!("/api/projects/{web}/search?q=cap+marker"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["logs"].as_array().unwrap().len(),
+        50,
+        "unified search caps each kind"
+    );
+}
+
+// --- classifier thresholds and malformed answers ---------------------------
+
+#[actix_web::test]
+async fn below_threshold_suggestions_are_discarded() {
+    let self_url = start_mock_model();
+    let app = init_app(&self_url).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(
+                &hex_id(80),
+                "low confidence case",
+                &["low-confidence-group"],
+            )]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+
+    let issue = wait_for_issue_count(
+        &app,
+        token,
+        project,
+        "IntegrationError: low confidence case",
+        1,
+    )
+    .await;
+    let issue_id = issue["id"].as_str().unwrap().to_string();
+
+    // The mock answers immediately; give the worker ample time to discard it.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let issue = issues_for(&app, token, project)
+        .await
+        .into_iter()
+        .find(|candidate| candidate["id"] == issue_id.as_str())
+        .expect("the ingested issue");
+    assert!(
+        issue["suggestion"].is_null(),
+        "a below-threshold answer must not be stored: {issue}"
+    );
+}
+
+#[actix_web::test]
+async fn unknown_or_malformed_model_answers_leave_no_suggestion() {
+    let self_url = start_mock_model();
+    let app = init_app(&self_url).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[
+                event(&hex_id(81), "unknown category case", &["unknown-category"]),
+                event(
+                    &hex_id(82),
+                    "malformed response case",
+                    &["malformed-response"],
+                ),
+            ]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+
+    for title in [
+        "IntegrationError: unknown category case",
+        "IntegrationError: malformed response case",
+    ] {
+        wait_for_issue_count(&app, token, project, title, 1).await;
+    }
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    let issues = issues_for(&app, token, project).await;
+    for title in [
+        "IntegrationError: unknown category case",
+        "IntegrationError: malformed response case",
+    ] {
+        let issue = issues
+            .iter()
+            .find(|issue| issue["title"] == title)
+            .expect("the ingested issue");
+        assert!(
+            issue["suggestion"].is_null(),
+            "{title} must not gain a suggestion"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn settings_never_return_the_model_api_key() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    let (status, body) = call_json(
+        &app,
+        put_json(
+            &format!("/api/projects/{project}/settings"),
+            token,
+            json!({
+                "retention_days": 30,
+                "model": {
+                    "endpoint": "https://models.example.com/v1",
+                    "model": "jev-latest",
+                    "api_key": "super-secret-token",
+                    "confidence_threshold": 0.7
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "settings update failed: {body}");
+
+    for uri in [
+        format!("/api/projects/{project}/settings"),
+        format!("/api/projects/{project}"),
+    ] {
+        let (status, body) = call_json(&app, get(&uri, token)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            !body.to_string().contains("super-secret-token"),
+            "the api key must never be returned: {body}"
+        );
+    }
+
+    let (status, settings) = call_json(
+        &app,
+        get(&format!("/api/projects/{project}/settings"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(settings["model_api_key_configured"], true);
+    assert_eq!(settings["project"]["model"]["confidence_threshold"], 0.7);
+
+    let (status, body) = call_json(
+        &app,
+        put_json(
+            &format!("/api/projects/{project}/settings"),
+            token,
+            json!({
+                "retention_days": 30,
+                "model": {
+                    "endpoint": "https://models.example.com/v1",
+                    "model": "jev-latest",
+                    "confidence_threshold": 1.5
+                }
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+}
+
+// --- convergence: safety, scoping, and storage ------------------------------
+
+#[actix_web::test]
+async fn demo_routes_are_opt_in_only() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+
+    // Default (production-shaped) wiring must not expose the demo endpoints.
+    for req in [
+        test::TestRequest::get()
+            .uri("/api/demo/accounts")
+            .to_request(),
+        test::TestRequest::post()
+            .uri("/api/demo/reset")
+            .to_request(),
+    ] {
+        let (status, _) = call_json(&app, req).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    let demo = init_app_with_demo(state).await;
+    let (status, body) = call_json(
+        &demo,
+        test::TestRequest::get()
+            .uri("/api/demo/accounts")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "body: {body}");
+    assert!(body["accounts"].as_array().is_some());
+    let (status, _) = call_json(
+        &demo,
+        test::TestRequest::post()
+            .uri("/api/demo/reset")
+            .to_request(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn search_matches_issue_fingerprint_and_log_level() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+
+    let issues = issues_for(&app, token, project).await;
+    let fingerprint = issues[0]["fingerprint"].as_str().unwrap().to_string();
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/search?q={fingerprint}"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["fingerprint"] == fingerprint),
+        "FR-012 search must match the issue fingerprint"
+    );
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/json",
+            json!({ "message": "level search marker", "level": "critical", "source": "probe" })
+                .to_string()
+                .into_bytes(),
+            "logs",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "log ingest failed: {body}");
+
+    let (status, body) = call_json(
+        &app,
+        get(&format!("/api/projects/{project}/search?q=critical"), token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|log| log["level"] == "critical"),
+        "FR-012 search must match the log level"
+    );
+}
+
+#[actix_web::test]
+async fn expired_sessions_are_swept_on_login() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+
+    let expired = crate::auth::new_token();
+    let expired_hash = crate::auth::hash_token(&expired);
+    state.store.write().await.sessions.insert(
+        expired_hash.clone(),
+        crate::models::Session {
+            user_id: Uuid::new_v4(),
+            expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+        },
+    );
+    assert!(state
+        .store
+        .read()
+        .await
+        .sessions
+        .contains_key(&expired_hash));
+
+    login(&app, "demo@scout.local").await;
+
+    assert!(
+        !state
+            .store
+            .read()
+            .await
+            .sessions
+            .contains_key(&expired_hash),
+        "an expired session must be removed on the next sign-in"
+    );
+}
+
+#[actix_web::test]
+async fn attachment_bytes_are_written_once_to_object_storage() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "platform-api").await;
+
+    let payload = b"panic log body";
+    let mut raw = Vec::new();
+    raw.extend_from_slice(json!({ "event_id": hex_id(95) }).to_string().as_bytes());
+    raw.push(b'\n');
+    raw.extend_from_slice(br#"{"type":"event"}"#);
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        event(
+            &hex_id(95),
+            "attachment object check",
+            &["attachment-object"],
+        )
+        .to_string()
+        .as_bytes(),
+    );
+    raw.push(b'\n');
+    raw.extend_from_slice(
+        format!(
+            r#"{{"type":"attachment","length":{},"filename":"panic.log","content_type":"text/plain"}}"#,
+            payload.len()
+        )
+        .as_bytes(),
+    );
+    raw.push(b'\n');
+    raw.extend_from_slice(payload);
+    raw.push(b'\n');
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "2",
+            "scout_platform_key",
+            "application/x-sentry-envelope",
+            raw,
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+
+    let issue = wait_for_issue_count(
+        &app,
+        token,
+        project,
+        "IntegrationError: attachment object check",
+        1,
+    )
+    .await;
+    let last_event = Uuid::parse_str(issue["last_event_id"].as_str().unwrap()).unwrap();
+
+    let attachment = {
+        let store = state.store.read().await;
+        let event = store.events.get(&last_event).expect("the stored event");
+        assert_eq!(event.attachments.len(), 1);
+        let attachment = &event.attachments[0];
+        assert!(
+            attachment.data.is_empty(),
+            "bytes belong to the object store, not the event"
+        );
+        assert_eq!(attachment.size, payload.len() as u64);
+        attachment.clone()
+    };
+    let key = attachment.object_key.expect("an object key");
+    assert_eq!(
+        state.objects.get(&key).await.unwrap(),
+        payload.to_vec(),
+        "the object store holds the exact attachment bytes"
+    );
+
+    // Raw payloads are write-once: a second write to the same key must fail and
+    // must not change the stored bytes.
+    let raw_key = state.store.read().await.events[&last_event]
+        .raw_object_key
+        .clone()
+        .expect("a raw object");
+    let original = state.objects.get(&raw_key).await.unwrap();
+    assert!(matches!(
+        state.objects.put_create(&raw_key, b"forged".to_vec()).await,
+        Err(crate::objects::ObjectError::AlreadyExists(_))
+    ));
+    assert_eq!(
+        state.objects.get(&raw_key).await.unwrap(),
+        original,
+        "an existing raw payload can never be rewritten"
+    );
+}
+
+// --- retention --------------------------------------------------------------
+
+#[actix_web::test]
+async fn retention_expires_raw_payloads_and_keeps_issue_metadata() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+    let issue = issues_for(&app, token, project)
+        .await
+        .into_iter()
+        .find(|issue| {
+            issue["title"] == "TypeError: Cannot read properties of undefined (reading 'currency')"
+        })
+        .expect("seeded checkout issue");
+    let issue_id = Uuid::parse_str(issue["id"].as_str().unwrap()).unwrap();
+    let event_id = Uuid::parse_str(issue["last_event_id"].as_str().unwrap()).unwrap();
+
+    let (raw_key, attachment_key) = {
+        let store = state.store.read().await;
+        let event = store.events.get(&event_id).expect("the seeded event");
+        assert_eq!(event.attachment_count, 1);
+        (
+            event.raw_object_key.clone().expect("a raw object"),
+            event.attachments[0]
+                .object_key
+                .clone()
+                .expect("an attachment object"),
+        )
+    };
+    assert!(state.objects.get(&raw_key).await.is_ok());
+    assert!(state.objects.get(&attachment_key).await.is_ok());
+
+    // Age the event past the 30-day window and run the same sweep the worker runs.
+    let keys = {
+        let mut store = state.store.write().await;
+        let project_model = store.projects.get(&project).cloned().unwrap();
+        store.events.get_mut(&event_id).unwrap().received_at =
+            chrono::Utc::now() - chrono::Duration::days(40);
+        store.apply_retention(&project_model)
+    };
+    assert!(keys.contains(&raw_key));
+    assert!(keys.contains(&attachment_key));
+    for key in &keys {
+        let _ = state.objects.delete(key).await;
+    }
+
+    {
+        let store = state.store.read().await;
+        let event = store
+            .events
+            .get(&event_id)
+            .expect("event metadata survives retention");
+        assert!(event.raw_object_key.is_none());
+        assert!(event.raw_expired_at.is_some());
+        assert!(event.attachments.is_empty());
+        assert_eq!(event.attachment_count, 1, "the historical count is kept");
+        assert_eq!(store.issues[&issue_id].count, 1284, "issue counters stay");
+    }
+    assert!(matches!(
+        state.objects.get(&raw_key).await,
+        Err(crate::objects::ObjectError::NotFound(_))
+    ));
+
+    let (status, detail) = call_json(&app, get(&format!("/api/issues/{issue_id}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "detail stays readable: {detail}");
+    assert_eq!(detail["raw_available"], false);
+    assert_eq!(detail["event"]["attachment_count"], 1);
+    assert!(detail["attachments"].as_array().unwrap().is_empty());
+
+    let (status, body) = call_json(&app, get(&format!("/api/issues/{issue_id}/raw"), token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(body["error"].as_str().unwrap_or("").contains("expired"));
+
+    // A retried delivery after expiry is still deduplicated.
+    let sentry_id = state.store.read().await.events[&event_id]
+        .sentry_event_id
+        .clone();
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&sentry_id, "retention retry", &["retention-group"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "retry failed: {body}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        state.store.read().await.issues[&issue_id].count,
+        1284,
+        "a retry after expiry must not inflate the count"
+    );
+}
+
+#[actix_web::test]
+async fn retention_is_per_project_and_covers_logs() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let now = chrono::Utc::now();
+    let (web, platform, web_event, platform_event) = {
+        let store = state.store.read().await;
+        let web = store
+            .projects
+            .values()
+            .find(|project| project.name == "scout-web")
+            .unwrap()
+            .id;
+        let platform = store
+            .projects
+            .values()
+            .find(|project| project.name == "platform-api")
+            .unwrap()
+            .id;
+        let web_event = store
+            .issues
+            .values()
+            .find(|issue| issue.project_id == web && issue.title.starts_with("TypeError"))
+            .unwrap()
+            .last_event_id;
+        let platform_event = store
+            .issues
+            .values()
+            .find(|issue| issue.project_id == platform)
+            .unwrap()
+            .last_event_id;
+        (web, platform, web_event, platform_event)
+    };
+
+    let (web_log, platform_log) = (Uuid::new_v4(), Uuid::new_v4());
+    {
+        let mut store = state.store.write().await;
+        for event_id in [web_event, platform_event] {
+            store.events.get_mut(&event_id).unwrap().received_at = now - chrono::Duration::days(20);
+        }
+        for (id, project_id, age, message) in [
+            (web_log, web, 40, "web retention log"),
+            (platform_log, platform, 20, "platform retention log"),
+        ] {
+            store.logs.push(crate::models::LogLine {
+                id,
+                project_id,
+                timestamp: now - chrono::Duration::days(age),
+                level: "info".into(),
+                message: message.into(),
+                source: "retention-test".into(),
+                attributes: json!({}),
+                received_at: now - chrono::Duration::days(age),
+            });
+        }
+    }
+
+    // scout-web retains for 30 days: 20 days is inside, the 40-day log expires.
+    let web_keys = {
+        let mut store = state.store.write().await;
+        let project = store.projects.get(&web).cloned().unwrap();
+        store.apply_retention(&project)
+    };
+    assert!(
+        web_keys.is_empty(),
+        "the 20-day event is still inside retention"
+    );
+    {
+        let store = state.store.read().await;
+        assert!(store.events[&web_event].raw_object_key.is_some());
+        assert!(!store.logs.iter().any(|log| log.id == web_log));
+        assert!(store.logs.iter().any(|log| log.id == platform_log));
+    }
+
+    // platform-api retains for 14 days: its 20-day event and log expire now.
+    let platform_keys = {
+        let mut store = state.store.write().await;
+        let project = store.projects.get(&platform).cloned().unwrap();
+        store.apply_retention(&project)
+    };
+    assert!(!platform_keys.is_empty());
+    {
+        let store = state.store.read().await;
+        assert!(store.events[&platform_event].raw_object_key.is_none());
+        assert!(store.events[&platform_event].raw_expired_at.is_some());
+        assert!(store.events[&web_event].raw_object_key.is_some());
+        assert!(!store.logs.iter().any(|log| log.id == platform_log));
+    }
+}
+
+// --- project soft-delete ----------------------------------------------------
+
+#[actix_web::test]
+async fn soft_deleted_project_is_hidden_and_rejects_ingest() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let project = project_id(&app, token, "scout-web").await;
+    let issue = first_open_issue(&app, token, project).await;
+    let issue_id = issue["id"].as_str().unwrap().to_string();
+    let event_id = Uuid::parse_str(issue["last_event_id"].as_str().unwrap()).unwrap();
+
+    let (raw_key, events_before, issues_before, logs_before) = {
+        let store = state.store.read().await;
+        let raw_key = store.events[&event_id]
+            .raw_object_key
+            .clone()
+            .expect("a raw object");
+        (
+            raw_key,
+            store.events.len(),
+            store.issues.len(),
+            store.logs.len(),
+        )
+    };
+
+    // A triager cannot delete a project.
+    let triager = login(&app, "triager@scout.local").await;
+    let triager_token = triager["token"].as_str().unwrap();
+    let (status, _) = call_json(
+        &app,
+        delete(&format!("/api/projects/{project}"), triager_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, body) = call_json(&app, delete(&format!("/api/projects/{project}"), token)).await;
+    assert_eq!(status, StatusCode::OK, "delete failed: {body}");
+
+    // Hidden from every normal read.
+    let (status, body) = call_json(&app, get("/api/projects", token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !body["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate["id"] == project.to_string()),
+        "a soft-deleted project must disappear from the project list"
+    );
+    for uri in [
+        format!("/api/projects/{project}"),
+        format!("/api/projects/{project}/settings"),
+        format!("/api/projects/{project}/issues"),
+        format!("/api/issues/{issue_id}"),
+    ] {
+        let (status, _) = call_json(&app, get(&uri, token)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri} must be hidden");
+    }
+
+    // Ingest is rejected with the same body as any other bad key.
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(97), "deleted project", &["deleted-group"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "invalid or missing ingest key");
+
+    // Nothing was deleted; the data stays subject to retention.
+    {
+        let store = state.store.read().await;
+        assert!(store.projects[&project].deleted_at.is_some());
+        assert_eq!(store.events.len(), events_before);
+        assert_eq!(store.issues.len(), issues_before);
+        assert_eq!(store.logs.len(), logs_before);
+        assert!(store.audit.iter().any(
+            |entry| entry.action == "project.soft_deleted" && entry.project_id == Some(project)
+        ));
+    }
+    assert!(state.objects.get(&raw_key).await.is_ok());
+
+    let keys = {
+        let mut store = state.store.write().await;
+        let deleted = store.projects[&project].clone();
+        store.events.get_mut(&event_id).unwrap().received_at =
+            chrono::Utc::now() - chrono::Duration::days(40);
+        store.apply_retention(&deleted)
+    };
+    assert!(
+        keys.contains(&raw_key),
+        "retention still applies to a soft-deleted project"
+    );
+
+    // Deleting again is a 404, not a second audit row.
+    let (status, _) = call_json(&app, delete(&format!("/api/projects/{project}"), token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// --- provisioning, invitations, and recovery codes --------------------------
+
+const OPERATOR_PASSWORD: &str = "operator-secret";
+
+fn operator_config() -> crate::config::Config {
+    crate::config::Config {
+        port: 8080,
+        self_url: "http://127.0.0.1:1".into(),
+        ingest_max_in_flight: 256,
+        retention_days: 30,
+        confidence_threshold: 0.5,
+        session_ttl_days: 7,
+        operator_email: Some("ops@test.local".into()),
+        operator_password: Some(OPERATOR_PASSWORD.into()),
+        database_url: None,
+        s3_endpoint: None,
+        s3_bucket: None,
+        demo_mode: false,
+    }
+}
+
+async fn bootstrap_operator(state: &web::Data<AppState>) {
+    let mut store = state.store.write().await;
+    crate::auth::bootstrap_operator(&mut store, &operator_config()).expect("bootstrap operator");
+}
+
+#[actix_web::test]
+async fn operator_provisions_an_org_and_its_initial_admin() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+
+    let (status, auth) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "operator login failed: {auth}");
+    assert_eq!(auth["user"]["is_operator"], true);
+    let operator_token = auth["token"].as_str().unwrap();
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            "/api/orgs",
+            operator_token,
+            json!({ "name": "Beta", "initial_admin_email": "admin@beta.test" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create org failed: {body}");
+    let org_id = body["organisation"]["id"].as_str().unwrap().to_string();
+    let setup_token = body["initial_admin_setup_token"]
+        .as_str()
+        .expect("a setup token")
+        .to_string();
+
+    let (status, preview) =
+        call_json(&app, get_public(&format!("/api/invitations/{setup_token}"))).await;
+    assert_eq!(status, StatusCode::OK, "preview failed: {preview}");
+    assert_eq!(preview["organisation"], "Beta");
+    assert_eq!(preview["email"], "admin@beta.test");
+
+    let (status, accepted) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{setup_token}/accept"),
+            json!({ "name": "Beta Admin", "password": "beta-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "accept failed: {accepted}");
+    assert_eq!(accepted["user"]["email"], "admin@beta.test");
+    assert_eq!(accepted["recovery_codes"].as_array().unwrap().len(), 10);
+    let admin_token = accepted["token"]
+        .as_str()
+        .expect("a session for the new admin")
+        .to_string();
+
+    // Setup tokens are single use.
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{setup_token}/accept"),
+            json!({ "name": "Again", "password": "again-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+
+    // The initial admin signs in and creates the first project.
+    let (status, _) = login_with(&app, "admin@beta.test", "beta-pw").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/projects"),
+            &admin_token,
+            json!({ "name": "billing", "slug": "billing" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create project failed: {body}");
+    assert_eq!(body["project"]["retention_days"], 30);
+    assert_eq!(body["project"]["confidence_threshold"], 0.5);
+    let project_id = Uuid::parse_str(body["project"]["id"].as_str().unwrap()).unwrap();
+    let dsn = body["project"]["dsn_id"].as_str().unwrap().to_string();
+    let key = body["key"].as_str().unwrap().to_string();
+
+    // The freshly created key ingests unmodified Sentry traffic.
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            &dsn,
+            &key,
+            "application/x-sentry-envelope",
+            envelope(&[event(
+                &hex_id(98),
+                "provisioned path",
+                &["provisioned-group"],
+            )]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+    wait_for_issue_count(
+        &app,
+        &admin_token,
+        project_id,
+        "IntegrationError: provisioned path",
+        1,
+    )
+    .await;
+
+    // Only the operator may create organisations.
+    let (status, _) = call_json(
+        &app,
+        post_json(
+            "/api/orgs",
+            &admin_token,
+            json!({ "name": "Nope", "initial_admin_email": "x@y.z" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let store = state.store.read().await;
+    for action in [
+        "organisation.created",
+        "org_admin_setup.issued",
+        "invitation.accepted",
+        "project.created",
+    ] {
+        assert!(
+            store.audit.iter().any(|entry| entry.action == action),
+            "missing audit row {action}"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn existing_account_binds_org_admin_with_a_session_and_keeps_its_password() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+    let (_, operator) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    let operator_token = operator["token"].as_str().unwrap();
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            "/api/orgs",
+            operator_token,
+            json!({ "name": "Gamma", "initial_admin_email": "demo@scout.local" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create org failed: {body}");
+    let org_id = Uuid::parse_str(body["organisation"]["id"].as_str().unwrap()).unwrap();
+    let setup_token = body["initial_admin_setup_token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let accept_uri = format!("/api/invitations/{setup_token}/accept");
+
+    let (status, _) = call_json(
+        &app,
+        post_public(&accept_uri, json!({ "password": "stolen" })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an existing account must sign in first"
+    );
+
+    let demo = login(&app, "demo@scout.local").await;
+    let demo_token = demo["token"].as_str().unwrap();
+    let demo_id = Uuid::parse_str(demo["user"]["id"].as_str().unwrap()).unwrap();
+
+    let (status, _) = call_json(
+        &app,
+        post_json(&accept_uri, demo_token, json!({ "password": "changed" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = call_json(&app, post_json(&accept_uri, demo_token, json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "accept failed: {body}");
+    assert!(
+        body["recovery_codes"].as_array().unwrap().is_empty(),
+        "an existing account gets no new recovery-code set"
+    );
+    assert_eq!(
+        state.store.read().await.org_role_for(demo_id, org_id),
+        Some(crate::models::OrgRole::Admin)
+    );
+    let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "the password must be unchanged");
+}
+
+#[actix_web::test]
+async fn project_invitations_preview_accept_and_revoke() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let demo = login(&app, "demo@scout.local").await;
+    let token = demo["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+    let org_id = state.store.read().await.projects[&web].org_id;
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/invitations"),
+            token,
+            json!({ "email": "invitee@test.local", "project_id": web, "role": "triager" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "invite failed: {body}");
+    let invite_token = body["token"].as_str().unwrap().to_string();
+
+    let (status, preview) = call_json(
+        &app,
+        get_public(&format!("/api/invitations/{invite_token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "preview failed: {preview}");
+    assert_eq!(preview["role"], "triager");
+    assert_eq!(preview["project"], "scout-web");
+
+    let (status, accepted) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{invite_token}/accept"),
+            json!({ "name": "In Vitee", "password": "invitee-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "accept failed: {accepted}");
+    let invitee_token = accepted["token"].as_str().unwrap();
+    let (status, list) = call_json(&app, get("/api/projects", invitee_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let project = list["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|project| project["id"] == web.to_string())
+        .expect("the invited project");
+    assert_eq!(project["role"], "triager");
+
+    // Reuse is rejected.
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{invite_token}/accept"),
+            json!({ "name": "Again", "password": "again-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+
+    // Revocation invalidates a pending invitation.
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/invitations"),
+            token,
+            json!({ "email": "revoked@test.local", "project_id": web, "role": "viewer" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "invite failed: {body}");
+    let revoked_token = body["token"].as_str().unwrap().to_string();
+    let invitation_id = body["invitation"]["id"].as_str().unwrap().to_string();
+    let (status, _) = call_json(
+        &app,
+        delete(
+            &format!("/api/orgs/{org_id}/invitations/{invitation_id}"),
+            token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call_json(
+        &app,
+        get_public(&format!("/api/invitations/{revoked_token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+}
+
+#[actix_web::test]
+async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let demo = login(&app, "demo@scout.local").await;
+    let token = demo["token"].as_str().unwrap();
+
+    let (status, body) =
+        call_json(&app, post_json("/api/me/recovery-codes", token, json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "reissue failed: {body}");
+    let codes: Vec<String> = body["recovery_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| code.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(codes.len(), 10);
+
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": codes[0], "new_password": "reset-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the old password no longer works"
+    );
+    let (status, auth) = login_with(&app, "demo@scout.local", "reset-pw").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A used code cannot be reused.
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": codes[0], "new_password": "again-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // An unknown code and an unknown email fail the same way.
+    for body in [
+        json!({ "email": "demo@scout.local", "recovery_code": "AAAAA-BBBBB", "new_password": "nope-pw" }),
+        json!({ "email": "nobody@test.local", "recovery_code": codes[1], "new_password": "nope-pw" }),
+    ] {
+        let (status, _) = call_json(&app, post_public("/api/recover", body)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // Reissuing revokes every remaining unused code.
+    let token = auth["token"].as_str().unwrap();
+    let (status, body) =
+        call_json(&app, post_json("/api/me/recovery-codes", token, json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "reissue failed: {body}");
+    let new_codes: Vec<String> = body["recovery_codes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|code| code.as_str().unwrap().to_string())
+        .collect();
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": codes[1], "new_password": "third-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the previous unused set is invalidated"
+    );
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": new_codes[0], "new_password": "third-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn key_rotation_revokes_the_previous_key() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let demo = login(&app, "demo@scout.local").await;
+    let token = demo["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/projects/{web}/keys/rotate"),
+            token,
+            json!({ "label": "ci" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "rotation failed: {body}");
+    let new_key = body["key"].as_str().unwrap().to_string();
+
+    let (status, _) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            "scout_demo_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(99), "rotated old", &["rotate-old"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the old key is revoked");
+
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "1",
+            &new_key,
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(100), "rotated new", &["rotate-new"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the new key works: {body}");
 }
