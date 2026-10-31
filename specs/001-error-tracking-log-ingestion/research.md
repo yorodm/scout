@@ -204,7 +204,8 @@ worker tier); best-effort with no target (makes SC-005 unverifiable under load).
 **Decision**: Structured `tracing` logs with request id, project id, event id, and job id; counters for
 accepted/rejected events, grouping latency, classifier outcomes (suggested/skipped/failed), job
 attempts, and retention deletions; a `/api/health` endpoint that reports database and object-store
-reachability. Admin actions (role, key, model, retention changes) are recorded in an `audit_log` table.
+reachability. Administrative actions (organisation/project creation, initial-admin setup, role, key,
+model, retention, and project soft-delete) are recorded in an `audit_log` table.
 
 **Rationale**: The spec does not mandate metrics, but operational readiness and the deferred
 observability item require at least a health signal and an audit trail for privileged changes.
@@ -261,11 +262,11 @@ log a warning that the bootstrap variables were ignored. The operator authentica
 normal local login and is not scoped to any organisation. It can create an organisation with
 `POST /api/orgs`, which also creates the organisation's initial admin and returns a one-time setup
 token using the invitation token mechanics. If the email already belongs to an account, the token
-binds it only after that person authenticates and consents and never changes the password; otherwise
-redeeming the token sets a password and issues recovery codes. The initial admin then holds the
-`org_admin` role. The operator cannot create any other accounts; everyone else joins by invitation.
-The operator account can obtain a fresh recovery-code set through the authenticated reissue endpoint.
-Passwords and tokens are never logged.
+binds it only after that person signs in and accepts with a bearer session; the request carries no
+password and the stored password is never changed. Otherwise redeeming the token sets a password and
+issues recovery codes. The initial admin then holds the `org_admin` role. The operator cannot create
+any other accounts; everyone else joins by invitation. The operator account can obtain a fresh
+recovery-code set through the authenticated reissue endpoint. Passwords and tokens are never logged.
 
 **Rationale**: Implements FR-025, FR-028, FR-030, and SC-011 without SMTP or a CLI. Idempotent
 seeding avoids surprising password resets; returning a setup token avoids the operator choosing or
@@ -280,6 +281,27 @@ operator create arbitrary accounts (more privilege than needed).
 **Security notes**: Supply the bootstrap values as deployment secrets. The password is hashed
 immediately and never logged. Setup tokens are single-use, hashed at rest, and expire after 7 days.
 Operator actions (organisation creation, initial-admin setup) are written to `audit_log`.
+
+---
+
+## R16. Project soft-delete
+
+**Decision**: A project owner can soft-delete a project. Soft-delete sets `projects.deleted_at` (and
+`deleted_by`), hides the project from normal lists and settings, and causes every ingest request for
+its keys to be rejected. No rows, raw objects, or log lines are deleted; retention continues to
+govern raw payloads and log lines. Hard deletion or purge is out of scope for the first slice. A
+soft-deleted project cannot be restored through the API in this slice; restoration would be a
+separate, explicit operation. Soft-delete writes a `project.soft_deleted` audit row.
+
+**Rationale**: Implements FR-036 without violating the immutable-payload principle or the
+retention-only deletion rule in the constitution. Soft-delete gives owners an operational off-ramp
+while preserving auditability and the ability to add a deliberate purge later under a constitution
+amendment.
+
+**Alternatives considered**: Hard delete (conflicts with the constitution and risks irreversible
+data loss); archive-only read mode (still exposes project data and does not stop ingest); no deletion
+at all (leaves the owner capability assumption unresolved); implementing purge now (out of scope and
+needs a governance decision).
 
 ---
 
@@ -298,3 +320,4 @@ Operator actions (organisation creation, initial-admin setup) are written to `au
 | Triage states and decision semantics | R14: open/resolved/ignored; decisions are metadata-only |
 | Search matching rules | R8: case-insensitive substring, newest first, 50 per kind |
 | Operator provisioning and first organisation | R15: idempotent env-seeded operator; setup token for the initial admin |
+| Project soft-delete | R16: hide and reject ingest; retain data under retention |

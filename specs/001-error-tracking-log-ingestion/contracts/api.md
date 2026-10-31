@@ -66,9 +66,9 @@ Unauthenticated password reset using a single-use recovery code issued at accoun
 **200** `{ "ok": true }`. The code is consumed; other unused codes remain valid. An unknown email,
 an unknown code, or a used code returns `401` with the same body. No email is sent.
 
-When an account is created (by invitation acceptance, initial-admin setup, or operator bootstrap),
-the creation response includes a `recovery_codes` array. The codes are shown once and stored only as
-hashes. Every authenticated account can also reissue its codes through the endpoint below.
+When an account is created by invitation acceptance or initial-admin setup, the creation response
+includes a `recovery_codes` array. The codes are shown once and stored only as hashes. The deployment
+operator obtains its own codes through the endpoint below after first sign-in.
 
 ### `POST /api/me/recovery-codes`
 
@@ -134,19 +134,24 @@ Unauthenticated preview. **200**
 
 ### `POST /api/invitations/{token}/accept`
 
+Unauthenticated for a new account; requires a bearer session for an existing account.
+
 ```json
 { "name": "New Person", "password": "…" }
 ```
 
-Creates a local account (or attaches the invitation to an existing account with the same email,
-which must first authenticate), applies the project role, and returns a session in the same shape as
-`POST /api/login`.
+For a new email, creates a local account, applies the invitation's role or `org_admin` for an
+`org_admin_setup` token, returns a session in the same shape as `POST /api/login`, and returns a
+`recovery_codes` array.
 
-This endpoint also accepts an `org_admin_setup` token returned by `POST /api/orgs`. For a new
-account it creates the account, sets the password, grants `org_admin`, and returns `recovery_codes`.
-For an existing account, that person must authenticate first; the endpoint then grants `org_admin`
-without changing the password. In both cases no project membership is created. The token is
-single-use and expires after 7 days.
+For an email that already belongs to an account, the request MUST carry a bearer session for that
+account and MUST NOT include a password. The endpoint then applies the role or `org_admin` without
+changing the stored password and does not return a new recovery-code set; the account can use
+`POST /api/me/recovery-codes` to obtain one. An unauthenticated request for an existing email returns
+`401`.
+
+For an `org_admin_setup` token, no project membership is created. The token is single-use and expires
+after 7 days.
 
 ### `DELETE /api/orgs/{org_id}/invitations/{invitation_id}`
 
@@ -178,14 +183,15 @@ Requires the deployment operator. Creates an organisation and its initial admin 
 ```
 
 If an account with `initial_admin_email` already exists, the setup token binds it only after that
-person authenticates and consents; the token then grants `org_admin` and does **not** change their
-password. If no account exists, redeeming the token creates it and sets a password. The operator
-shares the setup token out of band; the admin redeems it with
-`POST /api/invitations/{token}/accept`. The operator cannot create any other accounts.
+person signs in and accepts it with a bearer session; the token then grants `org_admin` and does
+**not** change their password. If no account exists, redeeming the token creates it and sets a
+password. The operator shares the setup token out of band; the admin redeems it with
+`POST /api/invitations/{token}/accept`. The operator cannot create any other accounts. Creation
+writes `organisation.created` and `org_admin_setup.issued` to the audit log.
 
 ### `GET /api/projects`
 
-Returns only projects the caller is a member of.
+Returns only projects the caller is a member of. Soft-deleted projects are excluded.
 
 **200**
 
@@ -218,11 +224,20 @@ Requires organisation admin.
 { "name": "billing-api", "slug": "billing-api" }
 ```
 
-Creates the project and its first ingest key. The plaintext key is returned once.
+Creates the project and its first ingest key. The plaintext key is returned once. Writes
+`project.created` to the audit log.
 
 ### `GET /api/projects/{project_id}`
 
 **200** `{ "project": {…}, "role": "owner", "key": "scout_…" }` (`key` only for admin and above).
+Returns `404` for a soft-deleted project.
+
+### `DELETE /api/projects/{project_id}`
+
+Requires the project owner. Soft-deletes the project: sets `deleted_at`/`deleted_by`, hides it from
+normal lists and settings, and rejects all of its ingest keys. No rows, raw objects, or log lines are
+deleted; retention continues to apply. **200** `{ "ok": true }`. Hard deletion or purge is out of
+scope for the first slice. Writes `project.soft_deleted` to the audit log.
 
 ### `GET /api/projects/{project_id}/settings`
 

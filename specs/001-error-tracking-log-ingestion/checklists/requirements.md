@@ -34,5 +34,5 @@
 - Items marked incomplete require spec updates before `/speckit-clarify` or `/speckit-plan`
 - **Domain terms retained deliberately**: "Sentry-compatible", "DSN", "ingest key", "Jev-compatible", and "OIDC/SSO" are external contracts and user-facing configuration surfaces, not internal implementation choices. The source document makes them product requirements.
 - **Zero clarification markers**: Ambiguities in the source (log interface, role matrix, retention default) were resolved with documented defaults in the Assumptions section rather than blocking. Refine with `/speckit-clarify` if these defaults are wrong.
-- **Coverage check**: 34 functional requirements, 9 success criteria, 6 prioritised user stories, 26 acceptance scenarios, and 11 edge cases.
+- **Coverage check**: 36 functional requirements, 13 success criteria, 6 prioritised user stories, 35 acceptance scenarios, and 18 edge cases.
 - **Boundaries confirmed**: Non-goals (hosted offering, Sentry read-API compatibility, metrics/tracing) are carried into the Assumptions section so scope cannot drift during planning.

@@ -18,8 +18,9 @@ Every ingest request must present exactly one project's ingest key, in any of th
 | Authorization header | `Authorization: Sentry sentry_version=7, sentry_key=scout_…` |
 | Scout header | `X-Scout-Key: scout_…` |
 
-The key is hashed and compared against `ingest_keys.key_hash`. Unknown, revoked, and other-project
-keys all return `401` with the same body so no project existence information leaks.
+The key is hashed and compared against `ingest_keys.key_hash`. Unknown, revoked, other-project, and
+soft-deleted-project keys all return `401` with the same body so no project existence information
+leaks.
 
 ## Common limits and behaviour
 

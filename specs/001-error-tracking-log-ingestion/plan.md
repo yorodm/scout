@@ -17,8 +17,9 @@ the specified product: PostgreSQL and object storage replace the in-memory store
 operator is bootstrapped from environment variables (failing fast when bootstrap values are missing)
 and creates organisations plus each organisation's initial admin, local accounts gain password
 authentication, token-based invitations, and single-use recovery codes that any authenticated account
-can reissue, existing accounts are bound to an initial-admin role only after authenticating and
-consenting, the classifier applies redaction and a per-project confidence threshold, triage gains the
+can reissue, an existing account is bound to an initial-admin role only after signing in and accepting
+with a bearer session (never changing its password), projects can be soft-deleted without deleting
+their data, the classifier applies redaction and a per-project confidence threshold, triage gains the
 `ignored` state and decision-based filtering, ingest gains a configurable global backpressure cap, and
 durability/authorisation rules become explicit.
 
@@ -60,9 +61,10 @@ with `Retry-After` (FR-035); raw payloads are write-once and never rewritten (FR
 file for app, PostgreSQL, and object storage (FR-032); the deployment operator is seeded from
 environment variables only when none exists, and startup fails with an actionable error when no
 operator exists and bootstrap values are missing (FR-030); an existing account is bound to an
-initial-admin role only after authentication and consent, without a password change (FR-025,
-FR-030); no Node.js in the build; UI served by the same binary; migrations idempotent and safe for
-concurrent starts.
+initial-admin role only after signing in and accepting with a bearer session, with no password in the
+request and no password change (FR-028, FR-030); a soft-deleted project is hidden and rejects ingest
+while its data remains subject to retention (FR-036); no Node.js in the build; UI served by the same
+binary; migrations idempotent and safe for concurrent starts.
 
 **Scale/Scope**: Planning target for one deployment: up to 50 projects, up to 1,000 members, 30-day
 default retention, 50 million stored events per month. These are sizing assumptions, not new product
@@ -72,15 +74,25 @@ requirements.
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-**Gate result: PASS (no enforceable gates).**
+**Gate result: PASS (constitution v1.0.0).**
 
-`.specify/memory/constitution.md` is still the unmodified template: principle names and descriptions
-are placeholders (`[PRINCIPLE_1_NAME]`, `[PRINCIPLE_1_DESCRIPTION]`, …), and no version, ratification
-date, or governance rules have been recorded. There are no MUST/SHOULD statements to test this plan
-against, and placeholder text is deliberately not treated as a gate.
+The constitution is ratified at v1.0.0. The plan complies:
 
-Recommended follow-up outside this command: run `/speckit-constitution` to ratify the project
-principles, then re-run the Constitution Check before implementation begins.
+- **I. Ingest never depends on classification (NON-NEGOTIABLE)**: ingest writes and acknowledges
+  before any classifier work; classifier failures yield no suggestion.
+- **II. Raw payloads immutable and authoritative**: write-once object keys, no rewrite path,
+  retention-only deletion; soft-delete retains all rows and payloads.
+- **III. Project-scoped, server-side authorisation**: every route resolves a session or operator scope
+  and a project role before data access.
+- **IV. One deployment unit, minimal moving parts**: app + PostgreSQL + object storage; PostgreSQL
+  job queue; no broker, search cluster, or Node.js.
+- **V. Evidence over assumption**: in-crate `src/tests.rs` integration tests, no `lib.rs` split and no
+  `tests/` crate; migrations and object-store behaviour covered by the compose smoke test.
+
+Additional Constraints: hashed credentials/tokens, redacted ≤2 KB model summaries, fail-fast operator
+bootstrap, audit rows for **every administrative action including organisation creation, project
+creation, initial-admin setup, and project soft-delete**, 10 MB limits, default cap 256, and
+retention-only raw/log deletion. No violations and no complexity exceptions are required.
 
 ## Project Structure
 
@@ -162,10 +174,10 @@ See [research.md](./research.md). All technical unknowns are resolved there; the
 
 ### Post-Design Constitution Re-check
 
-**Gate result: PASS.** The design still introduces no conflict because no ratified principles exist.
-The single-binary, three-service deployment, least-privilege operator provisioning, project-scoped
-authorisation, immutable raw payloads, and non-blocking classifier all remain within the spec's stated
-constraints.
+**Gate result: PASS (constitution v1.0.0).** The design remains compliant with Principles I–V and
+the Additional Constraints. Audit coverage includes organisation creation, project creation,
+initial-admin setup, role/key/model/retention changes, and project soft-delete. Soft-delete retains
+all rows and raw objects, so Principle II and the retention-only deletion rule hold.
 
 ## Implementation Sequencing (input for /speckit-tasks)
 
@@ -180,14 +192,15 @@ constraints.
    hashed with expiry, invite tokens redeemed at account creation, single-use recovery codes for
    password reset plus authenticated reissue, the idempotent environment-seeded deployment operator
    with fail-fast missing-value handling, one-time setup tokens for an organisation's initial admin
-   (binding an existing account only after authentication and consent, without changing its
-   password), and optional OIDC account linking by verified email.
+   (an existing account accepts with a bearer session and never sends or changes a password), and
+   optional OIDC account linking by verified email.
 5. **Classifier hardening**: redact sensitive fields before building the ≤2 KB summary; apply the
    per-project confidence threshold (default 0.5); enforce the 800 ms budget and single retry.
-6. **API and UI alignment**: operator organisation creation and initial-admin setup screens, settings
-   for threshold and retention, invitation screens, recovery-code redemption, member/role management,
-   the `ignored` state, decision-based issue filtering, raw-expired state, and log/search views using
-   the defined substring-matching rules.
+6. **API and UI alignment**: operator organisation creation and initial-admin setup screens, project
+   creation and soft-delete (both audited), settings for threshold and retention, invitation screens,
+   recovery-code redemption, member/role management, the `ignored` state, decision-based issue
+   filtering, raw-expired state, and log/search views using the defined substring-matching rules.
 7. **Verification**: extend `src/tests.rs` for every acceptance scenario, including `ignored` state
-   transitions, decision-based filtering, and the global concurrency cap (SC-010); add a compose-based
-   smoke script for PostgreSQL/object-store wiring; and run the quickstart.
+   transitions, decision-based filtering, project-creation and soft-delete audit rows, and the global
+   concurrency cap (SC-010); add a compose-based smoke script for PostgreSQL/object-store wiring; and
+   run the quickstart.

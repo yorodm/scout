@@ -77,7 +77,12 @@ organisation and is created at startup only when no operator exists. A partial u
 | `model_name` | text | nullable; non-empty when an endpoint is set |
 | `model_api_key_ref` | text | nullable; reference to a secret, never the key itself |
 | `confidence_threshold` | double precision | not null, default `0.5`, check `0..=1` |
+| `deleted_at` | timestamptz | nullable; set on soft-delete |
+| `deleted_by` | uuid | nullable; FK → users, the owner who soft-deleted the project |
 | `created_at` | timestamptz | not null |
+
+Normal project lists and settings queries filter on `deleted_at IS NULL`. A soft-deleted project's
+rows, raw objects, and log lines remain and stay subject to retention; hard purge is out of scope.
 
 ### `project_members`
 
@@ -273,7 +278,7 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
 | `org_id` | uuid | FK → organisations, nullable; null for deployment-level actions (operator bootstrap) |
 | `project_id` | uuid | nullable |
 | `actor_user_id` | uuid | nullable |
-| `action` | text | e.g. `role.granted`, `key.revoked`, `model.updated` |
+| `action` | text | e.g. `organisation.created`, `project.created`, `project.soft_deleted`, `role.granted`, `key.revoked`, `model.updated` |
 | `target` | text | nullable |
 | `metadata` | jsonb | not null, default `{}` |
 | `at` | timestamptz | not null |
@@ -308,6 +313,11 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
   no partial operator row is created.
 - Operator-created accounts are limited to the initial organisation admin; all other accounts are
   created by invitation.
+- A soft-deleted project has `deleted_at` set: it is excluded from normal lists and settings, and all
+  of its ingest keys are rejected. Its rows, raw objects, and log lines are retained and remain
+  subject to retention. Hard purge is out of scope for the first slice.
+- Every administrative action, including organisation creation, project creation, initial-admin setup,
+  and project soft-delete, MUST write an `audit_log` row with the actor and time.
 
 ## State transitions
 
@@ -326,8 +336,10 @@ Index: `(state, available_at)` for claim queries. Workers use `FOR UPDATE SKIP L
 | Deployment operator | active | later startup with env set | unchanged | Password not reset; warning logged |
 | Organisation | — | operator creates | active | `created_by` set; initial-admin setup token issued |
 | Initial admin setup | pending | new account redeems | accepted | User created; password set; `org_admin` granted |
-| Initial admin setup | pending | existing account authenticates and consents | accepted | `accepted_user_id` set; password unchanged |
+| Initial admin setup | pending | existing account signs in and accepts with a bearer session | accepted | `accepted_user_id` set; password unchanged |
 | Recovery code | active | authenticated reissue | revoked | Prior unused codes invalidated; new set shown once |
+| Project | active | owner soft-deletes | soft-deleted | `deleted_at`/`deleted_by` set; ingest rejected; data retained |
+| Project | soft-deleted | restore | — | Out of scope for the first slice |
 | Ingest key | — | owner/admin creates | active | Plaintext shown once |
 | Ingest key | active | owner/admin revokes | revoked | Terminal; already-stored events unaffected |
 | Session | — | successful sign-in | active | Opaque token returned once |

@@ -79,8 +79,13 @@ curl -sS -X POST 'http://localhost:8080/api/invitations/<setup-token>/accept' \
   -d '{"name":"Acme Admin","password":"admin-password"}'
 ```
 
-5. If the email already belongs to an account, that person signs in first; accepting the token then
-   grants `org_admin` without changing their password.
+5. If the email already belongs to an account, that person signs in first and accepts the token with
+a bearer session; the request carries no password:
+
+```sh
+curl -sS -X POST 'http://localhost:8080/api/invitations/<setup-token>/accept' \
+  -H "Authorization: Bearer <existing-account-token>"
+```
 6. Sign in as the initial admin; the response includes `org_admin` access and `recovery_codes`.
 7. As any signed-in account, reissue recovery codes:
 
@@ -97,9 +102,10 @@ Prior unused codes stop working and the new set is returned once.
 
 Expected: the operator can create the organisation and obtain a one-time setup token; the token works
 once; the initial admin can sign in, create a project, and issue its first ingest key. An existing
-account is bound only after authentication and consent, with no password change. Recovery codes can
-be reissued by any authenticated account. Reusing or expiring the setup token returns `410` and grants
-nothing. Missing bootstrap values fail startup, and the operator cannot create any other accounts.
+account signs in and accepts the token with a bearer session; no password is sent or changed.
+Recovery codes can be reissued by any authenticated account. Reusing or expiring the setup token
+returns `410` and grants nothing. Missing bootstrap values fail startup, the operator cannot create
+any other accounts, and audit rows are recorded for organisation creation and initial-admin setup.
 
 ## Scenario 1 — Fresh deployment to first issue (SC-001)
 
@@ -229,6 +235,23 @@ Expected: no dropped accepted events, p95 acknowledgement under 150 ms for 10 KB
 items visible within 10 seconds. This is the planning target from
 [research.md](./research.md#r11-performance-sizing), not a spec-mandated ceiling.
 
+## Scenario 11 — Project soft-delete (FR-036, SC-013)
+
+1. As the project owner, soft-delete the project:
+
+```sh
+curl -sS -X DELETE 'http://localhost:8080/api/projects/<project-id>' \
+  -H "Authorization: Bearer <owner-token>"
+```
+
+2. Reload the project list and open the project URL directly.
+3. Send an event with one of the project's previous ingest keys.
+
+Expected: the project disappears from normal lists, the direct project URL returns `404`, and the old
+key returns `401`. Issue, log, and raw-payload rows still exist and remain subject to the existing
+retention policy; no hard purge occurs in the first slice. An audit row `project.soft_deleted` is
+recorded.
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -240,3 +263,4 @@ items visible within 10 seconds. This is the planning target from
 | UI shows the "not built" page | run `trunk build --release` in `ui/` and restart, or set `SCOUT_UI_DIR` |
 | Health reports a failing dependency | PostgreSQL/MinIO credentials or readiness in `docker-compose.yml` |
 | Startup fails on a fresh install | set both `SCOUT_OPERATOR_EMAIL` and `SCOUT_OPERATOR_PASSWORD` for the first start |
+| `401` after soft-delete | the project is soft-deleted; its keys are rejected by design |

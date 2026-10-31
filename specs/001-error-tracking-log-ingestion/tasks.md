@@ -62,7 +62,7 @@
 - [ ] T021 Implement ingest-key hashing, lookup, revocation, and `last_used_at` in `src/store_postgres.rs` and `src/ingest.rs`.
 - [ ] T022 Implement Argon2id password verification, session issue/redeem/expiry, and `POST /api/login`, `POST /api/logout`, `GET /api/me` in `src/auth.rs` and `src/api.rs`.
 - [ ] T023 Implement idempotent deployment-operator seeding in `src/auth.rs` and `src/main.rs`: read `SCOUT_OPERATOR_EMAIL`/`SCOUT_OPERATOR_PASSWORD`, create only when no `users.is_operator` exists, hash with Argon2id, never reset an existing password on later starts, and fail startup with an actionable error naming the missing value when no operator exists and either bootstrap value is missing or blank.
-- [ ] T024 Implement `org_admin_setup` token issuance and redemption primitives in `src/auth.rs` and `src/store_postgres.rs`: SHA-256 hashed, single-use, 7-day expiry, and acceptance grants `org_admin`; for an existing account require authentication and consent and leave the password unchanged, while a new account sets its password.
+- [ ] T024 Implement `org_admin_setup` token issuance and redemption primitives in `src/auth.rs` and `src/store_postgres.rs`: SHA-256 hashed, single-use, 7-day expiry, and acceptance grants `org_admin`; for an existing account require a bearer session, accept no password in the request, and leave the password unchanged, while a new account sets its password.
 - [ ] T025 Implement `src/objects.rs` write-once object semantics and wire raw object retrieval through it.
 - [ ] T026 Implement job insertion and `SELECT … FOR UPDATE SKIP LOCKED` claiming in `src/store_postgres.rs` and `src/worker.rs`.
 - [ ] T027 Add `PayloadTooLarge`, `TooManyRequests`, and `ServiceUnavailable` to `src/error.rs` with `413`, `429` + `Retry-After`, and `503` mappings.
@@ -239,33 +239,36 @@
 
 - [ ] T116 [P] [US5] Implement invitation persistence, hashed one-time tokens, expiry, and preview/accept/revoke in `src/store_postgres.rs` and `src/auth.rs`.
 - [ ] T117 [P] [US5] Implement single-use recovery codes at account creation, `POST /api/recover`, and authenticated `POST /api/me/recovery-codes` reissue in `src/auth.rs` and `src/api.rs`; reissue revokes prior unused codes and returns the new set once.
-- [ ] T118 [US5] Implement operator-only `GET /api/orgs` and `POST /api/orgs` in `src/api.rs`; creation records `created_by`, creates the initial admin or binds an existing account only after authentication/consent (never changing its password), and returns `initial_admin_setup_token`.
-- [ ] T119 [US5] Implement `org_admin_setup` acceptance through `POST /api/invitations/{token}/accept` in `src/api.rs`: for a new account set the password; for an existing account require authentication and consent and leave the password unchanged; grant `org_admin`, return recovery codes, and create no project membership.
+- [ ] T118 [US5] Implement operator-only `GET /api/orgs` and `POST /api/orgs` in `src/api.rs`; creation records `created_by`, creates the initial admin account, and returns `initial_admin_setup_token`. If the email already belongs to an account, the token is bound at acceptance after that account signs in with a bearer session, and never changes the password.
+- [ ] T119 [US5] Implement `org_admin_setup` acceptance through `POST /api/invitations/{token}/accept` in `src/api.rs`: for a new account set the password; for an existing account require a bearer session, reject a password field, and leave the password unchanged; grant `org_admin`, return recovery codes, and create no project membership.
 - [ ] T120 [US5] Implement `POST /api/orgs/{org_id}/invitations`, `GET /api/invitations/{token}`, and `DELETE /api/orgs/{org_id}/invitations/{id}` in `src/api.rs`.
 - [ ] T121 [US5] Implement `POST /api/orgs/{org_id}/projects` in `src/api.rs`, creating the project and its first ingest key.
 - [ ] T122 [US5] Implement member list/add/update/remove in `src/api.rs` with the owner/admin/triager/viewer matrix.
 - [ ] T123 [US5] Enforce last-owner protection on demotion and removal in `src/api.rs`, returning `400`.
 - [ ] T124 [US5] Implement ingest-key list/create/revoke plus rotation as create-new-then-revoke-old in `src/api.rs` and update `contracts/api.md`; return plaintext once and never expose hashes.
 - [ ] T125 [US5] Implement optional OIDC configuration and the authorisation-code + PKCE flow in `src/auth.rs`, linking only on a verified matching email.
-- [ ] T126 [US5] Record invitation, role, key, model, retention, organisation-creation, and initial-admin setup actions through `src/audit.rs`.
+- [ ] T126 [US5] Record invitation, role, key, model, retention, organisation-creation, project-creation, and initial-admin setup actions through `src/audit.rs`, including `organisation.created`, `project.created`, and `org_admin_setup.issued`.
 - [ ] T127 [P] [US5] Add the password login, recovery, and invitation-accept forms to `ui/src/components/overlays.rs`.
 - [ ] T128 [P] [US5] Extend `MembersView` in `ui/src/components/other.rs` with invites, role changes, removal, and last-owner messaging.
-- [ ] T129 [P] [US5] Extend `SettingsView` in `ui/src/components/other.rs` with key create/rotate/revoke and SSO configuration.
-- [ ] T130 [US5] Add the operator organisation-creation and initial-admin setup-token screens to `ui/src/components/other.rs`.
-- [ ] T131 [US5] Extend the UI client with auth, org, invite, member, key, and SSO calls in `ui/src/api.rs`.
+- [ ] T129 [P] [US5] Extend `SettingsView` in `ui/src/components/other.rs` with key create/rotate/revoke, SSO configuration, a project-creation entry point in `ui/src/components/app.rs`, and an owner-only soft-delete control with confirmation.
+- [ ] T130 [US5] Add the operator organisation-creation and initial-admin setup-token screens to `ui/src/components/other.rs`, including a first-project creation step after the initial admin signs in.
+- [ ] T131 [US5] Extend the UI client with auth, org, invite, member, key, SSO, project-create, and project-soft-delete calls in `ui/src/api.rs`.
 
 ### Tests for User Story 5
 
 - [ ] T132 [US5] Add login success/failure, session expiry, and logout tests in `src/tests.rs`.
 - [ ] T133 [US5] Add operator bootstrap tests in `src/tests.rs`: fresh seed creates the operator, later starts do not reset the password, env values are ignored once an operator exists, and missing/blank bootstrap values fail startup with an actionable error.
-- [ ] T134 [US5] Add organisation creation and initial-admin setup-token tests in `src/tests.rs`, including single use, expiry, `org_admin` membership, and existing-account authentication/consent with no password change.
+- [ ] T134 [US5] Add organisation creation and initial-admin setup-token tests in `src/tests.rs`, including single use, expiry, `org_admin` membership, existing-account bearer-session acceptance with no password field and no password change, and `organisation.created`/`org_admin_setup.issued` audit rows.
 - [ ] T135 [US5] Add invitation create/preview/accept/revoke and single-use tests in `src/tests.rs`.
 - [ ] T136 [US5] Add recovery-code tests in `src/tests.rs`: success, reuse rejection, unknown code, and authenticated reissue (including the operator) invalidating prior unused codes.
 - [ ] T137 [US5] Add the role matrix and last-owner protection tests in `src/tests.rs`.
 - [ ] T138 [US5] Add the live role-change-without-restart test in `src/tests.rs`.
 - [ ] T139 [US5] Add key rotation/revocation ingest tests in `src/tests.rs`.
 - [ ] T140 [US5] Add an OIDC mock-provider test covering verified-email linking and uninvited rejection in `src/tests.rs`.
-- [ ] T141 [US5] Run `quickstart.md` scenarios 0, 7, and 8.
+- [ ] T141 [US5] Run `quickstart.md` scenarios 0, 7, 8, and 11.
+- [ ] T142 [US5] Implement owner-only soft-delete at `DELETE /api/projects/{project_id}` in `src/api.rs`, setting `projects.deleted_at`/`deleted_by`, hiding the project from lists and settings, and writing a `project.soft_deleted` audit row.
+- [ ] T143 [US5] Reject all ingest for a soft-deleted project in `src/ingest.rs` and `src/store_postgres.rs`, returning `401` without writing data.
+- [ ] T144 [US5] Add soft-delete tests in `src/tests.rs`: project hidden, direct lookup `404`, keys rejected, rows/raw objects/log lines retained and still subject to retention, and a `project.soft_deleted` audit row recorded.
 
 **Checkpoint**: All administration, provisioning, and access-control flows are enforced server-side.
 
@@ -279,20 +282,20 @@
 
 ### Implementation
 
-- [ ] T142 [P] [US6] Finalize the `scout`/`postgres`/`minio` services, health checks, volumes, and environment in `docker-compose.yml`, including the operator variables.
-- [ ] T143 [P] [US6] Finalize the multi-stage `Dockerfile` (backend build, Trunk UI build, minimal runtime) and expose the UI bundle.
-- [ ] T144 [US6] Implement the retention sweep job in `src/worker.rs` plus the per-request retention check in `src/ingest.rs`.
-- [ ] T145 [US6] Delete expired attachments and raw objects, clear `events.raw_object_key`, set `raw_expired_at`, and delete expired `log_lines` in `src/store_postgres.rs` and `src/objects.rs`.
-- [ ] T146 [US6] Enforce create-only object writes in `src/objects.rs` so no code path can overwrite an existing payload.
-- [ ] T147 [US6] Ensure migrations in `migrations/` run idempotently on startup under the advisory lock in `src/main.rs` for multiple replicas.
+- [ ] T145 [P] [US6] Finalize the `scout`/`postgres`/`minio` services, health checks, volumes, and environment in `docker-compose.yml`, including the operator variables.
+- [ ] T146 [P] [US6] Finalize the multi-stage `Dockerfile` (backend build, Trunk UI build, minimal runtime) and expose the UI bundle.
+- [ ] T147 [US6] Implement the retention sweep job in `src/worker.rs` plus the per-request retention check in `src/ingest.rs`.
+- [ ] T148 [US6] Delete expired attachments and raw objects, clear `events.raw_object_key`, set `raw_expired_at`, and delete expired `log_lines` in `src/store_postgres.rs` and `src/objects.rs`.
+- [ ] T149 [US6] Enforce create-only object writes in `src/objects.rs` so no code path can overwrite an existing payload.
+- [ ] T150 [US6] Ensure migrations in `migrations/` run idempotently on startup under the advisory lock in `src/main.rs` for multiple replicas.
 
 ### Tests for User Story 6
 
-- [ ] T148 [US6] Add the retention test (expired raw/log removed, issue metadata kept, `raw_available: false`) in `src/tests.rs`.
-- [ ] T149 [US6] Add the per-project retention isolation test in `src/tests.rs`.
-- [ ] T150 [US6] Add the raw immutability test asserting no overwrite is possible in `src/tests.rs`.
-- [ ] T151 [US6] Add a compose smoke script at `scripts/compose-smoke.sh` that boots the stack, waits for health, completes operator bootstrap, and reaches a first issue.
-- [ ] T152 [US6] Run `quickstart.md` scenarios 1, 3, and 9 end to end.
+- [ ] T151 [US6] Add the retention test (expired raw/log removed, issue metadata kept, `raw_available: false`) in `src/tests.rs`.
+- [ ] T152 [US6] Add the per-project retention isolation test in `src/tests.rs`.
+- [ ] T153 [US6] Add the raw immutability test asserting no overwrite is possible in `src/tests.rs`.
+- [ ] T154 [US6] Add a compose smoke script at `scripts/compose-smoke.sh` that boots the stack, waits for health, completes operator bootstrap, and reaches a first issue.
+- [ ] T155 [US6] Run `quickstart.md` scenarios 1, 3, and 9 end to end.
 
 **Checkpoint**: All six stories work in the single self-hosted deployment.
 
@@ -302,17 +305,17 @@
 
 **Purpose**: Observability, security, performance, documentation, and analyze remediation.
 
-- [ ] T153 [P] Add ingest/worker counters and latency logs in `src/main.rs` and `src/worker.rs` (accepted/rejected, grouping latency, classifier outcomes, retention deletions).
-- [ ] T154 [P] Review security in `src/auth.rs`, `src/api.rs`, and `src/classifier.rs`: password/session/invite/operator hashing, secret handling for model API keys, authorization on every route, and no raw payload or bootstrap password in logs.
-- [ ] T155 [P] Extend `scripts/load-ingest.sh` to measure the 500 events/s target and acceptance → visibility latency for SC-005.
-- [ ] T156 [P] Improve actionable error messages for `400`/`401`/`403`/`404`/`413`/`429`/`503` in `src/error.rs`.
-- [ ] T157 [P] Update `README.md`, `architecture.md`, and `specs/001-error-tracking-log-ingestion/quickstart.md` to match the implemented routes and behavior.
-- [ ] T158 Standardize "raw payload" terminology across `spec.md`, `contracts/api.md`, and `contracts/ingest.md` (analyze finding D1).
-- [ ] T159 Resolve the project-deletion assumption in `spec.md` and `contracts/api.md`: either add the requirement and endpoint or remove "deletion" from the owner capability (analyze finding I1).
-- [ ] T160 Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` across `src/` and `ui/src/`; fix all failures.
-- [ ] T161 Run the `ui/Trunk.toml` build: `(cd ui && cargo check --target wasm32-unknown-unknown)` and `(cd ui && trunk build --release)`.
-- [ ] T162 Walk every scenario in `quickstart.md` and record pass/fail, including SC-001 through SC-012.
-- [ ] T163 Re-run `/speckit-analyze` and verify F1–F5 are closed and F6–F11 are either closed or explicitly deferred in `tasks.md`, `spec.md`, and `contracts/`.
+- [ ] T156 [P] Add ingest/worker counters and latency logs in `src/main.rs` and `src/worker.rs` (accepted/rejected, grouping latency, classifier outcomes, retention deletions).
+- [ ] T157 [P] Review security in `src/auth.rs`, `src/api.rs`, and `src/classifier.rs`: password/session/invite/operator hashing, secret handling for model API keys, authorization on every route, and no raw payload or bootstrap password in logs.
+- [ ] T158 [P] Extend `scripts/load-ingest.sh` to measure the 500 events/s target and acceptance → visibility latency for SC-005.
+- [ ] T159 [P] Improve actionable error messages for `400`/`401`/`403`/`404`/`413`/`429`/`503` in `src/error.rs`.
+- [ ] T160 [P] Update `README.md`, `architecture.md`, and `specs/001-error-tracking-log-ingestion/quickstart.md` to match the implemented routes and behavior.
+- [ ] T161 Standardize "raw payload" terminology across `spec.md`, `contracts/api.md`, and `contracts/ingest.md` (analyze finding F10).
+- [ ] T162 Verify that the checklist coverage counts (F6) and bearer-session wording (F15) remain consistent, and clarify recovery-code delivery for new vs existing initial admins (F16) in `spec.md` and `contracts/api.md`.
+- [ ] T163 Run `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` across `src/` and `ui/src/`; fix all failures.
+- [ ] T164 Run the `ui/Trunk.toml` build: `(cd ui && cargo check --target wasm32-unknown-unknown)` and `(cd ui && trunk build --release)`.
+- [ ] T165 Walk every scenario in `quickstart.md` and record pass/fail, including SC-001 through SC-013.
+- [ ] T166 Re-run `/speckit-analyze` and verify F1–F16 are closed and any remaining low-impact items are explicitly deferred in `tasks.md`, `spec.md`, and `contracts/`.
 
 ---
 
