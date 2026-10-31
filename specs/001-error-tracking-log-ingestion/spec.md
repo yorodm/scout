@@ -18,6 +18,14 @@
 - Q: At what confidence should a decision endpoint's answer stop being recorded as a suggestion? (FR-018) → A: Below a per-project configurable threshold that defaults to 0.5.
 - Q: What is the maximum accepted size for an ingest request and for a single attachment? (FR-007) → A: 10 MB per request and 10 MB per attachment.
 
+### Session 2026-10-31 (post-plan)
+
+- Q: When a triager confirms or overrides an item to a category different from how it was stored, what should happen to the stored item? (FR-017) → A: The decision is authoritative metadata; the item stays where it is, and the decision (not the suggestion) determines how it is labelled and filtered.
+- Q: How should a local account recover access when the person forgets their password, given Scout sends no email? (FR-030) → A: Single-use recovery codes generated at account creation and stored by the person.
+- Q: How should issue and log search match a query? (FR-012) → A: Case-insensitive substring matching across the user-visible fields, newest first, with a fixed result cap.
+- Q: Which issue states should the first slice support? (FR-023) → A: Open, resolved, and ignored.
+- Q: Should Scout enforce ingest rate limits in the first slice? (FR-009) → A: A global in-flight concurrency cap; excess requests return 429 with Retry-After, configurable with a generous default.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Provision a project and ingest unmodified SDK errors into grouped issues (Priority: P1)
@@ -54,6 +62,7 @@ A triager or developer on call opens a project's issue list, sees each issue's c
 2. **Given** an issue, **When** the member opens it, **Then** the stack trace, breadcrumbs, release tag, and the raw original event are shown.
 3. **Given** a member without access to a project, **When** they attempt to view that project's issues, **Then** access is denied.
 4. **Given an** open issue, **When** a triager resolves it, **Then** its state becomes resolved and the change is recorded; reopening restores it to open.
+5. **Given** an open issue, **When** a triager ignores it, **Then** it is marked ignored and can be reopened; the change is recorded in its history.
 
 ---
 
@@ -85,7 +94,7 @@ A project owner connects a decision endpoint that suggests whether an incoming i
 **Acceptance Scenarios**:
 
 1. **Given** a project owner has connected a compatible decisions endpoint, **When** an ambiguous item arrives, **Then** Scout sends only a redacted, size-bounded summary of the item and records the returned suggested category against it.
-2. **Given** an item with a suggestion, **When** a triager confirms or overrides it, **Then** the human decision is authoritative, is stored with the item, and the original suggestion remains recorded.
+2. **Given** an item with a suggestion, **When** a triager confirms or overrides it, **Then** the human decision is authoritative, is stored with the item, determines how the item is labelled and filtered, and the original suggestion remains recorded; the stored item itself is not moved, regrouped, or deleted.
 3. **Given** the decision endpoint is unreachable or exceeds the allowed wait, **When** an item arrives, **Then** the item is stored within the normal ingest bound carrying no suggestion.
 4. **Given** the decision endpoint returns malformed, unparseable, or low-confidence output, **When** the item arrives, **Then** the item is stored with no suggestion.
 5. **Given** the decision endpoint is down, **When** normal traffic continues, **Then** no accepted item is dropped or delayed beyond the normal ingest bound.
@@ -138,6 +147,7 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **Classifier exceeds the wait budget**: Ingest proceeds and stores the item without a suggestion instead of waiting.
 - **Storage write fails mid-ingest**: The request reports a retryable failure so the sender can retry; no half-written event is acknowledged.
 - **Key revoked between deliveries**: A key revoked mid-stream stops being accepted immediately; already-stored events are unaffected.
+- **Ingest concurrency saturated**: When the global in-flight cap is reached, excess ingest requests return `429` with `Retry-After`; already-accepted events are unaffected, and SDK retries can recover.
 - **Cross-project access attempt**: A signed-in member requests another project's issue, log, or raw payload; the request is denied and no existence information leaks.
 - **Retention expires an event referenced by an issue**: The raw payload is removed on schedule while the issue's metadata remains; the detail view indicates the raw payload has expired.
 - **Very large attachment**: An attachment greater than 10 MB is rejected with an actionable error rather than silently truncated.
@@ -163,24 +173,24 @@ An operator starts the whole stack from one compose file on their own infrastruc
 
 - **FR-010**: System MUST accept structured log lines through a documented project-scoped interface authenticated by the project's ingest key.
 - **FR-011**: System MUST store each log line with at least its timestamp, level, message, source, and project scope.
-- **FR-012**: System MUST allow log lines and issues to be searched together in one result set, scoped to projects the requester may access.
+- **FR-012**: System MUST allow log lines and issues to be searched together in one result set, scoped to projects the requester may access. Search MUST use case-insensitive substring matching over issue title/culprit/fingerprint and log message/source/level/attributes, order results newest first, and cap each result set at 50.
 
 **Categorisation**
 
 - **FR-013**: A project owner MUST be able to connect, update, and disconnect a Jev-compatible decisions endpoint per project, including its suggestion-confidence threshold.
 - **FR-014**: System MUST send only a bounded summary of an item to the decisions endpoint — derived metadata plus at most 2 KB of payload sample, with common secret and personal-data fields redacted — and MUST NOT send the full raw payload.
-- **FR-015**: System MUST record the suggested category returned by the endpoint (issue, log, or raw event) against the item as a suggestion, not as an imposed outcome.
+- **FR-015**: System MUST record the suggested category returned by the endpoint (issue, log, or raw event) against the item as a suggestion, not as an imposed outcome, and a suggestion MUST NOT move or re-file the item.
 - **FR-016**: System MUST store every accepted item regardless of whether a suggestion was produced.
-- **FR-017**: A triager MUST be able to confirm or override a suggestion, and the human decision MUST be authoritative and recorded while the original suggestion remains auditable.
+- **FR-017**: A triager MUST be able to confirm or override a suggestion, and the human decision MUST be authoritative and recorded while the original suggestion remains auditable. The decision is authoritative metadata for labelling and filtering and MUST NOT move, regroup, or delete the stored event or issue.
 - **FR-018**: System MUST treat an unreachable, timing-out, erroring, malformed, or low-confidence endpoint as producing no suggestion, where low-confidence means below the project's configured threshold (default 0.5), and MUST NOT delay ingest beyond the defined wait budget.
 - **FR-019**: System MUST discard a suggestion that arrives after the item has been presented for triage rather than changing the stored item without human confirmation.
 
 **Triage UI**
 
 - **FR-020**: Authenticated members MUST see only projects they are authorised for.
-- **FR-021**: Users MUST be able to view a project's issue list with count, first-seen, last-seen, and filtering, sorting, and search.
+- **FR-021**: Users MUST be able to view a project's issue list with count, first-seen, last-seen, and filtering, sorting, and search, including filtering by the human categorisation decision.
 - **FR-022**: Users MUST be able to open an issue and see its stack trace, breadcrumbs, release tag, occurrence timeline, and the original raw event.
-- **FR-023**: Triagers MUST be able to resolve and reopen issues, and each state change MUST be recorded with who made it and when.
+- **FR-023**: Triagers MUST be able to resolve, reopen, and ignore issues, and each state change MUST be recorded with who made it and when. The supported states are open, resolved, and ignored.
 - **FR-024**: The UI MUST indicate when an issue's raw payload has expired under retention.
 
 **Administration and access control**
@@ -190,7 +200,7 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **FR-027**: Owners and admins MUST be able to grant and revoke member roles, and changes MUST take effect without redeploying.
 - **FR-028**: System MUST support invitations that carry a project role and apply it when accepted; an admin MUST generate a one-time invite link/token that is shared out of band and redeemed while the invitee signs in or creates a local account, with no email/SMTP dependency.
 - **FR-029**: Project owners MUST be able to create, rotate, and revoke per-project ingest keys.
-- **FR-030**: System MUST support local accounts and optional OIDC/SSO sign-in per organisation. Local accounts MUST authenticate with email and password, with passwords hashed server-side, and MUST be created only by an invitation or an operator (no public self-sign-up).
+- **FR-030**: System MUST support local accounts and optional OIDC/SSO sign-in per organisation. Local accounts MUST authenticate with email and password, with passwords hashed server-side, and MUST be created only by an invitation or an operator (no public self-sign-up). At account creation the system MUST issue single-use recovery codes, stored hashed, that allow a forgotten password to be reset without email.
 - **FR-031**: System MUST authorise every request server-side against the requesting member's project scope, including ingest-key requests.
 
 **Operations and data lifecycle**
@@ -198,6 +208,7 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **FR-032**: System MUST be deployable as a single unit comprising the application, a metadata store, and an object store, startable from one compose file.
 - **FR-033**: System MUST support per-project retention periods for raw payloads and log lines and MUST delete data that exceeds them.
 - **FR-034**: System MUST never rewrite a stored raw payload.
+- **FR-035**: System MUST bound concurrent ingest work with a global in-flight concurrency cap. Requests above the cap MUST be rejected with `429` and a `Retry-After` header instead of queuing without bound, and the cap MUST be configurable with a generous default.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -207,11 +218,13 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **Project Role Assignment**: The role (owner, admin, triager, viewer) a member holds on a specific project.
 - **Invitation**: A pending offer of membership and a project role, addressed to a person and redeemed through a one-time link/token shared out of band; it does not depend on email delivery.
 - **Ingest Key**: A project-scoped credential that authenticates incoming events and log lines; can be rotated and revoked.
-- **Issue**: A grouped identity for repeated occurrences within a project, carrying count, first-seen, last-seen, and triage state.
+- **Issue**: A grouped identity for repeated occurrences within a project, carrying count, first-seen, last-seen, and triage state (open, resolved, or ignored).
 - **Event / Occurrence**: One received submission, linked to exactly one issue, with its received timestamp and identifier.
 - **Raw Payload**: The immutable original bytes of a received event, including attachments, subject to retention.
 - **Log Line**: A structured log record stored under a project, with timestamp, level, message, and source.
 - **Categorisation Suggestion**: The category proposed by the decision endpoint for an item, with the confidence and time received, retained for audit alongside any human decision.
+- **Categorisation Decision**: The human's authoritative category for an item, recorded with the actor and time; it overrides the suggestion for labelling and filtering without moving the stored item.
+- **Recovery Code**: A single-use code issued when a local account is created, stored hashed, and used to reset a forgotten password without email.
 - **Decision Model Connection**: A project's link to a Jev-compatible endpoint, including its location, credential reference, and suggestion-confidence threshold (default 0.5); can be disconnected.
 - **Retention Policy**: A per-project period after which raw payloads and log lines expire.
 
@@ -228,6 +241,7 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **SC-007**: 100% of attempts to read another project's issues, logs, or raw payloads by a member without access are denied.
 - **SC-008**: A developer can go from the first received event to a resolved issue — viewing the raw event and confirming categorisation — in under 2 minutes.
 - **SC-009**: Retried deliveries of the same event never increase an issue's count beyond the number of distinct events received.
+- **SC-010**: When the global ingest concurrency cap is saturated, every excess request receives `429` with `Retry-After`, and no already-accepted event is lost or delayed beyond the normal ingest bound.
 
 ## Assumptions
 
@@ -238,9 +252,12 @@ An operator starts the whole stack from one compose file on their own infrastruc
 - **Idempotency**: Sentry-compatible events carry an event identifier; retries with the same identifier are deduplicated per project. Events without an identifier are not deduplicated.
 - **Storage failure behaviour**: Ingest returns a retryable failure rather than acknowledging an event that was not durably stored, so SDK retry behaviour protects against loss.
 - **Multiple organisations**: A single deployment can host multiple organisations, each with its own projects, members, and optional SSO configuration.
-- **Identity**: Local accounts are always available. They sign in with email and password, and passwords are hashed server-side; accounts are created only by invitation or an operator, with no public self-sign-up. OIDC/SSO is optional and configured per organisation; no assumption is made about a specific provider.
+- **Identity**: Local accounts are always available. They sign in with email and password, and passwords are hashed server-side; accounts are created only by invitation or an operator, with no public self-sign-up. Each account receives single-use recovery codes at creation for password recovery without email. OIDC/SSO is optional and configured per organisation; no assumption is made about a specific provider.
 - **Suggested wait budget**: The categorisation wait budget is short enough not to be perceptible to senders (target: well under one second) and is configurable per project.
 - **Suggestion confidence threshold**: Each project has a configurable threshold, defaulting to 0.5; a suggestion below it is discarded rather than shown to a triager.
+- **Categorisation decisions do not re-file**: Confirming or overriding a category records an authoritative label; the event, its issue grouping, its count, and its raw payload remain unchanged.
+- **Search semantics**: Unified search is case-insensitive substring matching over the fields in FR-012, ordered newest first and capped at 50 results per item kind. Full-text ranking and structured query syntax are out of scope for the first slice.
+- **Ingest concurrency cap**: A single global cap protects the deployment. Excess ingest requests are rejected with `429` and `Retry-After`; the cap is configurable with a generous default and is not a per-project quota.
 - **Non-goals carried forward**: Scout is self-hosted only, provides no Sentry read-API compatibility (ingestion only), and does not store metrics or traces.
 - **Scope**: This specification covers the first complete product slice described in the goal document; it does not include hosted operations, billing, or mobile clients.
 
