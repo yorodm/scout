@@ -45,10 +45,10 @@ primitives every story needs (error envelope, cursor codec).
 
 **⚠️ CRITICAL**: Complete this phase before any user story work.
 
-- [ ] T006 Add `ApiToken { id, user_id, label, token_hash, token_prefix, created_at, last_used_at, revoked_at }` to `src/models.rs`; `token_hash` is skipped from serialisation (invariants in `data-model.md`)
+- [ ] T006 Add `ApiToken { id, user_id, label, token_hash, token_prefix, created_at, last_used_at, revoked_at }` to `src/models.rs`: `label` is required at 1–100 characters after trim; `token_hash` is the SHA-256 hex of the full plaintext (`scout_pat_…`), unique, and skipped from all serialisation; `token_prefix` is the first 14 characters; `revoked_at` is set once and revocation is terminal; there is no scope and no expiry field
 - [ ] T007 [P] Add `Organisation.slug` with `#[serde(default)]` and the slug derivation helper (lowercase, `[a-z0-9-]`, collapse runs, trim, ≤48 chars, `-2`/`-3` suffix on case-insensitive collision, empty name → `org`) in `src/models.rs`
-- [ ] T008 [P] Add `Issue.number: u64` to `src/models.rs` and assign `max(number) + 1` per project at both issue-creation sites (`src/store.rs` grouping path and `src/worker.rs` classifier path)
-- [ ] T009 Add token storage to `src/store.rs`: `api_tokens` collection with a `token_hash` index, `create_token`, `token_by_hash` (rejects revoked), `tokens_for_user`, `tokens_for_org`, `revoke_token`, and the ≤1-hour `last_used_at` write
+- [ ] T008 [P] Add `Issue.number: u64` to `src/models.rs` and assign it at both issue-creation sites (`src/store.rs` grouping path and `src/worker.rs` classifier path): assigned when the row is first created, immutable afterwards, unique within its project, backfilled in `first_seen` order, and `max(number) + 1` for new issues
+- [ ] T009 Add token storage to `src/store.rs`: `api_tokens` collection with a `token_hash` index; `create_token`, `token_by_hash` (returns `None` for revoked tokens), `tokens_for_user`, `tokens_for_org`, `revoke_token` (terminal); `last_used_at` is written at most once per hour; no expiry check is applied because tokens do not expire
 - [ ] T010 Backfill slugs and issue numbers in `src/store.rs` (`Store::empty` and `store::seed`) and derive the slug when an organisation is created in `src/api.rs` (`create_org`)
 - [ ] T011 Implement bearer authentication in `src/compat/auth.rs`: parse `Authorization: Bearer scout_pat_…`, SHA-256 via `auth::hash_token`, identical `401 {"detail":"Invalid token"}` for missing/malformed/unknown/revoked, disabled users rejected
 - [ ] T012 Add project/org resolution in `src/compat/auth.rs`: org by slug or UUID, project by slug, UUID, or `dsn_id`, soft-deleted or unknown → `404`, no role or cross-project → `404`
@@ -78,10 +78,10 @@ state and history appear in the native API/UI.
 
 ### Implementation for User Story 1
 
-- [ ] T020 [US1] Implement the `SentryIssue` projection (all fields in `data-model.md`, `shortId = {PROJECT}-{number}`, `permalink = {self_url}/#/issues/{id}`, `count` numeric) in `src/compat/projection.rs`
+- [ ] T020 [US1] Implement the `SentryIssue` projection in `src/compat/projection.rs`: `id` as a string; `shortId = {PROJECT}-{number}`; `statusDetails` always `{}` (plus `ignoreCount` when ignored); `count` a JSON number; `userCount` `0`; `annotations` `[]`; `metadata = {title, value: culprit or ""}`; `permalink = {self_url}/#/issues/{id}`; `firstSeen`/`lastSeen` as RFC 3339 UTC with `Z`; `project = {id, name, slug, platform: null}`; `tags` from the stored tag object with empty values omitted
 - [ ] T021 [US1] Implement the search tokenizer and filters (`is:`, `level:`, `release:`, `environment:`, tag keys, free text over title/culprit/fingerprint, unsupported operators ignored) and the sort map in `src/compat/query.rs`, with unit tests
 - [ ] T022 [US1] Implement the issue list handler (query, sort, `limit`, `cursor`, repeated `id`, `hashes` on `fingerprint`, ignore `statsPeriod`/`shortIdLookup`) with `Link`/`X-Hits` emission in `src/compat/handlers.rs`
-- [ ] T023 [US1] Implement the status mutation handler (per-issue state change, one history entry each with the token owner's email, in-project ids only, unsupported attributes rejected) in `src/compat/handlers.rs`
+- [ ] T023 [US1] Implement the status mutation handler in `src/compat/handlers.rs`: per-issue state change with one history entry each naming the token owner's email; ids outside the project skipped silently; no `id` means every issue matching the current query; `status` absent → `400` naming the missing field; unknown status value → `400`; unsupported attributes → `400` naming the field
 - [ ] T024 [US1] Implement `DELETE .../issues/` → `501` citing preserved history and raw payloads in `src/compat/handlers.rs`
 - [ ] T025 [US1] Register the three issues routes (with and without trailing slash) in `src/compat/mod.rs`
 
@@ -103,7 +103,7 @@ paths, verify distinctness, ordering, `query` filtering, pagination cap, and `[]
 
 ### Implementation for User Story 2
 
-- [ ] T027 [US2] Implement tag extraction from `Issue.tags` (stringify scalars, skip null/empty/objects, de-duplicate, sort, cap 1,000) in `src/compat/projection.rs`
+- [ ] T027 [US2] Implement tag extraction from `Issue.tags` in `src/compat/projection.rs`: non-string scalars are stringified (`true`, `42`); objects, arrays, null, and empty strings are skipped; values are de-duplicated, sorted ascending, and capped at 1,000
 - [ ] T028 [US2] Implement the project tag-values and issue tag-values handlers, including `query` filtering and cursor/limit handling, in `src/compat/handlers.rs`
 - [ ] T029 [US2] Register the tag-value routes in `src/compat/mod.rs`
 
@@ -127,7 +127,7 @@ revoke and get `401`; remove the owner from the project and get `404`; manage th
 
 ### Implementation for User Story 3
 
-- [ ] T032 [US3] Implement native token endpoints `GET/POST /api/me/tokens` and `DELETE /api/me/tokens/{id}` with label validation (1–100 chars after trim), one-time plaintext, and `token.create`/`token.revoke` audit rows in `src/compat/tokens.rs`
+- [ ] T032 [US3] Implement native token endpoints `GET/POST /api/me/tokens` and `DELETE /api/me/tokens/{id}` in `src/compat/tokens.rs`: label validation 1–100 characters after trim (`400` otherwise); plaintext returned only by create; list metadata excludes `token_hash` and the plaintext; revoke is idempotent `204`; audit rows `token.create`/`token.revoke` record the token id and label but never the secret
 - [ ] T033 [US3] Implement org-admin endpoints `GET /api/orgs/{org_id}/tokens` and `DELETE /api/orgs/{org_id}/tokens/{token_id}` (metadata only, member scope, `403` for non-admins) in `src/compat/tokens.rs` and register all token routes in `src/api.rs`
 - [ ] T034 [US3] Build the API-token screen component (list, create form, one-time copy panel, revoke confirmation, empty/error states, keyboard accessible) in `ui/src/components/tokens.rs`
 - [ ] T035 [US3] Add token API client calls and screen state/actions in `ui/src/api.rs` and `ui/src/state.rs`, export the module in `ui/src/components/mod.rs`, and add the `#/tokens` navigation entry in `ui/src/components/app.rs`
