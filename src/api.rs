@@ -585,6 +585,7 @@ pub async fn create_org(
         slug,
         sso_provider: None,
         created_by: Some(operator_id),
+        is_demo: false,
         created_at: Utc::now(),
     };
     store.orgs.insert(org_id, organisation.clone());

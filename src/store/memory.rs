@@ -81,6 +81,11 @@ impl Store {
             .and_then(|id| self.projects.get(id))
     }
 
+    /// The seeded demonstration organisation, when the store contains one.
+    pub fn demo_org_id(&self) -> Option<Uuid> {
+        self.orgs.values().find(|org| org.is_demo).map(|org| org.id)
+    }
+
     pub fn active_key_for(&self, project_id: Uuid) -> Option<&IngestKey> {
         self.keys
             .values()
@@ -349,6 +354,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
             slug: "acme".into(),
             sso_provider: None,
             created_by: None,
+            is_demo: true,
             created_at: now - Duration::days(60),
         },
     );

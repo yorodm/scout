@@ -6,6 +6,10 @@ use uuid::Uuid;
 
 /// Record a privileged action. The constitution requires every administrative
 /// action to be auditable, so callers pass the actor and a stable action name.
+///
+/// The durable adapter stores `actor` in `audit_log.actor_label` (with
+/// `actor_user_id` set when the actor resolves to an account), so the audit trail
+/// survives the removal of the account that performed the action.
 pub fn record(
     store: &mut Store,
     org_id: Option<Uuid>,

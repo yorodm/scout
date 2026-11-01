@@ -242,6 +242,8 @@ mod tests {
             operator_email: email.map(str::to_string),
             operator_password: password.map(str::to_string),
             database_url: None,
+            store: None,
+            retention_interval_secs: 3600,
             s3_endpoint: None,
             s3_bucket: None,
             demo_mode: false,

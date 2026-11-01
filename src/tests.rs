@@ -2543,6 +2543,8 @@ fn operator_config() -> crate::config::Config {
         operator_email: Some("ops@test.local".into()),
         operator_password: Some(OPERATOR_PASSWORD.into()),
         database_url: None,
+        store: None,
+        retention_interval_secs: 3600,
         s3_endpoint: None,
         s3_bucket: None,
         demo_mode: false,

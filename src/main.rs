@@ -11,6 +11,7 @@ mod middleware;
 mod migrate;
 mod models;
 mod objects;
+mod schema;
 mod state;
 mod store;
 #[cfg(test)]

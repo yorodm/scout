@@ -1,5 +1,23 @@
 use std::env;
 
+/// Which metadata adapter the process uses. `Postgres` is the production
+/// default; `Memory` exists for automated tests and explicit local development
+/// (research R7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreKind {
+    Postgres,
+    Memory,
+}
+
+impl StoreKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StoreKind::Postgres => "postgres",
+            StoreKind::Memory => "memory",
+        }
+    }
+}
+
 /// Environment-backed configuration. Values not wired into the current slice are
 /// kept here so later phases read one source instead of scattered `env::var`
 /// calls.
@@ -15,6 +33,11 @@ pub struct Config {
     pub operator_email: Option<String>,
     pub operator_password: Option<String>,
     pub database_url: Option<String>,
+    /// Raw `SCOUT_STORE` value; resolved together with `database_url` by
+    /// [`Config::store_kind`].
+    pub store: Option<String>,
+    /// How often the retention sweep runs.
+    pub retention_interval_secs: u64,
     pub s3_endpoint: Option<String>,
     pub s3_bucket: Option<String>,
     /// Enables seeded demo data and the prototype demo endpoints. Off by
@@ -43,6 +66,9 @@ impl Config {
             operator_email: non_empty("SCOUT_OPERATOR_EMAIL"),
             operator_password: non_empty("SCOUT_OPERATOR_PASSWORD"),
             database_url: non_empty("DATABASE_URL"),
+            store: non_empty("SCOUT_STORE"),
+            retention_interval_secs: env_parse::<u64>("SCOUT_RETENTION_INTERVAL_SECONDS", 3600)
+                .max(1),
             s3_endpoint: non_empty("SCOUT_S3_ENDPOINT"),
             s3_bucket: non_empty("SCOUT_S3_BUCKET"),
             demo_mode: env_flag("SCOUT_DEMO_MODE"),
@@ -50,11 +76,44 @@ impl Config {
         }
     }
 
+    /// Resolve the metadata adapter. An explicit `SCOUT_STORE` wins; otherwise
+    /// the durable adapter is selected whenever `DATABASE_URL` is present.
+    pub fn store_kind(&self) -> Result<StoreKind, String> {
+        let requested = self
+            .store
+            .as_deref()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+
+        match requested.as_deref() {
+            Some("postgres") => {
+                if self.database_url.is_some() {
+                    Ok(StoreKind::Postgres)
+                } else {
+                    Err("SCOUT_STORE=postgres requires DATABASE_URL (for example \
+postgres://scout:scout@postgres:5432/scout)"
+                        .into())
+                }
+            }
+            Some("memory") => Ok(StoreKind::Memory),
+            Some(other) => Err(format!(
+                "SCOUT_STORE must be `postgres` or `memory` (got `{other}`)"
+            )),
+            None => Ok(if self.database_url.is_some() {
+                StoreKind::Postgres
+            } else {
+                StoreKind::Memory
+            }),
+        }
+    }
+
     /// A persistent deployment must not silently acknowledge events into memory.
     pub fn validate_storage(&self) -> Result<(), String> {
-        if self.database_url.is_some() && (self.s3_endpoint.is_none() || self.s3_bucket.is_none()) {
+        if self.store_kind()? == StoreKind::Postgres
+            && (self.s3_endpoint.is_none() || self.s3_bucket.is_none())
+        {
             return Err(
-                "DATABASE_URL is set but object storage is not configured: set \
+                "the durable metadata store is configured but object storage is not: set \
 SCOUT_S3_ENDPOINT and SCOUT_S3_BUCKET (both are required for durable raw payloads)"
                     .into(),
             );
@@ -107,11 +166,75 @@ mod tests {
             operator_email: Some("ops@example.com".into()),
             operator_password: Some("secret".into()),
             database_url: database_url.map(str::to_string),
+            store: None,
+            retention_interval_secs: 3600,
             s3_endpoint: endpoint.map(str::to_string),
             s3_bucket: bucket.map(str::to_string),
             demo_mode: false,
             sentry_compat_enabled: false,
         }
+    }
+
+    fn with_store(mut config: Config, store: Option<&str>) -> Config {
+        config.store = store.map(str::to_string);
+        config
+    }
+
+    #[test]
+    fn store_kind_prefers_an_explicit_setting_and_falls_back_to_database_url() {
+        // Unset: DATABASE_URL decides.
+        assert_eq!(
+            config(
+                Some("postgres://x"),
+                Some("http://objects:3900"),
+                Some("raw")
+            )
+            .store_kind()
+            .expect("durable"),
+            StoreKind::Postgres
+        );
+        assert_eq!(
+            config(None, None, None).store_kind().expect("memory"),
+            StoreKind::Memory
+        );
+
+        // Explicit `memory` wins even with a database URL present.
+        assert_eq!(
+            with_store(config(Some("postgres://x"), None, None), Some("memory"))
+                .store_kind()
+                .expect("memory"),
+            StoreKind::Memory
+        );
+
+        // Explicit `postgres` without a URL is a startup error naming both values.
+        let error = with_store(config(None, None, None), Some("postgres"))
+            .store_kind()
+            .expect_err("missing DATABASE_URL must fail");
+        assert!(error.contains("SCOUT_STORE=postgres"), "error: {error}");
+        assert!(error.contains("DATABASE_URL"), "error: {error}");
+
+        // Case and surrounding whitespace are tolerated.
+        assert_eq!(
+            with_store(config(Some("postgres://x"), None, None), Some(" MEMORY "))
+                .store_kind()
+                .expect("memory"),
+            StoreKind::Memory
+        );
+
+        // Anything else is rejected with the accepted values.
+        let error = with_store(config(None, None, None), Some("sqlite"))
+            .store_kind()
+            .expect_err("unknown adapter must fail");
+        assert!(
+            error.contains("postgres") && error.contains("memory"),
+            "error: {error}"
+        );
+    }
+
+    #[test]
+    fn explicit_memory_needs_no_object_store() {
+        let config = with_store(config(None, None, None), Some("memory"));
+        assert!(config.validate_storage().is_ok());
     }
 
     #[test]

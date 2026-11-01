@@ -15,6 +15,10 @@ pub struct Organisation {
     /// The deployment operator that created the organisation.
     #[serde(default)]
     pub created_by: Option<Uuid>,
+    /// True for the seeded demonstration organisation. Demo sessions are scoped
+    /// to it and a demo reset only replaces its rows (FR-011, SC-014).
+    #[serde(default)]
+    pub is_demo: bool,
     #[serde(default)]
     pub created_at: DateTime<Utc>,
 }
@@ -422,4 +426,57 @@ pub struct AuditEntry {
     #[serde(default)]
     pub metadata: Value,
     pub at: DateTime<Utc>,
+}
+
+/// An organisation's optional OpenID Connect connection (FR-018).
+///
+/// `client_secret` must be replayed to the provider during the token exchange, so
+/// it cannot be hashed. It is skipped from serialization and redacted from
+/// `Debug` output; it must never appear in a response or a log line.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OidcConnection {
+    pub org_id: Uuid,
+    pub issuer: String,
+    pub client_id: String,
+    #[serde(default, skip_serializing)]
+    pub client_secret: String,
+    pub scopes: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for OidcConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcConnection")
+            .field("org_id", &self.org_id)
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("scopes", &self.scopes)
+            .finish()
+    }
+}
+
+/// One in-progress OIDC sign-in. Single use, 10-minute TTL, never exposed.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OidcLoginFlow {
+    pub state: String,
+    pub org_id: Uuid,
+    pub nonce: String,
+    pub pkce_verifier: String,
+    pub return_to: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for OidcLoginFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OidcLoginFlow")
+            .field("state", &"<redacted>")
+            .field("org_id", &self.org_id)
+            .field("nonce", &"<redacted>")
+            .field("pkce_verifier", &"<redacted>")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
