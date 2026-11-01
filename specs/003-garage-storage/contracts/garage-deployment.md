@@ -24,7 +24,7 @@ Required keys and their development defaults:
 | `metadata_dir` | `/var/lib/garage/meta` |
 | `data_dir` | `/var/lib/garage/data` |
 | `db_engine` | `sqlite` (single-node default) |
-| `replication_mode` | `1` |
+| `replication_factor` | `1` |
 | `rpc_bind_addr` | `[::]:3901` |
 | `rpc_secret` | A development value; the README instructs operators to replace it. |
 | `s3_api.api_bind_addr` | `[::]:3900` |

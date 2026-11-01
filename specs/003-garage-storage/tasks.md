@@ -32,7 +32,7 @@ is no `tests/` crate (constitution V).
 **Purpose**: Dependency, deployment config, container entrypoint, and the migration module skeleton.
 
 - [X] T001 [P] Add `futures-util = { version = "0.3", default-features = false, features = ["std"] }` to `[dependencies]` in `Cargo.toml` (listing stream adapter per research R4)
-- [X] T002 [P] Create `deploy/garage.toml` with the contract's keys: `metadata_dir`, `data_dir`, `db_engine = "sqlite"`, `replication_mode = "1"`, `rpc_bind_addr`, a development `rpc_secret`, `s3_api.api_bind_addr = "[::]:3900"`, `s3_api.s3_region = "garage"`, `s3_api.root_domain`, `admin.api_bind_addr = "[::]:3903"`, and a development admin token
+- [X] T002 [P] Create `deploy/garage.toml` with the contract's keys: `metadata_dir`, `data_dir`, `db_engine = "sqlite"`, `replication_factor = 1`, `rpc_bind_addr`, a development `rpc_secret`, `s3_api.api_bind_addr = "[::]:3900"`, `s3_api.s3_region = "garage"`, `s3_api.root_domain`, `admin.api_bind_addr = "[::]:3903"`, and a development admin token
 - [X] T003 [P] Change the runtime stage in `Dockerfile` from `CMD ["scout"]` to `ENTRYPOINT ["scout"]` so `docker compose run --rm scout migrate-objects` works (research R13)
 - [X] T004 Create `src/migrate.rs` with module declarations and a `run_from_env` stub, declare `mod migrate;` in `src/main.rs`, and dispatch `migrate-objects` from `std::env::args()` before any Actix/worker wiring
 
