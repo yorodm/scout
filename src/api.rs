@@ -957,6 +957,11 @@ pub async fn revoke_invitation(
 pub struct CreateProjectRequest {
     pub name: String,
     pub slug: String,
+    /// An existing member of the owning organisation who becomes the project's
+    /// first owner (FR-034). The operator names the owner but never receives a
+    /// credential from this call (FR-012).
+    #[serde(default)]
+    pub initial_owner_email: Option<String>,
 }
 
 fn next_dsn_id(store: &Store) -> String {
@@ -977,12 +982,24 @@ pub async fn create_project(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let org_id = path.into_inner();
-    let (actor_id, email) = auth_org_admin(&req, &state, org_id).await?;
+    // FR-034: only the deployment operator creates projects. Organisation
+    // administrators keep every other project-level capability.
+    let (_, email) = auth_operator(&req, &state).await?;
     let name = body.name.trim();
     let slug = body.slug.trim().to_ascii_lowercase();
     if name.is_empty() || slug.is_empty() {
         return Err(ApiError::BadRequest(
             "project name and slug are required".into(),
+        ));
+    }
+    let owner_email = body
+        .initial_owner_email
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    if owner_email.is_empty() {
+        return Err(ApiError::BadRequest(
+            "initial_owner_email is required".into(),
         ));
     }
     if !slug
@@ -993,8 +1010,24 @@ pub async fn create_project(
             "slug may only contain letters, digits, hyphens, and underscores".into(),
         ));
     }
-    let host = req.connection_info().host().to_string();
     let mut store = state.store.write().await;
+    if !store.orgs.contains_key(&org_id) {
+        return Err(ApiError::NotFound("organisation not found".into()));
+    }
+    // FR-034: the initial owner must already belong to the organisation; nothing
+    // is created when the name does not resolve to a member.
+    let owner_id = match store
+        .user_by_email(owner_email)
+        .map(|user| user.id)
+        .filter(|user_id| store.org_role_for(*user_id, org_id).is_some())
+    {
+        Some(user_id) => user_id,
+        None => {
+            return Err(ApiError::BadRequest(
+                "initial_owner_email must name an existing member of this organisation".into(),
+            ));
+        }
+    };
     if store.projects.values().any(|project| {
         project.org_id == org_id && project.slug == slug && project.deleted_at.is_none()
     }) {
@@ -1022,23 +1055,7 @@ pub async fn create_project(
     store.projects_by_dsn.insert(slug, project.id);
     store
         .memberships
-        .insert((actor_id, project.id), Role::Owner);
-
-    let plaintext = format!("scout_{}", crate::auth::new_token());
-    let key_hash = crate::auth::hash_token(&plaintext);
-    let key_id = Uuid::new_v4();
-    store.keys.insert(
-        key_id,
-        IngestKey {
-            id: key_id,
-            project_id: project.id,
-            label: "Default".into(),
-            key_hash,
-            key_prefix: crate::auth::token_prefix(&plaintext, 12),
-            created_at: now,
-            revoked: false,
-        },
-    );
+        .insert((owner_id, project.id), Role::Owner);
     let (view, _) = public_project(project.clone());
     crate::audit::record(
         &mut store,
@@ -1046,13 +1063,11 @@ pub async fn create_project(
         Some(project.id),
         &email,
         "project.created",
-        Some(project.name.clone()),
+        Some(format!("{} (owner {owner_email})", project.name)),
     );
-    Ok(HttpResponse::Ok().json(json!({
-        "project": view,
-        "key": plaintext,
-        "dsn": format!("http://{plaintext}@{host}/{dsn_id}"),
-    })))
+    // FR-012: the operator never receives an ingest credential. The named owner
+    // signs in and creates the first key with `POST /api/projects/{id}/keys`.
+    Ok(HttpResponse::Ok().json(json!({ "project": view })))
 }
 
 #[derive(Deserialize, Default)]

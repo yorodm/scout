@@ -2632,24 +2632,43 @@ async fn operator_provisions_an_org_and_its_initial_admin() {
     .await;
     assert_eq!(status, StatusCode::GONE);
 
-    // The initial admin signs in and creates the first project.
+    // The initial admin signs in; the operator still creates the first project.
     let (status, _) = login_with(&app, "admin@beta.test", "beta-admin-pw-1").await;
     assert_eq!(status, StatusCode::OK);
     let (status, body) = call_json(
         &app,
         post_json(
             &format!("/api/orgs/{org_id}/projects"),
-            &admin_token,
-            json!({ "name": "billing", "slug": "billing" }),
+            operator_token,
+            json!({
+                "name": "billing",
+                "slug": "billing",
+                "initial_owner_email": "admin@beta.test",
+            }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "create project failed: {body}");
     assert_eq!(body["project"]["retention_days"], 30);
     assert_eq!(body["project"]["confidence_threshold"], 0.5);
+    // FR-012: the operator never receives an ingest credential.
+    assert!(body.get("key").is_none(), "creation returned a key: {body}");
+    assert!(body.get("dsn").is_none(), "creation returned a dsn: {body}");
     let project_id = Uuid::parse_str(body["project"]["id"].as_str().unwrap()).unwrap();
     let dsn = body["project"]["dsn_id"].as_str().unwrap().to_string();
-    let key = body["key"].as_str().unwrap().to_string();
+
+    // The named owner creates the first key and is the only holder of it.
+    let (status, key_body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/projects/{project_id}/keys"),
+            &admin_token,
+            json!({ "label": "Default" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create key failed: {key_body}");
+    let key = key_body["key"].as_str().unwrap().to_string();
 
     // The freshly created key ingests unmodified Sentry traffic.
     let (status, body) = call_json(
@@ -2689,7 +2708,66 @@ async fn operator_provisions_an_org_and_its_initial_admin() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 
+    // FR-034: organisation administrators cannot create projects either.
+    let (status, _) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/projects"),
+            &admin_token,
+            json!({
+                "name": "nope",
+                "slug": "nope",
+                "initial_owner_email": "admin@beta.test",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The named owner must already belong to the organisation.
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/projects"),
+            operator_token,
+            json!({
+                "name": "stray",
+                "slug": "stray",
+                "initial_owner_email": "ops@test.local",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "non-member owner: {body}");
+
+    // The owner must be named at all.
+    let (status, _) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/projects"),
+            operator_token,
+            json!({ "name": "stray", "slug": "stray" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     let store = state.store.read().await;
+    assert!(
+        !store
+            .projects
+            .values()
+            .any(|project| project.slug == "stray"),
+        "a rejected creation must leave nothing behind"
+    );
+    let owner = store
+        .user_by_email("admin@beta.test")
+        .map(|user| user.id)
+        .expect("the initial owner");
+    assert_eq!(
+        store.role_for(owner, project_id),
+        Some(crate::models::Role::Owner)
+    );
     for action in [
         "organisation.created",
         "org_admin_setup.issued",
