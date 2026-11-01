@@ -88,14 +88,15 @@ list defaults to unresolved issues, matching Sentry.
 ## 4. Tag values (User Story 2)
 
 ```sh
-curl -s http://127.0.0.1:8080/api/0/projects/<org>/<project>/tags/release/values/ \
+curl -s http://127.0.0.1:8080/api/0/projects/<org>/<project>/tags/service/values/ \
   -H "authorization: Bearer <TOKEN>"
 ```
 
-Expected: `[{"name":"web@1.0.0"},{"name":"web@1.1.0"}]` for seeded data, ascending. With
-`?query=1.1` only `web@1.1.0` is returned. The issue-scoped path
-`/api/0/organizations/<org>/issues/<issue>/tags/release/values/` returns the values for that issue
-only, and a key with no values returns `[]`.
+Expected: the distinct values that project's issues carry, ascending — for the seeded demo project
+`service` yields `[{"name":"checkout-web"}]` and `region` yields `[{"name":"eu-west-1"}]`. With
+`?query=check` only matching values are returned. The issue-scoped path
+`/api/0/organizations/<org>/issues/<issue>/tags/service/values/` returns the values for that issue
+only, and a key with no values returns `[]` (for example `release` on the demo project).
 
 ## 5. Scopes and denial paths (User Story 3)
 
@@ -171,3 +172,21 @@ In the same run, exercise the native surface and confirm nothing changed:
 - `GET /api/projects/{project_id}/issues` and the existing UI screens behave as before.
 - The new token screen is the only UI addition; login, issues, logs, search, members, and settings
   are unchanged.
+
+## Live validation record (2026-10-31)
+
+Run against `cargo run` with `SCOUT_DEMO_MODE=true` and `SCOUT_SENTRY_API_COMPAT_ENABLED=true`,
+using the demo organisation `acme` and project `scout-web`:
+
+| Step | Result |
+|---|---|
+| `POST /api/me/tokens` | `201` in 2.1 ms; prefix `scout_pat_K0Y0`, plaintext returned once |
+| `GET /api/0/.../issues/` | `200` in 6.5 ms; `SCOUTWEB-1`, `unresolved`, `userCount` 0, `statusDetails` `{}`; `Link` with `results="false"`, `X-Hits: 1` |
+| `PUT .../issues/?id=<id>` | `200` in 6.9 ms; `status` became `resolved` and the native API/UI reflect it immediately (SC-006) |
+| `GET .../tags/service/values/` | `200` with the project's distinct values |
+| `DELETE .../issues/` | `501` with the preserved-history `detail` |
+| `DELETE /api/me/tokens/<id>` | `204`; the next `/api/0/` call returned `401` `{"detail":"Invalid token"}` |
+
+The create → copy → revoke sequence completed over HTTP in well under a second. SC-009's one-minute
+human timing in the browser was not measured; the `#/tokens` screen implements the same flow with a
+one-time copy panel and a confirmation prompt.

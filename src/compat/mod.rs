@@ -11,13 +11,26 @@ pub mod projection;
 pub mod query;
 pub mod tokens;
 
-use actix_web::web;
+use actix_web::error::QueryPayloadError;
+use actix_web::{http::header::ContentType, web, HttpRequest, HttpResponse};
+use serde_json::json;
+
+/// Convert query-string decoding failures into the compatibility envelope so no
+/// extractor error escapes as a non-JSON response (FR-021).
+fn query_error(error: QueryPayloadError, _req: &HttpRequest) -> actix_web::Error {
+    let body = json!({ "detail": format!("invalid query string: {error}") }).to_string();
+    let response = HttpResponse::BadRequest()
+        .content_type(ContentType::json())
+        .body(body);
+    actix_web::error::InternalError::from_response(error, response).into()
+}
 
 /// Register the compatibility routes. The scope is always registered; when the
 /// feature is disabled each handler answers `404` before authentication.
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/0")
+            .app_data(web::QueryConfig::default().error_handler(query_error))
             // Issues
             .route(
                 "/projects/{org}/{project}/issues",

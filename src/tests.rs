@@ -3324,8 +3324,8 @@ async fn compat_pagination_is_exactly_once_and_query_bound() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(!body["detail"].as_str().unwrap_or_default().is_empty());
 
-    // limit is clamped, never an error.
-    for (limit, expected) in [("0", 1), ("-3", 1), ("500", 100), ("abc", 100)] {
+    // limit is clamped, never an error; zero and negatives use the default.
+    for (limit, expected) in [("0", 100), ("-3", 100), ("500", 100), ("abc", 100)] {
         let uri = format!("{base}&limit={limit}");
         let (status, page, _) = compat_call(&app, get(&uri, &token)).await;
         assert_eq!(status, StatusCode::OK, "limit={limit}");
@@ -3714,19 +3714,51 @@ async fn compat_surface_is_off_by_default() {
     let state = state_for_with("https://scout.example", 256, false).await;
     let app = init_app_with_state(state.clone()).await;
     let token = compat_token(&state, "demo@scout.local").await;
-    let paths = [
-        format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/issues/"),
-        format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/tags/release/values/"),
-        format!("/api/0/organizations/{COMPAT_ORG}/releases/web@1.0.0/commitfiles/"),
-        format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/servicehooks/"),
-        format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/users/"),
-        format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/spike-protection/"),
-        format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/"),
+    let base = format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}");
+    let issue = Uuid::new_v4();
+    let requests = vec![
+        get(&format!("{base}/issues/"), &token),
+        put_json(
+            &format!("{base}/issues/"),
+            &token,
+            json!({ "status": "resolved" }),
+        ),
+        delete(&format!("{base}/issues/"), &token),
+        get(&format!("{base}/tags/release/values/"), &token),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/issues/{issue}/tags/release/values/"),
+            &token,
+        ),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/releases/web@1.0.0/commitfiles/"),
+            &token,
+        ),
+        get(&format!("{base}/servicehooks/"), &token),
+        get(&format!("{base}/servicehooks/hook-1/"), &token),
+        get(&format!("{base}/users/"), &token),
+        get(&format!("{base}/spike-protection/"), &token),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/"),
+            &token,
+        ),
+        post_json(
+            &format!(
+                "/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/inst-1/external-issues/"
+            ),
+            &token,
+            json!({}),
+        ),
+        delete(
+            &format!(
+                "/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/inst-1/external-issues/ext-1/"
+            ),
+            &token,
+        ),
     ];
-    for path in paths {
-        let (status, body, _) = compat_call(&app, get(&path, &token)).await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
-        assert_eq!(body["detail"], "Not Found", "{path}");
+    for req in requests {
+        let (status, body, _) = compat_call(&app, req).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["detail"], "Not Found");
     }
 }
 
@@ -3882,5 +3914,246 @@ async fn sc_007_issue_list_and_tag_values_stay_under_500ms() {
             p95 < Duration::from_millis(500),
             "p95 {p95:?} exceeds the 500 ms budget"
         );
+    }
+}
+
+#[actix_web::test]
+async fn compat_invalid_ids_match_nothing() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+
+    // A malformed id must not degrade into an unrestricted list.
+    let (status, body, headers) = compat_call(
+        &app,
+        get(
+            &format!("{}?id=not-a-uuid", issues_uri(COMPAT_PROJECT)),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+    assert_eq!(header_value(&headers, "x-hits"), "0");
+
+    // Mixed valid and invalid ids keep only the valid ones.
+    let (status, listed, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let valid = listed
+        .as_array()
+        .and_then(|issues| issues.first())
+        .and_then(|issue| issue["id"].as_str())
+        .expect("seeded issue")
+        .to_string();
+    let (status, filtered, _) = compat_call(
+        &app,
+        get(
+            &format!("{}?id={valid}&id=garbage", issues_uri(COMPAT_PROJECT)),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let filtered = filtered.as_array().expect("array");
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["id"].as_str(), Some(valid.as_str()));
+
+    // A mutation addressed only with malformed ids changes nothing.
+    let before = state
+        .store
+        .read()
+        .await
+        .issues
+        .values()
+        .filter(|issue| issue.state == crate::models::IssueState::Open)
+        .count();
+    let (status, body, _) = compat_call(
+        &app,
+        put_json(
+            &format!("{}?id=garbage", issues_uri(COMPAT_PROJECT)),
+            &token,
+            json!({ "status": "resolved" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+    let after = state
+        .store
+        .read()
+        .await
+        .issues
+        .values()
+        .filter(|issue| issue.state == crate::models::IssueState::Open)
+        .count();
+    assert_eq!(before, after, "no issue may change state");
+}
+
+#[actix_web::test]
+async fn compat_sorts_hashes_and_ignored_parameters() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    let ids = seed_synthetic_issues(&state, 2, "sorts").await;
+    let (first_seen_a, last_seen_a) = {
+        let mut store = state.store.write().await;
+        let base = chrono::Utc::now();
+        let mut a = store.issues.get(&ids[0]).cloned().expect("issue a");
+        a.count = 5;
+        a.last_seen = base - chrono::Duration::hours(1);
+        a.first_seen = base - chrono::Duration::hours(3);
+        a.fingerprint = "hash-a".into();
+        a.title = "issue A".into();
+        let (first_a, last_a) = (a.first_seen, a.last_seen);
+        store.issues.insert(a.id, a);
+        let mut b = store.issues.get(&ids[1]).cloned().expect("issue b");
+        b.count = 9;
+        b.last_seen = base - chrono::Duration::hours(2);
+        b.first_seen = base - chrono::Duration::hours(1);
+        b.fingerprint = "hash-b".into();
+        b.title = "issue B".into();
+        store.issues.insert(b.id, b);
+        (first_a, last_a)
+    };
+    let _ = (first_seen_a, last_seen_a);
+
+    let base_uri =
+        format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/issues/?query=synthetic:sorts");
+    for (sort, expected_title) in [
+        ("date", "issue A"),
+        ("new", "issue B"),
+        ("freq", "issue B"),
+        ("user", "issue B"),
+        ("trends", "issue A"),
+        ("recommended", "issue A"),
+    ] {
+        let uri = format!("{base_uri}&sort={sort}");
+        let (status, body, _) = compat_call(&app, get(&uri, &token)).await;
+        assert_eq!(status, StatusCode::OK, "sort={sort}");
+        let first = body
+            .as_array()
+            .and_then(|issues| issues.first())
+            .expect("at least one issue");
+        assert_eq!(first["title"], expected_title, "sort={sort}");
+    }
+
+    // hashes filters on the stored fingerprint; unknown hashes yield an empty page.
+    let (status, body, _) =
+        compat_call(&app, get(&format!("{base_uri}&hashes=hash-a"), &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body.as_array().expect("array");
+    assert_eq!(body.len(), 1);
+    assert_eq!(body[0]["title"], "issue A");
+    let (status, body, _) =
+        compat_call(&app, get(&format!("{base_uri}&hashes=nope"), &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+
+    // statsPeriod and shortIdLookup are accepted and ignored.
+    let (status, tolerated, headers) = compat_call(
+        &app,
+        get(
+            &format!("{base_uri}&statsPeriod=14d&shortIdLookup=0"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tolerated.as_array().unwrap().len(), 2);
+    assert_eq!(header_value(&headers, "x-hits"), "2");
+}
+
+#[actix_web::test]
+async fn compat_tag_values_are_capped_at_one_thousand() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    let ids = seed_synthetic_issues(&state, 1, "bulk").await;
+    {
+        let mut store = state.store.write().await;
+        let template = store.issues.get(&ids[0]).cloned().expect("seeded issue");
+        for index in 0..1_005usize {
+            let mut issue = template.clone();
+            issue.id = Uuid::new_v4();
+            issue.number = store.next_issue_number(issue.project_id);
+            issue.tags = json!({ "bulk": format!("value-{index:04}") });
+            store.issues.insert(issue.id, issue);
+        }
+    }
+    let uri = format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/tags/bulk/values/?limit=100");
+    let mut cursor: Option<String> = None;
+    let mut values: Vec<String> = Vec::new();
+    loop {
+        let request_uri = match &cursor {
+            Some(value) => format!("{uri}&cursor={value}"),
+            None => uri.clone(),
+        };
+        let (status, body, headers) = compat_call(&app, get(&request_uri, &token)).await;
+        assert_eq!(status, StatusCode::OK);
+        values.extend(
+            body.as_array()
+                .expect("array")
+                .iter()
+                .map(|value| value["name"].as_str().unwrap().to_string()),
+        );
+        cursor = link_cursor(header_value(&headers, "link"));
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(values.len(), 1_000, "the distinct set is capped at 1,000");
+    let mut unique = values.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 1_000);
+}
+
+#[actix_web::test]
+async fn compat_disabled_owner_token_is_rejected() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "viewer@scout.local").await;
+    {
+        let mut store = state.store.write().await;
+        let user = store
+            .users
+            .values_mut()
+            .find(|user| user.email == "viewer@scout.local")
+            .expect("seeded viewer");
+        user.disabled_at = Some(chrono::Utc::now());
+    }
+    let (status, body, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["detail"], "Invalid token");
+}
+
+#[actix_web::test]
+async fn compat_query_decode_errors_use_the_detail_envelope() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    // Whatever the query decoder does with these bytes, the response must stay
+    // JSON: either a served page or the compatibility detail envelope.
+    for query in ["limit=%FF", "limit=%", "limit=%GG", "%FF=1", "cursor=%FF"] {
+        let uri = format!("{}?{}", issues_uri(COMPAT_PROJECT), query);
+        let res = call(&app, get(&uri, &token)).await;
+        let status = res.status();
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = test::read_body(res).await;
+        assert!(
+            content_type.contains("application/json"),
+            "{query} -> {status} ({content_type})"
+        );
+        let value: Value = serde_json::from_slice(&body).expect("JSON body");
+        if status == StatusCode::BAD_REQUEST {
+            assert!(value["detail"].is_string(), "{query}: {value}");
+        } else {
+            assert_eq!(status, StatusCode::OK, "{query}");
+        }
     }
 }

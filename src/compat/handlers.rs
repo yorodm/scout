@@ -45,10 +45,11 @@ fn all<'a>(params: &'a [(String, String)], key: &str) -> Vec<&'a str> {
 }
 
 fn parse_limit(params: &[(String, String)]) -> usize {
-    param(params, "limit")
-        .and_then(|raw| raw.trim().parse::<i64>().ok())
-        .map(|value| value.clamp(1, 100) as usize)
-        .unwrap_or(100)
+    match param(params, "limit").and_then(|raw| raw.trim().parse::<i64>().ok()) {
+        Some(value) if value > 0 => value.min(100) as usize,
+        // Absent, non-numeric, zero, and negative values fall back to the default.
+        _ => 100,
+    }
 }
 
 fn values_page(
@@ -162,6 +163,9 @@ pub async fn list_issues(
         .collect();
     let filter = query::parse_filter(Some(query_text), &ids, &hashes);
     let limit = parse_limit(&params);
+    // Supplied ids that are not valid identifiers match nothing; they must never
+    // fall back to an unrestricted query (FR-009).
+    let ids_match_nothing = !ids.is_empty() && filter.ids.is_empty();
     let fingerprint = cursor::fingerprint(&[
         query_text,
         sort.as_str(),
@@ -171,7 +175,9 @@ pub async fn list_issues(
         &project.id.to_string(),
     ]);
 
-    let mut issues: Vec<Issue> = {
+    let mut issues: Vec<Issue> = if ids_match_nothing {
+        Vec::new()
+    } else {
         let store = state.store.read().await;
         store
             .issues
@@ -256,6 +262,10 @@ pub async fn mutate_issues(
     if !ids.is_empty() {
         // Explicit ids are addressed regardless of their current state.
         filter.states = None;
+        // Invalid identifiers match nothing rather than every issue (FR-013).
+        if filter.ids.is_empty() {
+            return Ok(HttpResponse::Ok().json(Vec::<projection::SentryIssue>::new()));
+        }
     }
 
     let now = Utc::now();
