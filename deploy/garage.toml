@@ -1,9 +1,10 @@
 # Single-node Garage configuration for the development compose stack.
 #
-# Replace rpc_secret and admin_token before exposing this anywhere, and see
-# https://garagehq.deuxfleurs.fr/documentation/quick-start/ for cluster layout,
-# bucket, and access-key setup (the compose file intentionally does not automate
-# those steps).
+# Replace rpc_secret and admin_token before exposing this anywhere. The compose
+# file starts Garage with --single-node --default-bucket and the
+# GARAGE_DEFAULT_* variables, so the layout, bucket, and access key are created
+# automatically; see https://garagehq.deuxfleurs.fr/documentation/quick-start/
+# for the manual fallback on older versions or custom layouts.
 
 metadata_dir = "/var/lib/garage/meta"
 data_dir = "/var/lib/garage/data"

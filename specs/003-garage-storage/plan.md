@@ -127,6 +127,9 @@ Re-evaluated after `research.md`, `data-model.md`, `contracts/`, and `quickstart
   "builder error"; the closed-port probe test now asserts that plain HTTP is allowed.
 - Docker gates T030/T033/T040: operator-run on 2026-11-01; `docker compose` started Garage, PostgreSQL,
   and Scout, and Scout reached both the object store and the metadata database.
+- Convergence T048: the Garage service comments in `docker-compose.yml` and `deploy/garage.toml` now
+  describe `--single-node --default-bucket` automatic provisioning; no stale "compose does not automate"
+  text remains.
 - Convergence T042–T044: README now documents replacing the Garage `rpc_secret`/`admin_token` development
   values and the loopback-only admin port; `AWS_REGION` is required for S3 destination settings; migration
   ignores keys outside `raw/` and `attachments/`. `cargo test`: 123 passed, 0 failed, 2 ignored.

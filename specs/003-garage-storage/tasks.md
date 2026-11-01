@@ -259,3 +259,9 @@ Task: "503 storage-failure regression test in src/tests.rs"
 - [X] T045 Start the shipped Garage service with `/garage server --single-node --default-bucket` and pass `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, and `GARAGE_DEFAULT_BUCKET` from the existing compose variables in `docker-compose.yml`, per FR-002 (partial)
 - [X] T046 Align `spec.md`, `plan.md`, `research.md`, `data-model.md`, `contracts/garage-deployment.md`, `quickstart.md`, `README.md`, and `architecture.md` with Garage's automatic provisioning while keeping manual CLI steps as the documented fallback, per FR-002 and FR-010 (partial)
 - [X] T047 Extend `docs_describe_stages_without_external_tooling_or_minio_setup` in `src/migrate.rs` to assert the automatic provisioning flags and `GARAGE_DEFAULT_*` variables are documented, per FR-002 (partial)
+
+---
+
+## Phase 11: Convergence
+
+- [X] T048 Update the Garage service comments in `docker-compose.yml` and `deploy/garage.toml` to describe the `--single-node --default-bucket` automatic provisioning instead of saying the compose file does not automate layout, bucket, or key setup, per FR-002 (contradicts)
