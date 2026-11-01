@@ -72,15 +72,15 @@ millions of objects. The migration is operator-run, offline, and re-runnable.
 | II. Raw payloads immutable and authoritative | PASS | The source store is never modified or deleted. Migration copies into Garage before cutover, so the destination is not the live store while differences are repaired; no authoritative payload is rewritten. |
 | III. Project-scoped, server-side authorisation | PASS | No API or authorisation change; the migration touches bytes only. |
 | IV. One deployment unit, minimal moving parts | PASS | The migration is a mode of the existing binary; Garage replaces MinIO in the same single compose unit; no new services for the application. |
-| V. Evidence over assumption: test the real paths | **BLOCKED** | Migration logic is covered in-crate against real `ObjectStore` implementations, but the mandated compose smoke test (T030/T033) has not run here, and the per-FR checks for FR-009/FR-015/FR-016/FR-017 are planned (T036–T038) but not implemented. This gate is not satisfied; see "Open gates". |
+| V. Evidence over assumption: test the real paths | **BLOCKED** | Migration logic is covered in-crate against real `ObjectStore` implementations; the per-FR checks for FR-009/FR-010/FR-015/FR-016/FR-017 are implemented (T036–T038) and pass under `cargo test`. The mandated compose smoke test (T030/T033) still has not run here, so this gate remains BLOCKED. |
 | Security constraints | PASS | Credentials come from environment variables; no secret is logged; the migration never prints object content. |
 | Performance/reliability constraints | PASS | Ingest limits and `503` storage-failure behaviour are unchanged; startup now proves write access to the bucket before serving. |
 | Compatibility and Scope (v1.1.0) | PASS | Garage is reached through the S3 interface; no provider-specific I/O and no widening of the product surface. |
 | Development Workflow & Quality Gates | PASS | Slices end with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test`; docs and quickstart updated in the same feature. |
 
-**Gate result: BLOCKED on Principle V.** No principle is knowingly violated, but the compose smoke test
-has not run and the per-FR executable checks are planned (T036–T038) rather than implemented. This plan
-cannot claim compliance until those gates run; see "Open gates".
+**Gate result: BLOCKED on Principle V.** No principle is knowingly violated. The per-FR executable checks are
+implemented and pass under `cargo test`, but the mandated compose smoke test has not run. This plan cannot
+claim compliance until T030/T033/T040 run; see "Open gates".
 
 ## Post-Design Constitution Re-check
 
@@ -91,9 +91,9 @@ Re-evaluated after `research.md`, `data-model.md`, `contracts/`, and `quickstart
   repairing a differing copy cannot rewrite an authoritative payload. **PASS**
 - **III**: No API, session, or authorisation change. **PASS**
 - **IV**: One binary (entrypoint change only), one compose unit; no new service. **PASS**
-- **V**: In-memory object-store tests exercise the real trait, but the Garage and non-Garage compose
-  paths have not run, and the per-FR checks for FR-009/FR-015/FR-016/FR-017 are planned (T036–T038) but
-  not implemented. **BLOCKED** — see "Open gates".
+- **V**: In-memory object-store tests exercise the real trait and the per-FR checks (T036–T038) now pass
+  under `cargo test`, but the Garage and non-Garage compose paths have not run. **BLOCKED** — see
+  "Open gates".
 - **Security**: Secrets only from the environment; never logged; the probe uses a unique sentinel and
   deletes it. **PASS**
 - **Reliability**: Startup proves write access before serving; ingest keeps returning `503` on storage
@@ -109,9 +109,21 @@ gates run.
 | Gate | Status | Unblock condition |
 |---|---|---|
 | Principle V — compose-based object-store smoke test | NOT RUN | Execute quickstart steps 1–6 on a Docker host (T030/T033). |
-| Principle V — executable check per FR | PLANNED (T036–T038) | Implement T036 (FR-009/FR-010/FR-015 doc assertions), T037 (FR-016 dispatch isolation), and T038 (FR-017 no service contact). |
+| Principle V — executable check per FR | DONE (T036–T038) | Implemented and verified by `cargo test`; SC-005's 60 s bound is exercised by the ignored blackholed-endpoint test. |
 | SC-007 — non-Garage provider regression | NOT RUN | Complete T040: repeat quickstart steps 3–4 and the byte-identity check against MinIO or another provider. |
 | SC-001/SC-003 — clean-host quick start and verified-migration counts | NOT RUN | Complete quickstart steps 1–6 and record the verified counts; SC-001 has no time bound. |
+
+### Verification results (2026-11-01)
+
+- `cargo fmt --all --check`: clean.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `cargo test`: 121 passed, 0 failed, 2 ignored (the blackholed-endpoint probe and an existing latency test).
+- `cargo test verify_writable_times_out_on_blackholed_endpoint -- --ignored`: passed in 10.04 s, within
+  the 60 s bound.
+- Fixed while implementing T039: `AmazonS3Builder::with_client_options` replaces previously set options,
+  so `allow_http` now lives on `ClientOptions`. Without this, every `http://` deployment failed with
+  "builder error"; the closed-port probe test now asserts that plain HTTP is allowed.
+- Not run: the Docker gates (T030, T033, T040); this workspace has no Docker CLI.
 
 ## Project Structure
 

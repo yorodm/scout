@@ -28,6 +28,19 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 use tracing_subscriber::EnvFilter;
 
+/// The mode selected by the command line. Kept free of server types so the
+/// dispatch can be tested without wiring Actix, workers, or retention.
+pub(crate) fn selected_mode<I, S>(args: I) -> Option<&'static str>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    args.into_iter()
+        .nth(1)
+        .filter(|arg| arg.as_ref() == crate::migrate::MODE)
+        .map(|_| crate::migrate::MODE)
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()
@@ -36,7 +49,7 @@ async fn main() -> std::io::Result<()> {
         )
         .init();
 
-    if std::env::args().nth(1).as_deref() == Some(crate::migrate::MODE) {
+    if selected_mode(std::env::args()).is_some() {
         return match crate::migrate::run_from_env().await {
             Ok(0) => Ok(()),
             Ok(_) => std::process::exit(1),
@@ -166,4 +179,17 @@ async fn main() -> std::io::Result<()> {
     .bind(("0.0.0.0", port))?
     .run()
     .await
+}
+
+#[cfg(test)]
+mod mode_tests {
+    use super::selected_mode;
+    use crate::migrate::MODE;
+
+    #[test]
+    fn only_the_migration_argument_selects_the_migration_mode() {
+        assert_eq!(selected_mode(["scout", "migrate-objects"]), Some(MODE));
+        assert_eq!(selected_mode(["scout"]), None);
+        assert_eq!(selected_mode(["scout", "serve"]), None);
+    }
 }

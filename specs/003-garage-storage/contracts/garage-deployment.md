@@ -66,7 +66,7 @@ The operator copies the key id and secret printed by `garage key create` into
 | `SCOUT_S3_BUCKET` | `scout-raw` |
 | `AWS_ACCESS_KEY_ID` | Operator-created Garage key id |
 | `AWS_SECRET_ACCESS_KEY` | Operator-created Garage secret |
-| `AWS_REGION` | `garage` |
+| `AWS_REGION` | `SCOUT_S3_REGION` (defaults to `garage`) |
 
 Plain HTTP and path-style addressing are used; the shipped stack does not require TLS or wildcard DNS.
 

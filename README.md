@@ -395,7 +395,7 @@ that remains the operator's decision.
 | `SCOUT_MIGRATE_SOURCE_ACCESS_KEY_ID` | Source access key |
 | `SCOUT_MIGRATE_SOURCE_SECRET_ACCESS_KEY` | Source secret |
 | `SCOUT_MIGRATE_SOURCE_REGION` | Source region |
-| `SCOUT_S3_ENDPOINT`, `SCOUT_S3_BUCKET` | Destination (Garage) endpoint and bucket |
+| `SCOUT_S3_ENDPOINT`, `SCOUT_S3_BUCKET` | Destination object store (Garage by default) endpoint and bucket |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | Destination credentials and region |
 
 ```sh
@@ -428,12 +428,12 @@ docker compose run --rm \
 The final line is the summary:
 
 ```text
-migrate: summary found=1200 copied=298 skipped=900 verified=1198 mismatched=1 failed=2 elapsed=42s
+migrate: summary found=1200 copied=298 skipped=900 verified=1198 mismatched=1 failed=2 elapsed_ms=42000
 ```
 
-`copied` counts only objects re-read and verified; a failed verification is counted in `failed` and
-`mismatched`, never in `copied`. Every failure is logged with its key. Exit `0` means
-`found == verified` and `failed == 0`.
+`copied` counts only objects re-read and verified; a failed verification is counted in `failed` (and
+`mismatched` when the bytes differ), never in `copied`. Every failure is logged with its key. Exit `0`
+means `found == verified` and `failed == 0`.
 
 ### Stage 2 — cutover with scheduled downtime
 

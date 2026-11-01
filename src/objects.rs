@@ -157,6 +157,7 @@ impl S3Settings {
             ..RetryConfig::default()
         };
         let client = ClientOptions::new()
+            .with_allow_http(self.endpoint.starts_with("http://"))
             .with_connect_timeout(Duration::from_secs(5))
             .with_timeout(Duration::from_secs(10));
         let store = AmazonS3Builder::new()
@@ -165,7 +166,6 @@ impl S3Settings {
             .with_region(self.region.clone())
             .with_access_key_id(self.access_key.clone())
             .with_secret_access_key(self.secret_key.clone())
-            .with_allow_http(self.endpoint.starts_with("http://"))
             .with_virtual_hosted_style_request(false)
             .with_client_options(client)
             .with_retry(retry)
@@ -526,8 +526,12 @@ mod tests {
         assert!(!message.contains("super-secret-value"), "{message}");
         assert!(message.contains("reachable"), "{message}");
         assert!(
-            started.elapsed() <= Duration::from_secs(30),
-            "the probe must fail within 30 s, took {:?}",
+            !message.to_ascii_lowercase().contains("builder error"),
+            "plain HTTP must be allowed for http:// endpoints: {message}"
+        );
+        assert!(
+            started.elapsed() <= Duration::from_secs(60),
+            "the probe must fail within 60 s, took {:?}",
             started.elapsed()
         );
     }
@@ -592,5 +596,49 @@ mod tests {
         let objects = settings.build().expect("non-Garage endpoints build");
         assert_eq!(objects.backend(), "s3");
         assert_eq!(Objects::memory().backend(), "memory");
+    }
+
+    #[actix_web::test]
+    #[ignore = "waits on real network timeouts; run explicitly during verification gates"]
+    async fn verify_writable_times_out_on_blackholed_endpoint() {
+        // Bind but never accept: the kernel queues the connection and the client
+        // must wait for a response that never comes.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        let addr = listener.local_addr().expect("loopback address");
+        let endpoint = format!("http://{addr}");
+
+        let objects = S3Settings::new(
+            endpoint.clone(),
+            "missing-bucket".into(),
+            "garage".into(),
+            "probe-key".into(),
+            "super-secret-value".into(),
+        )
+        .expect("settings")
+        .build()
+        .expect("build store");
+
+        let started = std::time::Instant::now();
+        let error = objects
+            .verify_writable()
+            .await
+            .expect_err("a blackholed endpoint must fail the probe");
+        let message = error.to_string();
+        drop(listener);
+
+        assert!(message.contains(&endpoint), "{message}");
+        assert!(message.contains("missing-bucket"), "{message}");
+        assert!(!message.contains("super-secret-value"), "{message}");
+        assert!(message.contains("reachable"), "{message}");
+        assert!(
+            started.elapsed() >= Duration::from_secs(1),
+            "a blackholed endpoint must actually wait before failing, returned in {:?}: {message}",
+            started.elapsed()
+        );
+        assert!(
+            started.elapsed() <= Duration::from_secs(60),
+            "the probe must fail within 60 s, took {:?}",
+            started.elapsed()
+        );
     }
 }

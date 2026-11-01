@@ -10,70 +10,70 @@
 
 ## Requirement Completeness
 
-- [ ] CHK001 Are requirements defined for both a first-time Garage deployment and a migration of an existing deployment? [Completeness, Spec §FR-001, §FR-007]
-- [ ] CHK002 Are the Garage bootstrap prerequisites (cluster layout, bucket, access key) fully enumerated, including their order and failure behaviour? [Completeness, Spec §FR-002]
-- [ ] CHK003 Are the migration command's required inputs and defaults documented for both the source and destination stores? [Completeness, Spec §FR-003, §FR-014]
-- [ ] CHK004 Are the object classes in scope (raw payloads, attachments) and out of scope (`__scout/` sentinels) explicitly enumerated? [Completeness, Spec §FR-012, §Key Entities]
-- [ ] CHK005 Are all summary counters defined together with their relationships (`mismatched` ⊆ `failed`, `verified` = `skipped` + `copied`)? [Completeness, Spec §FR-012, §Key Entities]
-- [ ] CHK006 Are all operator-facing documentation obligations (quick start, deployment notes, environment examples, stage separation, downtime) explicitly listed? [Completeness, Spec §FR-009, §FR-010]
+- [x] CHK001 Are requirements defined for both a first-time Garage deployment and a migration of an existing deployment? [Completeness, Spec §FR-001, §FR-007]
+- [x] CHK002 Are the Garage bootstrap prerequisites (cluster layout, bucket, access key) fully enumerated, including their order and failure behaviour? [Completeness, Spec §FR-002]
+- [x] CHK003 Are the migration command's required inputs and defaults documented for both the source and destination stores? [Completeness, Spec §FR-003, §FR-014]
+- [x] CHK004 Are the object classes in scope (raw payloads, attachments) and out of scope (`__scout/` sentinels) explicitly enumerated? [Completeness, Spec §FR-012, §Key Entities]
+- [x] CHK005 Are all summary counters defined together with their relationships (`mismatched` ⊆ `failed`, `verified` = `skipped` + `copied`)? [Completeness, Spec §FR-012, §Key Entities]
+- [x] CHK006 Are all operator-facing documentation obligations (quick start, deployment notes, environment examples, stage separation, downtime) explicitly listed? [Completeness, Spec §FR-009, §FR-010]
 
 ## Requirement Clarity
 
-- [ ] CHK007 Is "actionable message" defined by observable content rather than by adjective? [Clarity, Spec §FR-005, §SC-005]
-- [ ] CHK008 Is the startup failure bound quantified with a single unambiguous value? [Clarity, Spec §SC-005]
-- [ ] CHK009 Is "safe to re-run and resumable" defined in terms of observable skip, overwrite, and verification outcomes? [Clarity, Spec §FR-013]
-- [ ] CHK010 Is "no external object-storage tooling" scoped to the copy step rather than to the whole deployment setup? [Clarity, Spec §FR-015]
-- [ ] CHK011 Is "verified" defined precisely enough to distinguish skipped, newly copied, overwritten, failed, and unreadable objects? [Clarity, Spec §FR-012, §FR-013, §SC-008]
+- [x] CHK007 Is "actionable message" defined by observable content rather than by adjective? [Clarity, Spec §FR-005, §SC-005]
+- [X] CHK008 Is the startup failure bound quantified with a single unambiguous value? [Clarity, Spec §SC-005]
+- [X] CHK009 Is "safe to re-run and resumable" defined in terms of observable skip, overwrite, and verification outcomes? [Clarity, Spec §FR-013]
+- [X] CHK010 Is "no external object-storage tooling" scoped to the copy step rather than to the whole deployment setup? [Clarity, Spec §FR-015]
+- [X] CHK011 Is "verified" defined precisely enough to distinguish skipped, newly copied, overwritten, failed, and unreadable objects? [Clarity, Spec §FR-012, §FR-013, §SC-008]
 
 ## Requirement Consistency
 
-- [ ] CHK012 Do FR-003's no-new-configuration rule and FR-014's migration source variables agree on scope? [Consistency, Spec §FR-003, §FR-014]
-- [ ] CHK013 Do FR-011, FR-012, and FR-014 agree that the migration destination is provider-neutral with Garage as the default? [Consistency, Spec §FR-011, §FR-012, §FR-014]
-- [ ] CHK014 Do the `__scout/` exclusion rules agree across FR-012, SC-003, SC-008, and the edge cases? [Consistency, Spec §FR-012, §SC-003, §SC-008, §Edge Cases]
-- [ ] CHK015 Are the success criteria consistent with the acceptance scenarios in US1–US4? [Consistency, Spec §User Scenarios, §Success Criteria]
-- [ ] CHK016 Are exit-status requirements consistent across FR-013, FR-014, and SC-008, including the repaired-mismatch case? [Consistency, Spec §FR-013, §FR-014, §SC-008]
+- [X] CHK012 Do FR-003's no-new-configuration rule and FR-014's migration source variables agree on scope? [Consistency, Spec §FR-003, §FR-014]
+- [X] CHK013 Do FR-011, FR-012, and FR-014 agree that the migration destination is provider-neutral with Garage as the default? [Consistency, Spec §FR-011, §FR-012, §FR-014]
+- [X] CHK014 Do the `__scout/` exclusion rules agree across FR-012, SC-003, SC-008, and the edge cases? [Consistency, Spec §FR-012, §SC-003, §SC-008, §Edge Cases]
+- [X] CHK015 Are the success criteria consistent with the acceptance scenarios in US1–US4? [Consistency, Spec §User Scenarios, §Success Criteria]
+- [X] CHK016 Are exit-status requirements consistent across FR-013, FR-014, and SC-008, including the repaired-mismatch case? [Consistency, Spec §FR-013, §FR-014, §SC-008]
 
 ## Acceptance Criteria Quality
 
-- [ ] CHK017 Can SC-002's byte-identity requirement be objectively measured after a provider switch? [Measurability, Spec §SC-002]
-- [ ] CHK018 Is SC-003's "zero acknowledged events unreadable after cutover" measurable without interpreting which objects are in scope? [Measurability, Spec §SC-003]
-- [ ] CHK019 Can SC-005 confirm "no event is acknowledged" independently of implementation timing or log inspection? [Measurability, Spec §SC-005]
-- [ ] CHK020 Is SC-006's "no schema change" verifiable through an observable artifact such as a schema or migration diff? [Measurability, Spec §SC-006]
+- [X] CHK017 Can SC-002's byte-identity requirement be objectively measured after a provider switch? [Measurability, Spec §SC-002]
+- [X] CHK018 Is SC-003's "zero acknowledged events unreadable after cutover" measurable without interpreting which objects are in scope? [Measurability, Spec §SC-003]
+- [X] CHK019 Can SC-005 confirm "no event is acknowledged" independently of implementation timing or log inspection? [Measurability, Spec §SC-005]
+- [X] CHK020 Is SC-006's "no schema change" verifiable through an observable artifact such as a schema or migration diff? [Measurability, Spec §SC-006]
 
 ## Scenario Coverage
 
-- [ ] CHK021 Are requirements defined for the successful first-deploy path on a clean host? [Coverage, Spec §US1, §SC-001]
-- [ ] CHK022 Are requirements defined for an interrupted migration followed by a re-run? [Coverage, Spec §US2, §FR-013]
-- [ ] CHK023 Are requirements defined for migration while ingest is still running because downtime was not scheduled? [Coverage, Spec §Edge Cases, §FR-009]
-- [ ] CHK024 Are requirements defined for retention running before, during, or after the migration? [Coverage, Spec §Edge Cases]
-- [ ] CHK025 Are requirements defined for cutover to a non-Garage provider and for retiring the old store after verification? [Coverage, Spec §US4, §FR-008, §FR-011]
+- [X] CHK021 Are requirements defined for the successful first-deploy path on a clean host? [Coverage, Spec §US1, §SC-001]
+- [X] CHK022 Are requirements defined for an interrupted migration followed by a re-run? [Coverage, Spec §US2, §FR-013]
+- [X] CHK023 Are requirements defined for migration while ingest is still running because downtime was not scheduled? [Coverage, Spec §Edge Cases, §FR-009]
+- [X] CHK024 Are requirements defined for retention running before, during, or after the migration? [Coverage, Spec §Edge Cases]
+- [X] CHK025 Are requirements defined for cutover to a non-Garage provider and for retiring the old store after verification? [Coverage, Spec §US4, §FR-008, §FR-011]
 
 ## Edge Case Coverage
 
-- [ ] CHK026 Are requirements defined for an unreadable source object and for a destination copy that cannot be verified after writing? [Coverage, Spec §US2 scenario 4, §FR-014]
-- [ ] CHK027 Are requirements defined for destination keys whose bytes are identical versus different? [Coverage, Spec §Edge Cases, §FR-013]
-- [ ] CHK028 Are requirements defined for leftover `__scout/health/<uuid>` sentinels in the source? [Coverage, Spec §Edge Cases, §FR-012]
-- [ ] CHK029 Are requirements defined for empty attachments and for objects that exceed the ingest size limit? [Coverage, Spec §Edge Cases, §Gap]
-- [ ] CHK030 Are requirements defined for an object store that becomes temporarily unavailable while Scout serves reads? [Coverage, Spec §Edge Cases, §FR-005]
+- [X] CHK026 Are requirements defined for an unreadable source object and for a destination copy that cannot be verified after writing? [Coverage, Spec §US2 scenario 4, §FR-014]
+- [X] CHK027 Are requirements defined for destination keys whose bytes are identical versus different? [Coverage, Spec §Edge Cases, §FR-013]
+- [X] CHK028 Are requirements defined for leftover `__scout/health/<uuid>` sentinels in the source? [Coverage, Spec §Edge Cases, §FR-012]
+- [X] CHK029 Are requirements defined for empty attachments and for objects that exceed the ingest size limit? [Coverage, Spec §Edge Cases, §Gap]
+- [X] CHK030 Are requirements defined for an object store that becomes temporarily unavailable while Scout serves reads? [Coverage, Spec §Edge Cases, §FR-005]
 
 ## Non-Functional Requirements
 
-- [ ] CHK031 Are data-integrity requirements (source immutability, byte identity, write-once payloads) stated for every migration path? [Non-Functional, Spec §FR-008, §SC-002, Constitution §II]
-- [ ] CHK032 Are the startup failure bound and retry expectations quantified rather than described as "fast"? [Non-Functional, Spec §SC-005]
-- [ ] CHK033 Are secret-handling requirements stated for migration configuration and logs? [Non-Functional, Spec §FR-014, Constitution §Security]
-- [ ] CHK034 Are scale and concurrency assumptions (object size, store size, parallel transfers) documented? [Non-Functional, Spec §Assumptions, Plan §Technical Context]
+- [X] CHK031 Are data-integrity requirements (source immutability, byte identity, write-once payloads) stated for every migration path? [Non-Functional, Spec §FR-008, §SC-002, Constitution §II]
+- [X] CHK032 Are the startup failure bound and retry expectations quantified rather than described as "fast"? [Non-Functional, Spec §SC-005]
+- [X] CHK033 Are secret-handling requirements stated for migration configuration and logs? [Non-Functional, Spec §FR-014, Constitution §Security]
+- [X] CHK034 Are scale and concurrency assumptions (object size, store size, parallel transfers) documented? [Non-Functional, Spec §Assumptions, Plan §Technical Context]
 
 ## Dependencies & Assumptions
 
-- [ ] CHK035 Is Garage's S3 API compatibility assumption (put, get, head, delete; signature and addressing) documented and testable? [Assumption, Spec §Assumptions]
-- [ ] CHK036 Is the operator's responsibility for cluster layout, replication, and access-key provisioning explicit? [Assumption, Spec §Assumptions, §FR-002]
-- [ ] CHK037 Is the assumption that migration never coordinates with ingest backed by a documented operator procedure? [Assumption, Spec §FR-009, §FR-017]
-- [ ] CHK038 Are the source and destination environment variable names uniquely identified and non-overlapping? [Dependency, Spec §FR-003, §FR-014]
+- [X] CHK035 Is Garage's S3 API compatibility assumption (put, get, head, delete; signature and addressing) documented and testable? [Assumption, Spec §Assumptions]
+- [X] CHK036 Is the operator's responsibility for cluster layout, replication, and access-key provisioning explicit? [Assumption, Spec §Assumptions, §FR-002]
+- [X] CHK037 Is the assumption that migration never coordinates with ingest backed by a documented operator procedure? [Assumption, Spec §FR-009, §FR-017]
+- [X] CHK038 Are the source and destination environment variable names uniquely identified and non-overlapping? [Dependency, Spec §FR-003, §FR-014]
 
 ## Ambiguities & Conflicts
 
-- [ ] CHK039 Do any requirements still rely on unquantified qualifiers such as "fast", "safe", "actionable", or "robust" without measurable criteria? [Ambiguity]
-- [ ] CHK040 Is every open verification gate (compose smoke test, non-Garage regression, startup bound) traced to an explicit plan or task item? [Traceability, Plan §Open gates, Tasks §Phase 8]
+- [X] CHK039 Do any requirements still rely on unquantified qualifiers such as "fast", "safe", "actionable", or "robust" without measurable criteria? [Ambiguity]
+- [X] CHK040 Is every open verification gate (compose smoke test, non-Garage regression, startup bound) traced to an explicit plan or task item? [Traceability, Plan §Open gates, Tasks §Phase 8]
 
 ## Notes
 

@@ -4247,3 +4247,21 @@ async fn compat_query_decode_errors_use_the_detail_envelope() {
         }
     }
 }
+
+/// FR-016: the migration mode must not be able to start the HTTP server,
+/// workers, or retention. Scanning the production half of `migrate.rs` makes
+/// the guarantee executable without launching a process.
+#[actix_web::test]
+async fn migrate_module_has_no_service_wiring() {
+    let source = include_str!("migrate.rs");
+    let production = source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("migrate.rs has a production section");
+    for forbidden in ["actix_web::", "crate::worker", "crate::config"] {
+        assert!(
+            !production.contains(forbidden),
+            "FR-016: src/migrate.rs must not reference {forbidden}"
+        );
+    }
+}
