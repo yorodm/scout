@@ -175,6 +175,7 @@ The document spells this path `/hooks/`, not `/servicehooks/`.
 | `GET /api/0/projects/{org}/{project}/hooks/` | `[]` |
 | `GET /api/0/projects/{org}/{project}/hooks/{hook}/` | `404` (no hook exists) |
 | `POST /api/0/projects/{org}/{project}/hooks/` | `501` naming service hooks |
+| `PUT /api/0/projects/{org}/{project}/hooks/{hook}/` | `501` naming service hooks |
 | `DELETE /api/0/projects/{org}/{project}/hooks/{hook}/` | `501` naming service hooks |
 
 ## 8. Project user feedback
@@ -190,7 +191,8 @@ The document defines an organisation-scoped collection at `/spike-protections/` 
 segment).
 
 `GET /api/0/organizations/{org}/spike-protections/` → `404` (no spike-protection state exists).
-`PUT`/`POST` → `501` naming spike protection.
+`PUT`/`POST` → `501` naming spike protection. The document defines `POST` (enable) and `DELETE`
+(disable); both → `501` naming spike protection.
 
 ## 10. Organisation app installations
 

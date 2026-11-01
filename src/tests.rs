@@ -3669,6 +3669,10 @@ async fn compat_unsupported_subsystems_answer_honestly() {
             "service hooks",
         ),
         (
+            put_json(&format!("{base}/hooks/hook-1/"), &token, json!({})),
+            "service hooks",
+        ),
+        (
             post_json(&format!("{base}/user-feedback/"), &token, json!({})),
             "user reports",
         ),
@@ -3677,6 +3681,13 @@ async fn compat_unsupported_subsystems_answer_honestly() {
                 &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
                 &token,
                 json!({}),
+            ),
+            "spike protection",
+        ),
+        (
+            delete(
+                &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+                &token,
             ),
             "spike protection",
         ),
@@ -3749,8 +3760,13 @@ async fn compat_surface_is_off_by_default() {
         ),
         get(&format!("{base}/hooks/"), &token),
         get(&format!("{base}/hooks/hook-1/"), &token),
+        put_json(&format!("{base}/hooks/hook-1/"), &token, json!({})),
         get(&format!("{base}/user-feedback/"), &token),
         get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &token,
+        ),
+        delete(
             &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
             &token,
         ),
@@ -3815,6 +3831,7 @@ async fn compat_every_documented_path_answers_with_json() {
         ),
         get(&format!("{base}/hooks/"), &viewer),
         get(&format!("{base}/hooks/hook-1/"), &viewer),
+        put_json(&format!("{base}/hooks/hook-1/"), &viewer, json!({})),
         get(&format!("{base}/user-feedback/"), &viewer),
         get(
             &format!("/api/0/organizations/{COMPAT_ORG}/releases/{release}/commitfiles/"),
@@ -3823,6 +3840,10 @@ async fn compat_every_documented_path_answers_with_json() {
         get(
             &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
             &viewer,
+        ),
+        delete(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &demo,
         ),
         get(
             &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/"),

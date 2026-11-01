@@ -297,3 +297,10 @@ specification, plan, contracts, and constitution. Ordered by severity.
 
 - [X] T055 Re-point the unsupported-subsystem routes in `src/compat/mod.rs` to the documented spellings — `/projects/{org}/{project}/hooks/` and `/hooks/{hook_id}/`, `/projects/{org}/{project}/user-feedback/`, `/organizations/{org}/spike-protections/`, and top-level `/sentry-app-installations/{uuid}/external-issues[/{external_issue_id}]/` — remove the `/servicehooks/`, `/users/`, project `/spike-protection/`, and org-nested external-issue aliases, and update `contracts/sentry-compat-api.md` §7–11 plus the README matrix and the affected tests per FR-023, SC-002 (partial, unrequested)
 - [X] T056 Keep hyphens in `shortId` by using `project.slug.to_ascii_uppercase()` without stripping `-` in `src/compat/projection.rs`, and update the projection and issue-list assertions to expect `SCOUT-WEB-<n>` per research R5, data-model (contradicts)
+
+---
+
+## Phase 10: Convergence
+
+- [X] T057 Register `PUT /api/0/projects/{org}/{project}/hooks/{hook_id}/` (both trailing-slash forms) to return `501` naming service hooks, matching the `put` operation in the upstream `service-hook-details.json`, and cover it in `src/tests.rs` per FR-023, SC-002 (partial)
+- [X] T058 Register `DELETE /api/0/organizations/{org}/spike-protections/` (both trailing-slash forms) to return `501` naming spike protection, matching the `delete` operation in the upstream `spike-protection.json`, and cover it in `src/tests.rs` per FR-023, SC-002 (partial)

@@ -115,6 +115,14 @@ pub fn config(cfg: &mut web::ServiceConfig) {
                 "/projects/{org}/{project}/hooks/{hook}/",
                 web::delete().to(handlers::service_hook_detail_mutate),
             )
+            .route(
+                "/projects/{org}/{project}/hooks/{hook}",
+                web::put().to(handlers::service_hook_detail_mutate),
+            )
+            .route(
+                "/projects/{org}/{project}/hooks/{hook}/",
+                web::put().to(handlers::service_hook_detail_mutate),
+            )
             // Legacy user feedback (the document spells this `/user-feedback/`)
             .route(
                 "/projects/{org}/{project}/user-feedback",
@@ -156,6 +164,14 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .route(
                 "/organizations/{org}/spike-protections/",
                 web::post().to(handlers::spike_protections_mutate),
+            )
+            .route(
+                "/organizations/{org}/spike-protections",
+                web::delete().to(handlers::spike_protections_mutate),
+            )
+            .route(
+                "/organizations/{org}/spike-protections/",
+                web::delete().to(handlers::spike_protections_mutate),
             )
             // Sentry apps
             .route(
