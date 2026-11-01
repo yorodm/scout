@@ -50,6 +50,8 @@ Scout refuses to start when no deployment operator exists and either bootstrap v
 blank. The operator is seeded once with an Argon2id password hash; later starts never reset it. Set
 `SCOUT_SESSION_TTL_DAYS`, `SCOUT_RETENTION_DAYS`, `SCOUT_CONFIDENCE_THRESHOLD`, and
 `SCOUT_INGEST_MAX_IN_FLIGHT` to override their defaults (7, 30, 0.5, and 256).
+`SCOUT_SENTRY_API_COMPAT_ENABLED=true` turns on the opt-in Sentry read-API surface described below;
+it is off by default.
 
 `SCOUT_DEMO_MODE=true` seeds the demo organisation, accounts, and keys and enables the
 `/api/demo/*` prototype routes, including an unauthenticated store reset. Leave it unset (the
@@ -199,7 +201,7 @@ ui/
   src/state.rs            reactive store, routing, actions
   src/util.rs             formatting and browser helpers
   src/components/         app shell, login, issues, logs, search, members,
-                          settings, modals, toasts
+                          settings, tokens, modals, toasts
 ```
 
 The backend serves `ui/dist` (override with `SCOUT_UI_DIR`). Ingestion and the REST API are unchanged
@@ -231,6 +233,40 @@ by the UI choice.
 Ingest authenticates with `X-Sentry-Auth`, `Authorization: Sentry ...`, or `?sentry_key=`. Every
 dashboard request requires a bearer session token and is authorised against the project before data
 is touched.
+
+### Token management
+
+| Method & path | Purpose |
+| --- | --- |
+| `GET /api/me/tokens` | List your tokens (metadata only, never the secret) |
+| `POST /api/me/tokens` | Create a token; the plaintext is returned once |
+| `DELETE /api/me/tokens/{id}` | Revoke a token immediately and idempotently |
+| `GET /api/orgs/{id}/tokens` | Organisation admins list members' tokens (metadata only) |
+| `DELETE /api/orgs/{id}/tokens/{id}` | Organisation admins revoke a member's token |
+
+The dashboard exposes the same flow at `#/tokens`.
+
+### Sentry read-API compatibility (opt-in)
+
+With `SCOUT_SENTRY_API_COMPAT_ENABLED=true`, the routes below are served under `/api/0/` and
+authenticate with `Authorization: Bearer scout_pat_…`. They are disabled by default and answer `404`
+when off. Scopes come from the token owner's live project and organisation roles.
+
+| Path | Behaviour |
+| --- | --- |
+| `GET/PUT/DELETE /api/0/projects/{org}/{project}/issues/` | List, filter, sort, paginate; status mutation; `DELETE` is `501` |
+| `GET /api/0/projects/{org}/{project}/tags/{key}/values/` | Distinct project tag values |
+| `GET /api/0/organizations/{org}/issues/{issue}/tags/{key}/values/` | Distinct values for one issue |
+| `GET /api/0/organizations/{org}/releases/{version}/commitfiles/` | `[]` for a known release, `404` otherwise |
+| `GET /api/0/projects/{org}/{project}/hooks[/{hook}]/` | Empty list / `404` detail; mutations `501` |
+| `GET /api/0/projects/{org}/{project}/user-feedback/` | Empty list; feedback submission `501` |
+| `GET /api/0/organizations/{org}/spike-protections/` | `404`; mutations `501` |
+| `GET /api/0/organizations/{org}/sentry-app-installations/` | Empty list; mutations `501` |
+| `POST/DELETE /api/0/sentry-app-installations/{uuid}/external-issues/...` | `501` |
+
+Errors use Sentry's `{"detail": …}` envelope. Sentry metrics, tracing, SCIM, Teams, and any path
+outside this table remain out of scope and are not implied by the compatibility surface. There is no
+read-API rate limiting in this slice; revocation is the containment mechanism.
 
 ## Tests and checks
 

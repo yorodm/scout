@@ -57,6 +57,14 @@ async fn mock_model(body: web::Json<Value>) -> HttpResponse {
 }
 
 async fn state_for(self_url: &str, max_in_flight: usize) -> web::Data<AppState> {
+    state_for_with(self_url, max_in_flight, true).await
+}
+
+async fn state_for_with(
+    self_url: &str,
+    max_in_flight: usize,
+    compat_enabled: bool,
+) -> web::Data<AppState> {
     let objects = Arc::new(crate::objects::Objects::memory());
     let (seeded, raws) = crate::store::seed(self_url);
     for (key, data) in raws {
@@ -82,6 +90,7 @@ async fn state_for(self_url: &str, max_in_flight: usize) -> web::Data<AppState> 
         confidence_threshold: 0.5,
         objects,
         storage_ready: Arc::new(AtomicBool::new(true)),
+        compat_enabled,
     })
 }
 
@@ -102,6 +111,7 @@ async fn init_app_with_state(
             .app_data(web::PayloadConfig::new(10 * 1024 * 1024))
             .app_data(web::JsonConfig::default().limit(10 * 1024 * 1024))
             .configure(crate::api::config)
+            .configure(crate::compat::config)
             .configure(crate::ingest::config)
             .route(
                 "/mock-jev/v1/systemone",
@@ -2479,6 +2489,7 @@ fn operator_config() -> crate::config::Config {
         s3_endpoint: None,
         s3_bucket: None,
         demo_mode: false,
+        sentry_compat_enabled: false,
     }
 }
 
@@ -3045,4 +3056,1137 @@ async fn retention_sweep_also_removes_expired_sessions() {
         .await
         .sessions
         .contains_key(&expired_hash));
+}
+
+// --- Sentry read-API compatibility -----------------------------------------
+
+const COMPAT_ORG: &str = "acme";
+const COMPAT_PROJECT: &str = "scout-web";
+
+async fn compat_call<S, B>(
+    app: &S,
+    req: Request,
+) -> (StatusCode, Value, actix_web::http::header::HeaderMap)
+where
+    S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
+    B: MessageBody,
+{
+    let res = call(app, req).await;
+    let status = res.status();
+    let headers = res.headers().clone();
+    let body = test::read_body(res).await;
+    let value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    (status, value, headers)
+}
+
+async fn compat_token(state: &web::Data<AppState>, email: &str) -> String {
+    let mut store = state.store.write().await;
+    let user_id = store
+        .users
+        .values()
+        .find(|user| user.email == email)
+        .map(|user| user.id)
+        .unwrap_or_else(|| panic!("seeded user {email} is missing"));
+    let (plaintext, _) = store.create_api_token(user_id, "test token");
+    plaintext
+}
+
+fn issues_uri(project: &str) -> String {
+    format!("/api/0/projects/{COMPAT_ORG}/{project}/issues/")
+}
+
+fn header_value<'a>(headers: &'a actix_web::http::header::HeaderMap, name: &str) -> &'a str {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+}
+
+fn link_cursor(link: &str) -> Option<String> {
+    for part in link.split(';') {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("cursor=") {
+            return Some(rest.trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// Insert synthetic issues directly into the store so pagination tests do not
+/// depend on ingest timing.
+async fn seed_synthetic_issues(state: &web::Data<AppState>, count: usize, tag: &str) -> Vec<Uuid> {
+    let mut store = state.store.write().await;
+    let project_id = store
+        .projects
+        .values()
+        .find(|project| project.slug == COMPAT_PROJECT)
+        .map(|project| project.id)
+        .expect("seeded project is missing");
+    let base = chrono::Utc::now();
+    let mut ids = Vec::with_capacity(count);
+    for index in 0..count {
+        let id = Uuid::new_v4();
+        let number = store.next_issue_number(project_id);
+        let issue = crate::models::Issue {
+            id,
+            project_id,
+            number,
+            fingerprint: format!("synthetic-{tag}-{index}"),
+            title: format!("synthetic issue {index}"),
+            culprit: Some("src/synthetic.rs".into()),
+            level: "error".into(),
+            first_seen: base - chrono::Duration::seconds(index as i64 + 10),
+            last_seen: base - chrono::Duration::seconds(index as i64),
+            count: index as u64 + 1,
+            state: crate::models::IssueState::Open,
+            release: Some("web@1.0.0".into()),
+            environment: Some("production".into()),
+            tags: json!({ "synthetic": tag, "release": "web@1.0.0" }),
+            frames: Vec::new(),
+            breadcrumbs: Vec::new(),
+            suggestion: None,
+            decision: None,
+            first_presented_at: None,
+            state_history: Vec::new(),
+            last_event_id: Uuid::new_v4(),
+        };
+        store.issues.insert(id, issue);
+        ids.push(id);
+    }
+    ids
+}
+
+#[actix_web::test]
+async fn compat_issue_list_is_sentry_shaped_and_defaults_to_unresolved() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+
+    let (status, body, headers) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &token)).await;
+    assert_eq!(status, StatusCode::OK, "issue list failed: {body}");
+    let issues = body.as_array().expect("array body");
+    assert!(!issues.is_empty(), "demo data has issues");
+    for issue in issues {
+        assert_eq!(
+            issue["status"], "unresolved",
+            "default query is is:unresolved"
+        );
+        assert_eq!(issue["userCount"], 0);
+        assert_eq!(issue["annotations"], json!([]));
+        assert_eq!(issue["statusDetails"], json!({}));
+        assert!(issue["shortId"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("SCOUT-WEB-"));
+        assert!(issue["permalink"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("#/issues/"));
+        assert!(issue["firstSeen"]
+            .as_str()
+            .unwrap_or_default()
+            .ends_with('Z'));
+        assert!(issue["metadata"]["title"].is_string());
+        assert!(issue["project"]["slug"].is_string());
+    }
+    let hits: usize = header_value(&headers, "x-hits")
+        .parse()
+        .expect("X-Hits header");
+    assert!(hits >= issues.len());
+    let link = header_value(&headers, "link");
+    assert!(link.contains("rel=\"next\""), "Link header: {link}");
+    assert!(link.contains("results=\""));
+}
+
+#[actix_web::test]
+async fn compat_status_mutation_updates_history_and_rejects_unsupported_fields() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    let viewer = login(&app, "demo@scout.local").await;
+    let session = viewer["token"].as_str().unwrap();
+    let project = project_id(&app, session, "scout-web").await;
+
+    let (status, body, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let ids: Vec<String> = body
+        .as_array()
+        .expect("array")
+        .iter()
+        .take(2)
+        .map(|issue| issue["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids.len(), 2);
+
+    let uri = format!(
+        "/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/issues/?id={}&id={}",
+        ids[0], ids[1]
+    );
+    let (status, body, _) = compat_call(
+        &app,
+        put_json(&uri, &token, json!({ "status": "resolved" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "mutation failed: {body}");
+    let updated = body.as_array().expect("array");
+    assert_eq!(updated.len(), 2);
+    for issue in updated {
+        assert_eq!(issue["status"], "resolved");
+    }
+
+    // The native API sees the new state and the token owner as the actor.
+    let native = issues_for(&app, session, project).await;
+    for id in &ids {
+        let issue = native
+            .iter()
+            .find(|issue| issue["id"].as_str() == Some(id.as_str()))
+            .expect("issue still listed");
+        assert_eq!(issue["state"], "resolved");
+        let last = issue["state_history"].as_array().expect("history");
+        assert_eq!(last.last().unwrap()["by"], "demo@scout.local");
+    }
+
+    let (status, body, _) = compat_call(
+        &app,
+        put_json(
+            &issues_uri(COMPAT_PROJECT),
+            &token,
+            json!({ "assignedTo": "me" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("assignedTo"));
+
+    let (status, _, _) = compat_call(
+        &app,
+        put_json(&issues_uri(COMPAT_PROJECT), &token, json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body, _) = compat_call(&app, delete(&issues_uri(COMPAT_PROJECT), &token)).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert!(body["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("preserves"));
+}
+
+#[actix_web::test]
+async fn compat_pagination_is_exactly_once_and_query_bound() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    seed_synthetic_issues(&state, 1_000, "pager").await;
+
+    let base =
+        format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/issues/?query=synthetic:pager");
+    let (status, first, headers) = compat_call(&app, get(&base, &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let mut seen: Vec<String> = first
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|issue| issue["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(seen.len(), 100, "default page size");
+    let hits: usize = header_value(&headers, "x-hits").parse().unwrap();
+    assert_eq!(hits, 1_000);
+
+    let mut cursor = link_cursor(header_value(&headers, "link"));
+    while let Some(value) = cursor {
+        let uri = format!("{base}&cursor={value}");
+        let (status, page, headers) = compat_call(&app, get(&uri, &token)).await;
+        assert_eq!(status, StatusCode::OK);
+        let items = page.as_array().expect("array");
+        assert!(items.len() <= 100);
+        seen.extend(
+            items
+                .iter()
+                .map(|issue| issue["id"].as_str().unwrap().to_string()),
+        );
+        cursor = link_cursor(header_value(&headers, "link"));
+    }
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 1_000, "every issue exactly once");
+
+    // A cursor replayed against a different query is rejected.
+    let (status, _, headers) = compat_call(&app, get(&base, &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let cursor = link_cursor(header_value(&headers, "link")).expect("next cursor");
+    let other = format!("{base}&sort=freq&cursor={cursor}");
+    let (status, body, _) = compat_call(&app, get(&other, &token)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!body["detail"].as_str().unwrap_or_default().is_empty());
+
+    // limit is clamped, never an error; zero and negatives use the default.
+    for (limit, expected) in [("0", 100), ("-3", 100), ("500", 100), ("abc", 100)] {
+        let uri = format!("{base}&limit={limit}");
+        let (status, page, _) = compat_call(&app, get(&uri, &token)).await;
+        assert_eq!(status, StatusCode::OK, "limit={limit}");
+        assert_eq!(page.as_array().unwrap().len(), expected, "limit={limit}");
+    }
+}
+
+#[actix_web::test]
+async fn compat_tag_values_filter_paginate_and_scope_to_an_issue() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    let ids = seed_synthetic_issues(&state, 2, "tags").await;
+    {
+        let mut store = state.store.write().await;
+        let mut extra = store.issues.get(&ids[0]).cloned().expect("seeded issue");
+        extra.id = Uuid::new_v4();
+        extra.number = store.next_issue_number(extra.project_id);
+        extra.fingerprint = "synthetic-tags-extra".into();
+        extra.tags = json!({ "release": "web@1.1.0" });
+        store.issues.insert(extra.id, extra);
+    }
+
+    let uri = format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/tags/release/values/");
+    let (status, body, headers) = compat_call(&app, get(&uri, &token)).await;
+    assert_eq!(status, StatusCode::OK, "tag values failed: {body}");
+    let values: Vec<String> = body
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|value| value["name"].as_str().unwrap().to_string())
+        .collect();
+    assert!(values.contains(&"web@1.0.0".to_string()));
+    assert!(values.contains(&"web@1.1.0".to_string()));
+    let mut sorted = values.clone();
+    sorted.sort();
+    assert_eq!(values, sorted);
+
+    let (status, filtered, _) = compat_call(&app, get(&format!("{uri}?query=1.1"), &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(filtered, json!([{ "name": "web@1.1.0" }]));
+
+    let (status, missing, _) = compat_call(
+        &app,
+        get(
+            &format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/tags/nope/values/"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(missing, json!([]));
+    assert!(headers.contains_key("link"));
+
+    let issue_uri = format!(
+        "/api/0/organizations/{COMPAT_ORG}/issues/{}/tags/release/values/",
+        ids[0]
+    );
+    let (status, issue_values, _) = compat_call(&app, get(&issue_uri, &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(issue_values, json!([{ "name": "web@1.0.0" }]));
+
+    let (status, _, _) = compat_call(
+        &app,
+        get(
+            &format!(
+                "/api/0/organizations/{COMPAT_ORG}/issues/{}/tags/release/values/",
+                Uuid::new_v4()
+            ),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+async fn compat_tokens_are_hashed_shown_once_and_revocable() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let session = auth["token"].as_str().unwrap();
+
+    let (status, created) = call_json(
+        &app,
+        post_json(
+            "/api/me/tokens",
+            session,
+            json!({ "label": "release-dashboard" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "create failed: {created}");
+    let plaintext = created["token"]
+        .as_str()
+        .expect("plaintext token")
+        .to_string();
+    assert!(plaintext.starts_with("scout_pat_"));
+    assert_eq!(
+        created["token_prefix"].as_str().unwrap().chars().count(),
+        14
+    );
+    assert!(created.get("token_hash").is_none());
+    let token_id = created["id"].as_str().unwrap().to_string();
+
+    let (status, listed) = call_json(&app, get("/api/me/tokens", session)).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = listed
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|row| row["id"].as_str() == Some(token_id.as_str()))
+        .expect("new token listed");
+    assert!(row.get("token_hash").is_none());
+    assert!(row.get("token").is_none());
+
+    let (status, _) = call_json(
+        &app,
+        post_json("/api/me/tokens", session, json!({ "label": "   " })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The token works against /api/0 and stops working after revocation.
+    let (status, _, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &plaintext)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = call_json(&app, delete(&format!("/api/me/tokens/{token_id}"), session)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _) = call_json(&app, delete(&format!("/api/me/tokens/{token_id}"), session)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "revocation is idempotent");
+    let (status, body, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &plaintext)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["detail"], "Invalid token");
+
+    let audit = state.store.read().await.audit.clone();
+    assert!(audit.iter().any(|entry| entry.action == "token.create"));
+    assert!(audit.iter().any(|entry| entry.action == "token.revoke"));
+
+    // Another user cannot revoke someone else's token.
+    let viewer = login(&app, "viewer@scout.local").await;
+    let viewer_session = viewer["token"].as_str().unwrap();
+    let (status, _) = call_json(
+        &app,
+        delete(&format!("/api/me/tokens/{token_id}"), viewer_session),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+async fn compat_organisation_admins_can_list_and_revoke_member_tokens() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let org_id = {
+        let store = state.store.read().await;
+        store
+            .orgs
+            .values()
+            .find(|org| org.slug == COMPAT_ORG)
+            .map(|org| org.id)
+            .expect("seeded org")
+    };
+    let member_token = compat_token(&state, "viewer@scout.local").await;
+
+    let admin = login(&app, "demo@scout.local").await;
+    let admin_session = admin["token"].as_str().unwrap();
+    let (status, listed) = call_json(
+        &app,
+        get(&format!("/api/orgs/{org_id}/tokens"), admin_session),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "org token list failed: {listed}");
+    let rows = listed.as_array().expect("array");
+    assert!(rows
+        .iter()
+        .any(|row| row["user_email"] == "viewer@scout.local"));
+    assert!(rows.iter().all(|row| row.get("token_hash").is_none()));
+    let token_id = rows
+        .iter()
+        .find(|row| row["user_email"] == "viewer@scout.local")
+        .and_then(|row| row["id"].as_str())
+        .expect("member token id")
+        .to_string();
+
+    let (status, _) = call_json(
+        &app,
+        delete(
+            &format!("/api/orgs/{org_id}/tokens/{token_id}"),
+            admin_session,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, _, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &member_token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let member = login(&app, "viewer@scout.local").await;
+    let member_session = member["token"].as_str().unwrap();
+    let (status, _) = call_json(
+        &app,
+        get(&format!("/api/orgs/{org_id}/tokens"), member_session),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[actix_web::test]
+async fn compat_scopes_follow_live_roles_and_fail_uniformly() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let viewer = compat_token(&state, "viewer@scout.local").await;
+    let triager = compat_token(&state, "triager@scout.local").await;
+    let owner = compat_token(&state, "demo@scout.local").await;
+
+    // Missing, malformed, unknown tokens all look the same.
+    let missing = compat_call(
+        &app,
+        test::TestRequest::get()
+            .uri(&issues_uri(COMPAT_PROJECT))
+            .to_request(),
+    )
+    .await;
+    let garbage = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), "garbage")).await;
+    let unknown = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), "scout_pat_unknown")).await;
+    for (status, body) in [
+        (missing.0, missing.1),
+        (garbage.0, garbage.1),
+        (unknown.0, unknown.1),
+    ] {
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["detail"], "Invalid token");
+    }
+
+    let (status, _, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &viewer)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = compat_call(
+        &app,
+        put_json(
+            &issues_uri(COMPAT_PROJECT),
+            &viewer,
+            json!({ "status": "resolved" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, _, _) = compat_call(
+        &app,
+        put_json(
+            &issues_uri(COMPAT_PROJECT),
+            &triager,
+            json!({ "status": "ignored" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "triagers may write events");
+
+    // Removing the owner from the project takes effect on the next request.
+    {
+        let mut store = state.store.write().await;
+        let project_id = store
+            .projects
+            .values()
+            .find(|project| project.slug == COMPAT_PROJECT)
+            .map(|project| project.id)
+            .unwrap();
+        let owner_id = store
+            .users
+            .values()
+            .find(|user| user.email == "demo@scout.local")
+            .map(|user| user.id)
+            .unwrap();
+        store.memberships.remove(&(owner_id, project_id));
+    }
+    let (status, _, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &owner)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "no existence leak");
+
+    // A viewer of one project cannot see another project in the same org.
+    let (status, _, _) = compat_call(&app, get(&issues_uri("platform-api"), &viewer)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[actix_web::test]
+async fn compat_unsupported_subsystems_answer_honestly() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    let before = state.store.read().await.issues.len();
+    let base = format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}");
+    let release = {
+        let store = state.store.read().await;
+        store
+            .issues
+            .values()
+            .filter_map(|issue| issue.release.clone())
+            .next()
+            .unwrap_or_else(|| "web@1.0.0".into())
+    };
+
+    let (status, body, _) = compat_call(
+        &app,
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/releases/{release}/commitfiles/"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+    let (status, _, _) = compat_call(
+        &app,
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/releases/never/commitfiles/"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for path in ["hooks/", "user-feedback/"] {
+        let (status, body, _) = compat_call(&app, get(&format!("{base}/{path}"), &token)).await;
+        assert_eq!(status, StatusCode::OK, "{path}");
+        assert_eq!(body, json!([]), "{path}");
+    }
+    let (status, _, _) = compat_call(&app, get(&format!("{base}/hooks/hook-1/"), &token)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = compat_call(
+        &app,
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for (req, label) in [
+        (
+            post_json(&format!("{base}/hooks/"), &token, json!({})),
+            "service hooks",
+        ),
+        (
+            put_json(&format!("{base}/hooks/hook-1/"), &token, json!({})),
+            "service hooks",
+        ),
+        (
+            post_json(&format!("{base}/user-feedback/"), &token, json!({})),
+            "user reports",
+        ),
+        (
+            put_json(
+                &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+                &token,
+                json!({}),
+            ),
+            "spike protection",
+        ),
+        (
+            delete(
+                &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+                &token,
+            ),
+            "spike protection",
+        ),
+        (
+            post_json(
+                "/api/0/sentry-app-installations/inst-1/external-issues/",
+                &token,
+                json!({}),
+            ),
+            "external issues",
+        ),
+        (
+            delete(
+                "/api/0/sentry-app-installations/inst-1/external-issues/ext-1/",
+                &token,
+            ),
+            "external issues",
+        ),
+    ] {
+        let (status, body, _) = compat_call(&app, req).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{label}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("not supported"),
+            "{label}: {body}"
+        );
+    }
+
+    let (status, body, _) = compat_call(
+        &app,
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+
+    let after = state.store.read().await.issues.len();
+    assert_eq!(before, after, "unsupported paths never mutate data");
+}
+
+#[actix_web::test]
+async fn compat_surface_is_off_by_default() {
+    let state = state_for_with("https://scout.example", 256, false).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    let base = format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}");
+    let issue = Uuid::new_v4();
+    let requests = vec![
+        get(&format!("{base}/issues/"), &token),
+        put_json(
+            &format!("{base}/issues/"),
+            &token,
+            json!({ "status": "resolved" }),
+        ),
+        delete(&format!("{base}/issues/"), &token),
+        get(&format!("{base}/tags/release/values/"), &token),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/issues/{issue}/tags/release/values/"),
+            &token,
+        ),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/releases/web@1.0.0/commitfiles/"),
+            &token,
+        ),
+        get(&format!("{base}/hooks/"), &token),
+        get(&format!("{base}/hooks/hook-1/"), &token),
+        put_json(&format!("{base}/hooks/hook-1/"), &token, json!({})),
+        get(&format!("{base}/user-feedback/"), &token),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &token,
+        ),
+        delete(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &token,
+        ),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/"),
+            &token,
+        ),
+        post_json(
+            "/api/0/sentry-app-installations/inst-1/external-issues/",
+            &token,
+            json!({}),
+        ),
+        delete(
+            "/api/0/sentry-app-installations/inst-1/external-issues/ext-1/",
+            &token,
+        ),
+    ];
+    for req in requests {
+        let (status, body, _) = compat_call(&app, req).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["detail"], "Not Found");
+    }
+}
+
+#[actix_web::test]
+async fn compat_every_documented_path_answers_with_json() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let demo = compat_token(&state, "demo@scout.local").await;
+    let viewer = compat_token(&state, "viewer@scout.local").await;
+    let base = format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}");
+    let (status, listed, _) = compat_call(&app, get(&format!("{base}/issues/"), &viewer)).await;
+    assert_eq!(status, StatusCode::OK);
+    let issue_id = listed
+        .as_array()
+        .and_then(|issues| issues.first())
+        .and_then(|issue| issue["id"].as_str())
+        .expect("seeded issue")
+        .to_string();
+    let release = {
+        let store = state.store.read().await;
+        store
+            .issues
+            .values()
+            .filter_map(|issue| issue.release.clone())
+            .next()
+            .unwrap_or_else(|| "web@1.0.0".into())
+    };
+
+    let requests: Vec<Request> = vec![
+        get(&format!("{base}/issues/"), &viewer),
+        put_json(
+            &format!("{base}/issues/"),
+            &viewer,
+            json!({ "status": "resolved" }),
+        ),
+        delete(&format!("{base}/issues/"), &viewer),
+        get(&format!("{base}/tags/release/values/"), &viewer),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/issues/{issue_id}/tags/release/values/"),
+            &viewer,
+        ),
+        get(&format!("{base}/hooks/"), &viewer),
+        get(&format!("{base}/hooks/hook-1/"), &viewer),
+        put_json(&format!("{base}/hooks/hook-1/"), &viewer, json!({})),
+        get(&format!("{base}/user-feedback/"), &viewer),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/releases/{release}/commitfiles/"),
+            &demo,
+        ),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &viewer,
+        ),
+        delete(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &demo,
+        ),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/"),
+            &demo,
+        ),
+        post_json(
+            "/api/0/sentry-app-installations/inst-1/external-issues/",
+            &demo,
+            json!({}),
+        ),
+        delete(
+            "/api/0/sentry-app-installations/inst-1/external-issues/ext-1/",
+            &demo,
+        ),
+    ];
+    for req in requests {
+        let res = call(&app, req).await;
+        let status = res.status();
+        assert!(
+            !status.is_server_error() || status == StatusCode::NOT_IMPLEMENTED,
+            "documented path returned {status}"
+        );
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.contains("application/json"),
+            "non-JSON response ({content_type}) for {status}"
+        );
+        let body = test::read_body(res).await;
+        let value: Value = serde_json::from_slice(&body).expect("JSON body");
+        if status.is_client_error() || status == StatusCode::NOT_IMPLEMENTED {
+            assert!(
+                value["detail"].is_string(),
+                "error body must use detail: {value}"
+            );
+        }
+    }
+}
+
+#[actix_web::test]
+async fn compat_does_not_change_the_native_surface() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let session = auth["token"].as_str().unwrap();
+    let (status, body) = call_json(&app, get("/api/projects", session)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["projects"].is_array());
+    let (status, _) = call_json(&app, get("/api/health", "")).await;
+    assert!(
+        status == StatusCode::OK || status == StatusCode::UNAUTHORIZED,
+        "native health must not be affected"
+    );
+}
+
+/// SC-007 benchmark. Ignored by default; run with
+/// `cargo test --release -- --ignored sc_007`.
+#[actix_web::test]
+#[ignore]
+async fn sc_007_issue_list_and_tag_values_stay_under_500ms() {
+    use std::time::Instant;
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    seed_synthetic_issues(&state, 1_000, "perf").await;
+
+    let mut samples = Vec::new();
+    for _ in 0..20 {
+        let started = Instant::now();
+        let (status, _, _) = compat_call(
+            &app,
+            get(
+                &format!(
+                    "/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/issues/?query=synthetic:perf"
+                ),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _, _) = compat_call(
+            &app,
+            get(
+                &format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/tags/release/values/"),
+                &token,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        samples.push(started.elapsed());
+    }
+    samples.sort();
+    let p95 = samples[(samples.len() * 95) / 100];
+    println!("SC-007 p95 for issue list + tag values: {p95:?}");
+    if !cfg!(debug_assertions) {
+        assert!(
+            p95 < Duration::from_millis(500),
+            "p95 {p95:?} exceeds the 500 ms budget"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn compat_invalid_ids_match_nothing() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+
+    // A malformed id must not degrade into an unrestricted list.
+    let (status, body, headers) = compat_call(
+        &app,
+        get(
+            &format!("{}?id=not-a-uuid", issues_uri(COMPAT_PROJECT)),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+    assert_eq!(header_value(&headers, "x-hits"), "0");
+
+    // Mixed valid and invalid ids keep only the valid ones.
+    let (status, listed, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let valid = listed
+        .as_array()
+        .and_then(|issues| issues.first())
+        .and_then(|issue| issue["id"].as_str())
+        .expect("seeded issue")
+        .to_string();
+    let (status, filtered, _) = compat_call(
+        &app,
+        get(
+            &format!("{}?id={valid}&id=garbage", issues_uri(COMPAT_PROJECT)),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let filtered = filtered.as_array().expect("array");
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0]["id"].as_str(), Some(valid.as_str()));
+
+    // A mutation addressed only with malformed ids changes nothing.
+    let before = state
+        .store
+        .read()
+        .await
+        .issues
+        .values()
+        .filter(|issue| issue.state == crate::models::IssueState::Open)
+        .count();
+    let (status, body, _) = compat_call(
+        &app,
+        put_json(
+            &format!("{}?id=garbage", issues_uri(COMPAT_PROJECT)),
+            &token,
+            json!({ "status": "resolved" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+    let after = state
+        .store
+        .read()
+        .await
+        .issues
+        .values()
+        .filter(|issue| issue.state == crate::models::IssueState::Open)
+        .count();
+    assert_eq!(before, after, "no issue may change state");
+}
+
+#[actix_web::test]
+async fn compat_sorts_hashes_and_ignored_parameters() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    let ids = seed_synthetic_issues(&state, 2, "sorts").await;
+    let (first_seen_a, last_seen_a) = {
+        let mut store = state.store.write().await;
+        let base = chrono::Utc::now();
+        let mut a = store.issues.get(&ids[0]).cloned().expect("issue a");
+        a.count = 5;
+        a.last_seen = base - chrono::Duration::hours(1);
+        a.first_seen = base - chrono::Duration::hours(3);
+        a.fingerprint = "hash-a".into();
+        a.title = "issue A".into();
+        let (first_a, last_a) = (a.first_seen, a.last_seen);
+        store.issues.insert(a.id, a);
+        let mut b = store.issues.get(&ids[1]).cloned().expect("issue b");
+        b.count = 9;
+        b.last_seen = base - chrono::Duration::hours(2);
+        b.first_seen = base - chrono::Duration::hours(1);
+        b.fingerprint = "hash-b".into();
+        b.title = "issue B".into();
+        store.issues.insert(b.id, b);
+        (first_a, last_a)
+    };
+    let _ = (first_seen_a, last_seen_a);
+
+    let base_uri =
+        format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/issues/?query=synthetic:sorts");
+    for (sort, expected_title) in [
+        ("date", "issue A"),
+        ("new", "issue B"),
+        ("freq", "issue B"),
+        ("user", "issue B"),
+        ("trends", "issue A"),
+        ("recommended", "issue A"),
+    ] {
+        let uri = format!("{base_uri}&sort={sort}");
+        let (status, body, _) = compat_call(&app, get(&uri, &token)).await;
+        assert_eq!(status, StatusCode::OK, "sort={sort}");
+        let first = body
+            .as_array()
+            .and_then(|issues| issues.first())
+            .expect("at least one issue");
+        assert_eq!(first["title"], expected_title, "sort={sort}");
+    }
+
+    // hashes filters on the stored fingerprint; unknown hashes yield an empty page.
+    let (status, body, _) =
+        compat_call(&app, get(&format!("{base_uri}&hashes=hash-a"), &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let body = body.as_array().expect("array");
+    assert_eq!(body.len(), 1);
+    assert_eq!(body[0]["title"], "issue A");
+    let (status, body, _) =
+        compat_call(&app, get(&format!("{base_uri}&hashes=nope"), &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!([]));
+
+    // statsPeriod and shortIdLookup are accepted and ignored.
+    let (status, tolerated, headers) = compat_call(
+        &app,
+        get(
+            &format!("{base_uri}&statsPeriod=14d&shortIdLookup=0"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tolerated.as_array().unwrap().len(), 2);
+    assert_eq!(header_value(&headers, "x-hits"), "2");
+}
+
+#[actix_web::test]
+async fn compat_tag_values_are_capped_at_one_thousand() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    let ids = seed_synthetic_issues(&state, 1, "bulk").await;
+    {
+        let mut store = state.store.write().await;
+        let template = store.issues.get(&ids[0]).cloned().expect("seeded issue");
+        for index in 0..1_005usize {
+            let mut issue = template.clone();
+            issue.id = Uuid::new_v4();
+            issue.number = store.next_issue_number(issue.project_id);
+            issue.tags = json!({ "bulk": format!("value-{index:04}") });
+            store.issues.insert(issue.id, issue);
+        }
+    }
+    let uri = format!("/api/0/projects/{COMPAT_ORG}/{COMPAT_PROJECT}/tags/bulk/values/?limit=100");
+    let mut cursor: Option<String> = None;
+    let mut values: Vec<String> = Vec::new();
+    loop {
+        let request_uri = match &cursor {
+            Some(value) => format!("{uri}&cursor={value}"),
+            None => uri.clone(),
+        };
+        let (status, body, headers) = compat_call(&app, get(&request_uri, &token)).await;
+        assert_eq!(status, StatusCode::OK);
+        values.extend(
+            body.as_array()
+                .expect("array")
+                .iter()
+                .map(|value| value["name"].as_str().unwrap().to_string()),
+        );
+        cursor = link_cursor(header_value(&headers, "link"));
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(values.len(), 1_000, "the distinct set is capped at 1,000");
+    let mut unique = values.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 1_000);
+}
+
+#[actix_web::test]
+async fn compat_disabled_owner_token_is_rejected() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "viewer@scout.local").await;
+    {
+        let mut store = state.store.write().await;
+        let user = store
+            .users
+            .values_mut()
+            .find(|user| user.email == "viewer@scout.local")
+            .expect("seeded viewer");
+        user.disabled_at = Some(chrono::Utc::now());
+    }
+    let (status, body, _) = compat_call(&app, get(&issues_uri(COMPAT_PROJECT), &token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["detail"], "Invalid token");
+}
+
+#[actix_web::test]
+async fn compat_query_decode_errors_use_the_detail_envelope() {
+    let state = state_for("https://scout.example", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let token = compat_token(&state, "demo@scout.local").await;
+    // Whatever the query decoder does with these bytes, the response must stay
+    // JSON: either a served page or the compatibility detail envelope.
+    for query in ["limit=%FF", "limit=%", "limit=%GG", "%FF=1", "cursor=%FF"] {
+        let uri = format!("{}?{}", issues_uri(COMPAT_PROJECT), query);
+        let res = call(&app, get(&uri, &token)).await;
+        let status = res.status();
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = test::read_body(res).await;
+        assert!(
+            content_type.contains("application/json"),
+            "{query} -> {status} ({content_type})"
+        );
+        let value: Value = serde_json::from_slice(&body).expect("JSON body");
+        if status == StatusCode::BAD_REQUEST {
+            assert!(value["detail"].is_string(), "{query}: {value}");
+        } else {
+            assert_eq!(status, StatusCode::OK, "{query}");
+        }
+    }
 }

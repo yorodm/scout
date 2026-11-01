@@ -2,6 +2,7 @@ mod api;
 mod audit;
 mod auth;
 mod classifier;
+mod compat;
 mod config;
 mod error;
 mod grouping;
@@ -76,6 +77,10 @@ async fn main() -> std::io::Result<()> {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, error));
         }
     }
+    let backfilled = seeded_store.ensure_org_slugs();
+    if backfilled > 0 {
+        tracing::info!(count = backfilled, "backfilled organisation slugs");
+    }
     let store = Arc::new(RwLock::new(seeded_store));
     let (jobs, rx) = mpsc::unbounded_channel::<Job>();
     let http = reqwest::Client::builder()
@@ -95,6 +100,7 @@ async fn main() -> std::io::Result<()> {
         confidence_threshold: config.confidence_threshold,
         objects,
         storage_ready: Arc::new(AtomicBool::new(true)),
+        compat_enabled: config.sentry_compat_enabled,
     });
 
     tracing::info!("Scout listening on http://127.0.0.1:{port}");
@@ -114,6 +120,7 @@ async fn main() -> std::io::Result<()> {
                 crate::middleware::request_id,
             ))
             .configure(api::config)
+            .configure(compat::config)
             .configure(ingest::config)
             .route(
                 "/mock-jev/v1/systemone",

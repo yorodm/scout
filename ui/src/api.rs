@@ -1,7 +1,7 @@
 use gloo_net::http::{Request, RequestBuilder};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 // ------------------------------------------------------------------ types
@@ -593,4 +593,52 @@ pub async fn send_log(
         }),
     )
     .await
+}
+
+// ------------------------------------------------------------------ api tokens
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct ApiToken {
+    pub id: String,
+    pub label: String,
+    pub token_prefix: String,
+    pub created_at: String,
+    #[serde(default)]
+    pub last_used_at: Option<String>,
+    #[serde(default)]
+    pub revoked_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CreatedApiToken {
+    pub token: String,
+    pub id: String,
+    pub label: String,
+    pub token_prefix: String,
+    pub created_at: String,
+}
+
+pub async fn api_tokens(token: &str) -> Result<Vec<ApiToken>, String> {
+    get("/api/me/tokens", Some(token)).await
+}
+
+pub async fn create_api_token(token: &str, label: &str) -> Result<CreatedApiToken, String> {
+    post("/api/me/tokens", Some(token), &json!({ "label": label })).await
+}
+
+pub async fn revoke_api_token(token: &str, id: &str) -> Result<(), String> {
+    let response = with_auth(
+        Request::delete(&format!("/api/me/tokens/{id}")),
+        Some(token),
+    )
+    .send()
+    .await
+    .map_err(|error| error.to_string())?;
+    let status = response.status();
+    if (200..300).contains(&status) {
+        Ok(())
+    } else {
+        let text = response.text().await.unwrap_or_default();
+        Err(error_message(&text, status))
+    }
 }

@@ -1,6 +1,6 @@
 use crate::api;
 use crate::components::common::{avatar, brand};
-use crate::components::{issues, other};
+use crate::components::{issues, other, tokens};
 use crate::state::{self, use_store, AppState, ModalKind, ViewKind};
 use crate::util;
 use sycamore::prelude::*;
@@ -295,6 +295,7 @@ fn Shell() -> View {
             ViewKind::Search => view! { other::SearchView() },
             ViewKind::Members => view! { other::MembersView() },
             ViewKind::Settings => view! { other::SettingsView() },
+            ViewKind::Tokens => view! { tokens::TokensView() },
         }
     });
 
@@ -333,6 +334,10 @@ fn Shell() -> View {
                     a(href="#/settings", class=settings_class) {
                         span(class="dot") {}
                         "Settings"
+                    }
+                    a(href="#/tokens", class=nav_class("tokens")) {
+                        span(class="dot") {}
+                        "API tokens"
                     }
                 }
                 div(class="sidebar-foot") {
@@ -373,6 +378,7 @@ fn title_for(state: &AppState) -> String {
         ViewKind::Search => "Search".into(),
         ViewKind::Members => "Members".into(),
         ViewKind::Settings => "Settings".into(),
+        ViewKind::Tokens => "API tokens".into(),
     }
 }
 
@@ -405,5 +411,6 @@ fn subtitle_for(state: &AppState) -> String {
         ViewKind::Search => format!("{name} · issues and logs in one query"),
         ViewKind::Members => format!("{name} · project-scoped roles"),
         ViewKind::Settings => format!("{name} · ingest, retention, decision model"),
+        ViewKind::Tokens => "Long-lived bearer tokens for /api/0/".into(),
     }
 }

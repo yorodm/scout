@@ -103,7 +103,18 @@ Ingest keys are per project and cannot read.
 `scout` (API + UI + worker) · `postgres` · `s3`/`minio`, from a single compose file. Migrations run on
 startup against an advisory lock, so several replicas can start at once.
 
+## Sentry compatibility
+
+Ingest speaks Sentry's envelope protocol. With `SCOUT_SENTRY_API_COMPAT_ENABLED=true`, a bounded
+read-API surface is also served under `/api/0/`: project issues (list, filter, sort, cursor
+pagination, status mutation), project and issue tag values, and honest empty or `501` answers for
+Sentry subsystems Scout does not implement (releases' commit files, service hooks, legacy user
+reports, spike protection, Sentry apps, external issues). The surface is off by default, uses
+long-lived hashed bearer tokens whose scopes come from the owner's live roles, and never invents
+data. Metrics and tracing stay out of scope.
+
 ## Out of scope
 
-Metrics and tracing ingest, Sentry read-API compatibility, and any hosted/managed mode — all excluded
-by [scout-goal](goal-and-requirements.md).
+Metrics and tracing ingest, SCIM, Teams, and any hosted/managed mode — all excluded by
+[scout-goal](goal-and-requirements.md). Sentry read-API compatibility is limited to the documented
+`/api/0/` surface above.

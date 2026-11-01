@@ -21,6 +21,9 @@ pub struct Config {
     /// default so a real deployment never exposes known credentials or an
     /// unauthenticated reset.
     pub demo_mode: bool,
+    /// Enables the Sentry-compatible `/api/0/` surface. Off by default because it
+    /// exposes project data to long-lived tokens.
+    pub sentry_compat_enabled: bool,
 }
 
 impl Config {
@@ -43,6 +46,7 @@ impl Config {
             s3_endpoint: non_empty("SCOUT_S3_ENDPOINT"),
             s3_bucket: non_empty("SCOUT_S3_BUCKET"),
             demo_mode: env_flag("SCOUT_DEMO_MODE"),
+            sentry_compat_enabled: env_flag("SCOUT_SENTRY_API_COMPAT_ENABLED"),
         }
     }
 
@@ -106,6 +110,7 @@ mod tests {
             s3_endpoint: endpoint.map(str::to_string),
             s3_bucket: bucket.map(str::to_string),
             demo_mode: false,
+            sentry_compat_enabled: false,
         }
     }
 
