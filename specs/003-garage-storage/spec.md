@@ -4,7 +4,7 @@
 
 **Created**: 2026-11-01
 
-**Status**: Draft
+**Status**: Implemented; Docker verification gates open (see `plan.md`)
 
 **Input**: User description: "We are migrating from minio to Garage (https://garagehq.deuxfleurs.fr/documentation/quick-start/) an open source alternative for s3 storage"
 
@@ -16,7 +16,16 @@
 - Q: Should the migration run inside the running service or as a dedicated entry point? → A: A dedicated entry point that runs only the migration, not the service.
 - Q: How should the cutover handle events written while the migration runs? → A: Migration and ingestion are separate stages that never coordinate; the operator is responsible for scheduling service downtime.
 - Q: Should the shipped compose stack configure Garage automatically or leave setup to the operator? → A: The compose stack runs Garage only; the documentation walks through the Garage CLI steps for layout, bucket, and access key.
-- Q: What should the migration do when the destination already holds an object under the same key? → A: Skip it when the content already matches, overwrite it when it differs, and fail only when an object cannot be read.
+- Q: What should the migration do when the destination already holds an object under the same key? → A: Skip it when the content already matches, overwrite it when it differs, and fail only when an object cannot be read or its destination copy cannot be verified after writing.
+- Q: When the migration overwrites a differing destination object and re-reads it successfully, should the run still exit non-zero? → A: No; a repaired and re-verified difference counts as a verified object and exits zero, and only unreadable or post-write unverifiable objects exit non-zero.
+- Q: When the object store rejects the configured credentials, should Scout fail at startup or only when the first ingest arrives? → A: At startup: the write check verifies the bucket, credentials, and reachability before the server serves; storage failures after startup still return the retryable ingest response.
+- Q: Should the S3 client timeouts be tightened to meet the 30-second startup bound, or should the bound be relaxed to the current retry budget? → A: Keep the current budget (5 s connect, 10 s request, 2 retries) and relax the startup failure bound to 60 seconds.
+- Q: Should startup-probe sentinels under the `__scout/` prefix be migrated or counted? → A: Skip them: they are not payloads, so they are excluded from copying and from `found`, and the destination key set equals the source key set minus `__scout/` keys.
+- Q: Should the migration summary report a separate `failed` count, and how does `mismatched` relate to it? → A: Yes: report `failed` alongside found/copied/skipped/verified/mismatched, with `mismatched` a subset of `failed`.
+- Q: Should FR-003's ban on new configuration concepts apply only to the running service, with the migration command allowed its own `SCOUT_MIGRATE_SOURCE_*` variables? → A: Yes: FR-003 governs runtime configuration, and the migration source variables are one-shot tooling configuration for that command.
+- Q: Should FR-012 describe the migration destination as the configured object store (Garage by default) rather than specifically "the destination Garage store"? → A: Yes: say "destination object store (Garage by default)", keeping the provider-neutral contract.
+- Q: Is SC-001's 15-minute clean-host target a hard release gate, or recorded evidence? → A: Neither: drop the time target; SC-001 is that the documented quick start reaches a working Garage deployment on a clean host with no MinIO and no undocumented step, with no time bound.
+- Q: Should SC-002 require every migrated object to be byte-identical, or only a defined sample? → A: Every migrated raw payload and attachment must be byte-identical; the migration verifies each object, and post-cutover retrieval reads back at least one raw payload and one attachment per project.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -86,15 +95,17 @@ what to fix.
 **Why this priority**: A storage switch is exactly when credentials and buckets are wrong. Silent loss
 of accepted events is the worst possible failure for an error tracker.
 
-**Independent Test**: Point Scout at Garage with each misconfiguration in turn and confirm startup or
-ingest fails with an actionable message, and that no event was acknowledged without being stored.
+**Independent Test**: Point Scout at Garage with each startup misconfiguration in turn and confirm startup
+fails with an actionable message before serving; separately confirm a runtime outage returns the retryable
+ingest failure, and that no event was acknowledged without being stored.
 
 **Acceptance Scenarios**:
 
 1. **Given** a configured endpoint and bucket that does not exist, **When** Scout starts, **Then** it
    fails with a message naming the bucket and the likely cause.
-2. **Given** valid Garage configuration but invalid credentials, **When** an event is ingested, **Then**
-   the request fails with a retryable response and nothing is acknowledged.
+2. **Given** a configured endpoint and bucket but invalid credentials, **When** Scout starts, **Then** it
+   fails with a message naming the endpoint and bucket and the credential remedy, and no telemetry is
+   accepted.
 3. **Given** a working configuration, **When** Garage becomes unreachable, **Then** ingest returns the
    existing retryable storage failure rather than accepting and dropping the event.
 
@@ -132,6 +143,8 @@ S3-compatible endpoint and confirm identical behaviour.
   procedure warns that this leaves late events on the old store, and the tool does not prevent it.
 - An object exceeds the ingest size limit, or an attachment is empty.
 - Retention runs before, during, or after the migration.
+- A crashed startup probe left `__scout/health/<uuid>` sentinels in the source: the migration ignores
+  them, so the destination key set equals the source key set minus `__scout/` keys.
 - The object store is temporarily unavailable while Scout is serving reads.
 
 ## Requirements *(mandatory)*
@@ -144,13 +157,17 @@ S3-compatible endpoint and confirm identical behaviour.
   explicit, documented Garage CLI steps (cluster layout, bucket creation, access key) so that no
   undocumented manual step is required before the first ingest; the shipped stack MUST NOT rely on an
   automatic init container for this.
-- **FR-003**: Object storage MUST remain configured through the existing endpoint, bucket, credential,
-  and region settings; adopting Garage MUST NOT require new application configuration concepts.
+- **FR-003**: Object storage for the running service MUST remain configured through the existing endpoint,
+  bucket, credential, and region settings; adopting Garage MUST NOT require new application configuration
+  concepts. The migration command's `SCOUT_MIGRATE_SOURCE_*` variables are one-shot tooling
+  configuration for that command and are not application configuration concepts (see FR-014).
 - **FR-004**: Switching object storage providers MUST NOT change object keys, object format, or the
   metadata that references objects, so previously stored data stays addressable.
 - **FR-005**: Scout MUST verify the configured object store before accepting telemetry: missing bucket,
-  invalid credentials, and unreachable endpoints MUST fail startup or the ingest request with an
-  actionable message, and an event MUST NOT be acknowledged unless its payload was durably stored.
+  invalid credentials, and unreachable endpoints MUST fail startup with an actionable message defined by
+  SC-005 (names the endpoint, bucket, and likely cause, within the startup bound). A storage failure after
+  startup MUST fail the ingest request with the existing retryable response, and an event MUST NOT be
+  acknowledged unless its payload was durably stored.
 - **FR-006**: Ingest, raw-payload retrieval, attachment retrieval, and retention deletion MUST behave
   identically on Garage as they do today.
 - **FR-007**: An existing deployment's stored objects MUST be migratable to Garage through a documented,
@@ -160,30 +177,35 @@ S3-compatible endpoint and confirm identical behaviour.
 - **FR-009**: Documentation MUST state that migration and ingestion are separate operational stages,
   that the operator schedules service downtime for the migration, and that Scout does not coordinate
   the two.
-- **FR-017**: The migration entry point MUST NOT contact, detect, wait for, or otherwise depend on the
-  running service; it operates solely on the two object stores, and scheduling a quiesced source is the
-  operator's responsibility.
 - **FR-010**: Documentation MUST replace MinIO with Garage in the quick start, deployment notes, and
   environment examples, including the Garage-specific setup expectations an operator must satisfy.
 - **FR-011**: Scout MUST keep working with any S3-compatible object store; the change is the default
   provider and its documentation, not a Garage-only dependency.
 - **FR-012**: Scout MUST provide a first-class migration command that copies every raw payload and
-  attachment from a specified source object store into the destination Garage store, verifies content
-  identity for each object, and reports counts of found, copied, skipped, verified, and mismatched
-  objects.
+  attachment from a specified source object store into the destination object store (Garage by default),
+  verifies content identity for each object, and reports counts of found, copied, skipped, verified,
+  mismatched, and failed objects, where `mismatched` is a subset of `failed`. Objects under the `__scout/`
+  prefix are startup-probe sentinels, not payloads: they MUST be excluded from the migration and from
+  `found`, so `found` counts payload and attachment objects only.
 - **FR-013**: The migration command MUST be safe to re-run and resumable: an object whose destination
-  copy already matches is skipped without rewriting it, an object whose copies differ is overwritten,
-  and an interrupted run changes nothing that a repeat run cannot complete. A completed run reports the
-  same verified counts.
-- **FR-014**: The migration command MUST NOT modify or delete source objects, MUST take the destination
-  from the deployment's existing object-store configuration and the source from a separate, explicitly
-  named source configuration so the running deployment keeps using its current store until cutover, and
-  MUST exit non-zero when any object fails verification while naming the affected object.
+  copy already matches is skipped without rewriting it, an object whose copies differ is overwritten
+  and re-verified, and an interrupted run changes nothing that a repeat run cannot complete. A repaired
+  and re-verified difference counts as a verified object and MUST NOT fail the run. A completed run
+  reports the same verified counts.
+- **FR-014**: The migration command MUST satisfy the source-immutability requirement in FR-008, MUST take
+  the destination from the deployment's existing object-store configuration and the source from a
+  separate, explicitly named source configuration so the running deployment keeps using its current store
+  until cutover, and MUST exit non-zero when any object fails verification while naming the affected
+  object. The separate source variables are tooling configuration for the migration command, not runtime
+  application settings.
 - **FR-015**: Migration MUST require no external object-storage tooling beyond Scout itself, so an
   operator needs only the binary, its configuration, and network access to both stores.
 - **FR-016**: Migration MUST run from a dedicated entry point of the Scout binary that performs only
   the migration: it MUST NOT start the HTTP server, ingest, workers, or retention, and it MUST exit
   when the run finishes so an operator can script around it.
+- **FR-017**: The migration entry point MUST NOT contact, detect, wait for, or otherwise depend on the
+  running service; it operates solely on the two object stores, and scheduling a quiesced source is the
+  operator's responsibility.
 
 ### Key Entities *(include if feature involves data)*
 
@@ -192,8 +214,10 @@ S3-compatible endpoint and confirm identical behaviour.
 - **Raw Payload Object**: The write-once bytes of one accepted event, addressed by a stable key that
   must survive a provider change.
 - **Attachment Object**: The write-once bytes of one event attachment, addressed by a stable key.
-- **Migration Run**: A repeatable copy-and-verify pass from a source object store to Garage, with
-  counts of found, copied, skipped (already identical), verified, and mismatched objects.
+- **Migration Run**: A repeatable copy-and-verify pass from a source object store to the destination
+  object store (Garage by default), with counts of found, copied, skipped (already identical), verified,
+  mismatched, and failed objects, where `mismatched` is a subset of `failed`; `found` counts payload and
+  attachment objects only, excluding `__scout/` probe sentinels.
 - **Destination Conflict**: An object key that already exists in Garage; identical content is skipped,
   different content is overwritten, and unreadable objects fail the run because verification is
   impossible.
@@ -203,20 +227,26 @@ S3-compatible endpoint and confirm identical behaviour.
 ### Measurable Outcomes
 
 - **SC-001**: A person following only the documented quick start reaches a working deployment with
-  Garage and stores a first event in under 15 minutes on a clean host.
-- **SC-002**: 100% of sampled raw payloads and attachments are byte-identical after storage and after a
-  provider switch.
-- **SC-003**: A migration of a populated deployment reports 100% of source objects verified and leaves
-  zero acknowledged events unreadable after cutover.
+  Garage and stores a first event on a clean host, with no MinIO installation and no undocumented
+  manual step; no time bound applies.
+- **SC-002**: 100% of migrated raw payloads and attachments are byte-identical after storage and after a
+  provider switch; the migration verifies every object, and post-cutover retrieval reads back at least
+  one raw payload and one attachment per project and confirms byte identity.
+- **SC-003**: A migration of a populated deployment reports 100% of source payload and attachment
+  objects verified (excluding `__scout/` sentinels) and leaves zero acknowledged events unreadable after
+  cutover.
 - **SC-004**: Re-running a completed migration changes nothing and reports the same verified counts.
-- **SC-005**: Every misconfiguration tested (missing bucket, bad credentials, unreachable endpoint)
-  fails within 30 seconds with a message that names the setting at fault, and no event is acknowledged.
+- **SC-005**: Every startup misconfiguration tested (missing bucket, bad credentials, unreachable endpoint)
+  fails within 60 seconds before Scout serves, with a message that names the setting at fault, and no event
+  is acknowledged.
 - **SC-006**: Switching providers requires no application code, schema, or object-key change — only
   configuration values.
 - **SC-007**: The existing ingest, raw-retrieval, attachment, and retention checks pass unchanged against
   a non-Garage S3-compatible endpoint.
-- **SC-008**: The migration command exits zero only when 100% of source objects verify, and a single
-  deliberately corrupted object makes it exit non-zero while naming that object.
+- **SC-008**: The migration command exits zero only when 100% of source payload and attachment objects
+  verify (excluding `__scout/` sentinels); an object that cannot be read, or whose destination copy
+  cannot be verified after writing, makes it exit non-zero while naming that object. A destination object
+  that differs but is repaired and re-verified does not fail the run.
 
 ## Assumptions
 

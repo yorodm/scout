@@ -72,8 +72,10 @@ no longer available. The Garage bucket no longer holds that key.
 
 ## 5. Misconfiguration fails fast
 
-Repeat startup with each of these and confirm the process exits before binding `:8080`, within 30
-seconds, prints no secret, and accepts no telemetry. Every message names the endpoint and bucket.
+Repeat startup with each of these and confirm the process exits before binding `:8080`, within 60
+seconds, prints no secret, and accepts no telemetry. Every message names the endpoint and bucket. A
+closed port returns immediately; to exercise the bound, use an address that drops packets and confirm
+failure within 60 seconds.
 
 | Misconfiguration | Expected message shape |
 | --- | --- |
@@ -131,11 +133,14 @@ cargo clippy --target wasm32-unknown-unknown --manifest-path ui/Cargo.toml -- -D
 ```
 
 The migration suite runs against two in-memory object stores and covers copy-all, skip-on-rerun,
-overwrite-differing, unreadable-source failure, counts, and key preservation. Two additional tests
-cover this feature's failure paths without Docker:
+overwrite-differing, unreadable-source failure, counts, and key preservation. These additional checks
+cover the failure paths without Docker:
 
-- `cargo test probe_failure_names_endpoint` — an unreachable endpoint fails the startup probe within
-  30 seconds, naming the endpoint and bucket and never the secret.
+- `cargo test probe_failure_names_endpoint` — a closed endpoint fails the startup probe, naming the
+  endpoint and bucket and never the secret.
+- `cargo test verify_writable_times_out_on_blackholed_endpoint -- --ignored` — a listener that accepts
+  but never responds fails the startup probe within 60 seconds, naming the endpoint and bucket and
+  never the secret. It is ignored by default because it waits on real timeouts.
 - `cargo test unreachable_object_store` — ingest returns `503`, stores nothing, and `/api/health`
   reports `degraded` while the object store is unreachable.
 - `cargo test objects` and `cargo test migrate` cover the settings, list/head/overwrite helpers, and
@@ -152,5 +157,5 @@ documentation change, not a Garage-only dependency.
 Steps 1–6 require Docker and a running Garage. The workspace used to build this feature has no Docker,
 so those steps are a completion gate rather than an automated check; the in-memory suite and code
 review cover the logic. When the gate is run, also run `docker compose config` and confirm it reports
-no warnings, and record the measured clean-host elapsed time for steps 1–2 (not measured here because
-the workspace has no Docker CLI).
+no warnings, and record the verified migration counts. SC-001 has no time bound: the gate is that the
+documented steps complete on a clean host with no MinIO and no undocumented manual step.

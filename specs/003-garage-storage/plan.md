@@ -8,10 +8,27 @@
 
 Replace MinIO with Garage in the shipped single-compose deployment and add a dedicated
 `scout migrate-objects` entry point that copies raw payloads and attachments from an existing
-store into Garage, verifying content identity and reporting counts. The runtime S3 client stays the
+store into the configured destination store (Garage by default), verifying content identity and
+reporting counts. The runtime S3 client stays the
 same shape (endpoint, bucket, credentials, region), object keys and formats do not change, and any
 S3-compatible provider remains supported. Documentation replaces MinIO with Garage and walks
 through the Garage CLI steps the shipped compose no longer performs automatically.
+
+### Clarified decisions (2026-11-01)
+
+- A differing destination object is overwritten and re-read; a successful repair counts as verified and
+  exits `0`. Only unreadable objects or post-write verification failures exit non-zero.
+- Startup verification covers a missing bucket, invalid credentials, and an unreachable endpoint and
+  fails before the server serves; storage failures after startup keep the retryable ingest response.
+- The S3 client keeps 5 s connect / 10 s request / at most 2 retries; the startup failure bound is 60 s.
+- `__scout/` probe sentinels are excluded from migration and from `found`; the destination key set
+  equals the source key set minus those keys.
+- The migration summary includes `failed`, with `mismatched` as a subset of `failed`.
+- FR-003's no-new-configuration rule applies to the running service; `SCOUT_MIGRATE_SOURCE_*` are
+  one-shot tooling configuration for the migration command.
+- The migration destination is the configured object store (Garage by default); the spec and CLI are
+  provider-neutral.
+- SC-001 has no time bound; SC-002 requires every migrated payload and attachment to be byte-identical.
 
 ## Technical Context
 
@@ -25,8 +42,10 @@ in `docker-compose.yml`. No schema or object-key changes. `AWS_*` destination va
 `objects::S3Settings::from_env`, not added to `Config`.
 
 **Testing**: `cargo test` with plain `#[tokio::test]` migration tests over `object_store`'s in-memory
-backend, plus the existing `#[actix_web::test]` integration suite. Real Garage is exercised by the
-compose smoke path in `quickstart.md` (requires Docker; unavailable in this workspace).
+backend, plus the existing `#[actix_web::test]` integration suite. Startup verification is tested
+against a blackholed endpoint (packets dropped, not a closed port) within the 60 s bound. Real Garage
+and a non-Garage provider regression (SC-007) are exercised by the compose paths in `quickstart.md`
+(require Docker; unavailable in this workspace, so they remain an unmet gate).
 
 **Target Platform**: Linux server, single binary plus PostgreSQL and Garage from one compose file.
 
@@ -37,7 +56,8 @@ unchanged; the migration logs progress so large stores are observable.
 
 **Constraints**: No external object-storage tooling; migration must be a mode of the same binary and
 must not start the HTTP server, ingest, workers, or retention. Secrets come from the environment.
-Migration and ingestion never coordinate; the operator schedules downtime.
+Migration and ingestion never coordinate; the operator schedules downtime. Startup storage
+verification runs before the server binds and must fail within 60 seconds.
 
 **Scale/Scope**: Raw payloads and attachments up to 10 MB each; deployments range from hundreds to
 millions of objects. The migration is operator-run, offline, and re-runnable.
@@ -52,14 +72,15 @@ millions of objects. The migration is operator-run, offline, and re-runnable.
 | II. Raw payloads immutable and authoritative | PASS | The source store is never modified or deleted. Migration copies into Garage before cutover, so the destination is not the live store while differences are repaired; no authoritative payload is rewritten. |
 | III. Project-scoped, server-side authorisation | PASS | No API or authorisation change; the migration touches bytes only. |
 | IV. One deployment unit, minimal moving parts | PASS | The migration is a mode of the existing binary; Garage replaces MinIO in the same single compose unit; no new services for the application. |
-| V. Evidence over assumption: test the real paths | PASS | Migration logic is covered in-crate against real `ObjectStore` implementations; the compose smoke path exercises Garage itself (env-gated, like previous deployment checks). |
+| V. Evidence over assumption: test the real paths | **BLOCKED** | Migration logic is covered in-crate against real `ObjectStore` implementations, but the mandated compose smoke test (T030/T033) has not run here, and the per-FR checks for FR-009/FR-015/FR-016/FR-017 are planned (T036–T038) but not implemented. This gate is not satisfied; see "Open gates". |
 | Security constraints | PASS | Credentials come from environment variables; no secret is logged; the migration never prints object content. |
 | Performance/reliability constraints | PASS | Ingest limits and `503` storage-failure behaviour are unchanged; startup now proves write access to the bucket before serving. |
 | Compatibility and Scope (v1.1.0) | PASS | Garage is reached through the S3 interface; no provider-specific I/O and no widening of the product surface. |
 | Development Workflow & Quality Gates | PASS | Slices end with `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test`; docs and quickstart updated in the same feature. |
 
-**Gate result: PASS.** No violations; see Complexity Tracking for the overwrite rationale and the new
-dependency.
+**Gate result: BLOCKED on Principle V.** No principle is knowingly violated, but the compose smoke test
+has not run and the per-FR executable checks are planned (T036–T038) rather than implemented. This plan
+cannot claim compliance until those gates run; see "Open gates".
 
 ## Post-Design Constitution Re-check
 
@@ -70,8 +91,9 @@ Re-evaluated after `research.md`, `data-model.md`, `contracts/`, and `quickstart
   repairing a differing copy cannot rewrite an authoritative payload. **PASS**
 - **III**: No API, session, or authorisation change. **PASS**
 - **IV**: One binary (entrypoint change only), one compose unit; no new service. **PASS**
-- **V**: In-memory object-store tests exercise the real trait; the Garage path is a documented compose
-  gate (Docker unavailable here, recorded as an environment gate in quickstart). **PASS (with gate)**
+- **V**: In-memory object-store tests exercise the real trait, but the Garage and non-Garage compose
+  paths have not run, and the per-FR checks for FR-009/FR-015/FR-016/FR-017 are planned (T036–T038) but
+  not implemented. **BLOCKED** — see "Open gates".
 - **Security**: Secrets only from the environment; never logged; the probe uses a unique sentinel and
   deletes it. **PASS**
 - **Reliability**: Startup proves write access before serving; ingest keeps returning `503` on storage
@@ -79,7 +101,17 @@ Re-evaluated after `research.md`, `data-model.md`, `contracts/`, and `quickstart
 - **Compatibility and Scope**: Provider-neutral S3 usage; Garage is the default and documentation, not
   a hard dependency. **PASS**
 
-**Post-design result: PASS.** No new violations.
+**Post-design result: BLOCKED.** No new violations, but Principle V remains unmet until the listed
+gates run.
+
+### Open gates
+
+| Gate | Status | Unblock condition |
+|---|---|---|
+| Principle V — compose-based object-store smoke test | NOT RUN | Execute quickstart steps 1–6 on a Docker host (T030/T033). |
+| Principle V — executable check per FR | PLANNED (T036–T038) | Implement T036 (FR-009/FR-010/FR-015 doc assertions), T037 (FR-016 dispatch isolation), and T038 (FR-017 no service contact). |
+| SC-007 — non-Garage provider regression | NOT RUN | Complete T040: repeat quickstart steps 3–4 and the byte-identity check against MinIO or another provider. |
+| SC-001/SC-003 — clean-host quick start and verified-migration counts | NOT RUN | Complete quickstart steps 1–6 and record the verified counts; SC-001 has no time bound. |
 
 ## Project Structure
 

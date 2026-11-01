@@ -35,7 +35,7 @@ implementation unless a task says otherwise.
   `AmazonS3Builder` from `(endpoint, bucket, region, access key, secret key)` instead of relying on
   `AmazonS3Builder::from_env()`. Use `with_allow_http` when the endpoint starts with `http://`,
   `with_virtual_hosted_style_request(false)` so requests are path-style, and client options with
-  bounded connect/request timeouts and a retry cap so an unreachable endpoint fails inside 30 seconds.
+  bounded connect/request timeouts and a retry cap so an unreachable endpoint fails inside 60 seconds.
   `S3Settings::from_env()` reads the destination values (`SCOUT_S3_*`, `AWS_*`); the runtime store is
   built from `Config` through the same helper.
 - **Rationale**: Garage's S3 gateway is reached over plain HTTP in the compose stack and does not need
@@ -49,8 +49,8 @@ implementation unless a task says otherwise.
 
 - **Decision**: Use `ObjectStore::list(None)` and consume the returned stream with
   `futures_util::StreamExt`. Skip keys under the `__scout/` prefix so a crashed startup probe's
-  sentinel can never be copied. Add `futures-util` as a direct dependency (no default features beyond
-  `std`).
+  sentinel can never be copied, and exclude them from `found` because they are not payloads. Add
+  `futures-util` as a direct dependency (no default features beyond `std`).
 - **Rationale**: Listing is the only way to discover keys; the stream adapter is already in the
   dependency graph through `object_store`, so a direct dependency adds no new transitive code.
 - **Alternatives considered**: Manual `poll_next` plumbing — rejected: fragile and harder to read.
@@ -67,6 +67,8 @@ implementation unless a task says otherwise.
   5. Re-read the destination and compare hashes.
   6. Only a re-read that matches increments `copied` and `verified`; a copy whose re-read differs or
      fails increments `failed` (and `mismatched` when the bytes differ) and never `copied`.
+  7. A differing destination that is successfully overwritten and re-read is a verified copy
+     (`CopiedOverwrite`); it does not fail the run.
 - **Rationale**: Matches clarification 5 and the spec's `skipped`/`copied`/`verified`/`mismatched`
   counts. Re-reading after the write is the only way to prove the destination actually stored the
   bytes rather than trusting a successful response.
@@ -89,8 +91,8 @@ implementation unless a task says otherwise.
 - **Decision**: Unreadable source or destination objects are logged with the key, counted as failures,
   and do not stop the run (so one bad object does not hide the rest). The final summary prints found,
   copied, skipped, verified, mismatched, and failed counts, then exits `1` if any failure occurred and
-  `0` otherwise. Configuration errors exit `1` before any listing, naming the missing variable or
-  setting.
+  `0` otherwise. A repaired and re-verified mismatch is not a failure and still exits `0`. Configuration
+  errors exit `1` before any listing, naming the missing variable or setting.
 - **Rationale**: FR-014 requires a non-zero exit that names the object; continuing gives the operator
   a complete picture in one run. A single exit code keeps scripting simple.
 - **Alternatives considered**: Abort on first failure — rejected: hides the scale of the problem. Two
@@ -100,9 +102,9 @@ implementation unless a task says otherwise.
 
 - **Decision**: In server mode, after building the store, call `Objects::verify_writable()` (in
   `src/objects.rs`), which performs a write/delete probe of a unique sentinel key
-  (`__scout/health/<uuid>`) when the backend is S3. Failure aborts startup with a message naming the
-  endpoint and bucket and the likely cause (missing bucket, bad credentials, unreachable host).
-  Memory-backed runs skip the probe.
+  (`__scout/health/<uuid>`) when the backend is S3. Failure aborts startup, before the server binds and
+  within 60 seconds, with a message naming the endpoint and bucket and the likely cause (missing
+  bucket, bad credentials, unreachable host). Memory-backed runs skip the probe.
 - **Rationale**: FR-005 requires failing before telemetry is accepted. A `HEAD` probe cannot
   distinguish a missing bucket from a missing object; a create/delete of a sentinel proves write
   access and bucket existence without touching payloads.
@@ -137,7 +139,7 @@ implementation unless a task says otherwise.
      `scout migrate-objects` with source variables set; it copies and verifies, and it may be re-run
      safely.
   2. **Cutover (operator-scheduled downtime):** stop the service, run the command once more to catch
-     up, switch the destination settings to Garage, start the service.
+     up, switch the destination settings to Garage (or another provider), start the service.
   The tool never talks to the service, never pauses ingest itself, and never deletes source objects.
 - **Rationale**: Clarifications 2–3 and FR-009/FR-017. The ordering gives the operator a verified copy
   before any irreplaceable data stops being written to the old store.
@@ -150,8 +152,10 @@ implementation unless a task says otherwise.
      copy-all, skip-identical on re-run, overwrite-differing, unreadable-source failure, count accuracy,
      and key preservation.
   2. Settings tests: missing source variables are rejected with the variable name; endpoint scheme
-     selects HTTP; path-style is requested.
-  3. Existing ingest/retrieval/retention tests continue to pass unchanged (regression for SC-007).
+     selects HTTP; path-style is requested; a blackholed endpoint (not a closed port) fails the startup
+     probe within the 60 s bound without printing the secret.
+  3. Existing ingest/retrieval/retention tests continue to pass unchanged (regression for FR-006);
+     SC-007 additionally requires the same checks run against a non-Garage provider in compose.
   4. Compose smoke path in `quickstart.md`: bring up Garage, run the documented CLI setup, ingest,
      fetch raw bytes, run retention, and run a migration between two buckets. Requires Docker and is
      an explicit environment gate in this workspace.
@@ -180,6 +184,8 @@ implementation unless a task says otherwise.
 | Exact environment variable names | R2 (`SCOUT_MIGRATE_SOURCE_*`) |
 | How two stores are authenticated | R3 (explicit settings; secrets from environment) |
 | Cutover sequencing | R11 (copy stage, then operator-scheduled downtime and a final pass) |
-| Destination conflict handling | R5 (skip identical, overwrite differing, fail on unreadable) |
+| Destination conflict handling | R5 (skip identical; overwrite differing and verify; a repaired mismatch succeeds; fail on unreadable or unverifiable) |
+| Probe sentinels in the source | R4 (keys under `__scout/` are excluded from copying and from `found`) |
+| Migration counts | R5/R7 (`failed` is reported; `mismatched` is a subset of `failed`) |
 | Migration throughput | R6 (8 concurrent transfers); no hard target in this slice |
 | Startup verification of bucket existence | R8 (write/delete sentinel probe) |
