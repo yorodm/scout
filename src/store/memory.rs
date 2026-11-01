@@ -1,7 +1,7 @@
 use crate::models::*;
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use uuid::Uuid;
 
@@ -163,6 +163,107 @@ impl Store {
         self.recovery_codes
             .iter()
             .any(|code| code.user_id == user_id)
+    }
+
+    /// True when the account belongs to a seeded demo organisation. Such an
+    /// account is confined to demo organisations and can never reach a real
+    /// project, even if a membership row exists (FR-011, SC-014).
+    pub fn is_demo_user(&self, user_id: Uuid) -> bool {
+        self.org_members.iter().any(|((member, org_id), _)| {
+            *member == user_id && self.orgs.get(org_id).is_some_and(|org| org.is_demo)
+        })
+    }
+
+    /// Replace the demo organisation's rows with `fresh`, leaving every real
+    /// organisation, project, record, session, and the operator untouched
+    /// (SC-014). Only rows that belong to a demo organisation are removed.
+    pub fn reset_demo(&mut self, fresh: Store) {
+        let demo_orgs: HashSet<Uuid> = self
+            .orgs
+            .values()
+            .filter(|org| org.is_demo)
+            .map(|org| org.id)
+            .collect();
+        let demo_projects: HashSet<Uuid> = self
+            .projects
+            .values()
+            .filter(|project| demo_orgs.contains(&project.org_id))
+            .map(|project| project.id)
+            .collect();
+        let demo_users: HashSet<Uuid> = self
+            .users
+            .values()
+            .filter(|user| !user.is_operator)
+            .map(|user| user.id)
+            .filter(|user_id| self.is_demo_user(*user_id))
+            .collect();
+        let demo_invitations: HashSet<Uuid> = self
+            .invitations
+            .values()
+            .filter(|invitation| demo_orgs.contains(&invitation.org_id))
+            .map(|invitation| invitation.id)
+            .collect();
+        let demo_tokens: HashSet<Uuid> = self
+            .api_tokens
+            .values()
+            .filter(|token| demo_users.contains(&token.user_id))
+            .map(|token| token.id)
+            .collect();
+
+        self.orgs.retain(|id, _| !demo_orgs.contains(id));
+        self.org_members
+            .retain(|(_, org_id), _| !demo_orgs.contains(org_id));
+        self.projects.retain(|id, _| !demo_projects.contains(id));
+        self.projects_by_dsn
+            .retain(|_, id| !demo_projects.contains(id));
+        self.keys
+            .retain(|_, key| !demo_projects.contains(&key.project_id));
+        self.memberships
+            .retain(|(_, project_id), _| !demo_projects.contains(project_id));
+        self.issues
+            .retain(|_, issue| !demo_projects.contains(&issue.project_id));
+        self.issues_by_fingerprint
+            .retain(|(project_id, _), _| !demo_projects.contains(project_id));
+        self.events
+            .retain(|_, event| !demo_projects.contains(&event.project_id));
+        self.seen_event_ids
+            .retain(|(project_id, _), _| !demo_projects.contains(project_id));
+        self.logs
+            .retain(|log| !demo_projects.contains(&log.project_id));
+        self.invitations
+            .retain(|id, _| !demo_invitations.contains(id));
+        self.invitations_by_token
+            .retain(|_, id| !demo_invitations.contains(id));
+        self.users.retain(|id, _| !demo_users.contains(id));
+        self.users_by_email.retain(|_, id| !demo_users.contains(id));
+        self.sessions
+            .retain(|_, session| !demo_users.contains(&session.user_id));
+        self.recovery_codes
+            .retain(|code| !demo_users.contains(&code.user_id));
+        self.api_tokens.retain(|id, _| !demo_tokens.contains(id));
+        self.api_tokens_by_hash
+            .retain(|_, id| !demo_tokens.contains(id));
+
+        // The fresh seed is the demo organisation in its original state.
+        self.orgs.extend(fresh.orgs);
+        self.org_members.extend(fresh.org_members);
+        self.projects.extend(fresh.projects);
+        self.projects_by_dsn.extend(fresh.projects_by_dsn);
+        self.keys.extend(fresh.keys);
+        self.users.extend(fresh.users);
+        self.users_by_email.extend(fresh.users_by_email);
+        self.memberships.extend(fresh.memberships);
+        self.issues.extend(fresh.issues);
+        self.issues_by_fingerprint
+            .extend(fresh.issues_by_fingerprint);
+        self.events.extend(fresh.events);
+        self.seen_event_ids.extend(fresh.seen_event_ids);
+        self.logs.extend(fresh.logs);
+        self.invitations.extend(fresh.invitations);
+        self.invitations_by_token.extend(fresh.invitations_by_token);
+        self.recovery_codes.extend(fresh.recovery_codes);
+        self.api_tokens.extend(fresh.api_tokens);
+        self.api_tokens_by_hash.extend(fresh.api_tokens_by_hash);
     }
 
     /// Remove expired sessions. Returns the number removed.

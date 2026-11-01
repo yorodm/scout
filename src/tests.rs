@@ -2019,6 +2019,224 @@ async fn settings_never_return_the_model_api_key() {
 // --- convergence: safety, scoping, and storage ------------------------------
 
 #[actix_web::test]
+async fn demo_accounts_and_projects_are_confined_and_a_reset_preserves_real_data() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_demo(state.clone()).await;
+    bootstrap_operator(&state).await;
+    let (_, operator) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    let operator_token = operator["token"].as_str().expect("operator session");
+
+    // A real organisation and project, alongside the seeded demo organisation.
+    let (status, org_body) = call_json(
+        &app,
+        post_json(
+            "/api/orgs",
+            operator_token,
+            json!({ "name": "Real Co", "initial_admin_email": "admin@real.test" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create org failed: {org_body}");
+    let real_org = org_body["organisation"]["id"].as_str().unwrap().to_string();
+    let setup_token = org_body["initial_admin_setup_token"].as_str().unwrap();
+    let (_, accepted) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{setup_token}/accept"),
+            json!({ "name": "Real Admin", "password": "real-admin-pw-1" }),
+        ),
+    )
+    .await;
+    let real_admin_token = accepted["token"].as_str().expect("real admin session");
+    let (status, project_body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{real_org}/projects"),
+            operator_token,
+            json!({
+                "name": "real-app",
+                "slug": "real-app",
+                "initial_owner_email": "admin@real.test",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "create project failed: {project_body}"
+    );
+    let real_project = project_body["project"]["id"].as_str().unwrap().to_string();
+
+    // T048: the organisation list exposes the slug and the demo marker.
+    let (status, orgs) = call_json(&app, get("/api/orgs", operator_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = orgs["organisations"].as_array().expect("organisations");
+    let real = listed.iter().find(|org| org["name"] == "Real Co").unwrap();
+    assert_eq!(real["is_demo"], false);
+    assert_eq!(real["slug"], "real-co");
+    let demo = listed.iter().find(|org| org["name"] == "Acme").unwrap();
+    assert_eq!(demo["is_demo"], true);
+    assert_eq!(demo["slug"], "acme");
+
+    // SC-014: demo accounts list only demo-organisation members.
+    let (status, accounts) = call_json(&app, get_public("/api/demo/accounts")).await;
+    assert_eq!(status, StatusCode::OK);
+    let emails: Vec<&str> = accounts["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|account| account["email"].as_str().unwrap())
+        .collect();
+    assert!(emails.contains(&"demo@scout.local"));
+    assert!(!emails.contains(&"admin@real.test"));
+    assert!(!emails.contains(&"ops@test.local"));
+
+    // A demo session lists only demo projects and cannot reach the real one.
+    let demo_auth = login(&app, "demo@scout.local").await;
+    let demo_token = demo_auth["token"].as_str().unwrap();
+    let (status, projects) = call_json(&app, get("/api/projects", demo_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(projects["projects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|project| project["id"] != real_project.as_str()));
+    assert!(demo_auth["memberships"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|membership| membership["project_id"] != real_project.as_str()));
+    let (status, _) = call_json(
+        &app,
+        get(&format!("/api/projects/{real_project}/issues"), demo_token),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a demo session must not learn that the real project exists"
+    );
+
+    // A reset replaces demo rows only; real rows and the operator survive.
+    let (status, _) = call_json(&app, post_public("/api/demo/reset", json!({}))).await;
+    assert_eq!(status, StatusCode::OK);
+    {
+        let store = state.store.read().await;
+        assert!(store
+            .orgs
+            .values()
+            .any(|org| org.id.to_string() == real_org));
+        assert!(store
+            .projects
+            .values()
+            .any(|project| project.id.to_string() == real_project));
+        assert!(store.users.values().any(|user| user.is_operator));
+        assert!(store
+            .users
+            .values()
+            .any(|user| user.email == "admin@real.test"));
+        assert!(store.orgs.values().any(|org| org.is_demo));
+    }
+    // The real admin still reads its project after the reset.
+    let (status, _) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{real_project}/issues"),
+            real_admin_token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn the_operator_is_denied_every_project_scoped_route() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+
+    // Give the operator an owner membership on purpose: the denial must come from
+    // the operator's deployment-level scope, not from a missing membership row.
+    let (project_id, issue_id) = {
+        let store = state.store.read().await;
+        let project = store.projects.values().next().expect("a seeded project");
+        let issue = store
+            .issues
+            .values()
+            .find(|issue| issue.project_id == project.id)
+            .expect("a seeded issue");
+        (project.id, issue.id)
+    };
+    {
+        let mut store = state.store.write().await;
+        let operator_id = store
+            .users
+            .values()
+            .find(|user| user.is_operator)
+            .expect("the operator")
+            .id;
+        store
+            .memberships
+            .insert((operator_id, project_id), crate::models::Role::Owner);
+    }
+
+    let (_, auth) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    let token = auth["token"].as_str().expect("operator session");
+
+    for path in [
+        format!("/api/projects/{project_id}"),
+        format!("/api/projects/{project_id}/issues"),
+        format!("/api/projects/{project_id}/logs"),
+        format!("/api/projects/{project_id}/search?q=error"),
+        format!("/api/projects/{project_id}/keys"),
+        format!("/api/projects/{project_id}/settings"),
+        format!("/api/projects/{project_id}/members"),
+        format!("/api/issues/{issue_id}"),
+        format!("/api/issues/{issue_id}/occurrences"),
+        format!("/api/issues/{issue_id}/raw"),
+    ] {
+        let (status, body) = call_json(&app, get(&path, token)).await;
+        assert!(
+            matches!(status, StatusCode::NOT_FOUND | StatusCode::FORBIDDEN),
+            "{path} answered {status}: {body}"
+        );
+    }
+
+    // Writing a credential is denied just as hard as reading telemetry.
+    let (status, _) = call_json(
+        &app,
+        post_json(
+            &format!("/api/projects/{project_id}/keys"),
+            token,
+            json!({ "label": "operator" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Deployment-level routes keep working.
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            "/api/orgs",
+            token,
+            json!({ "name": "Ops Co", "initial_admin_email": "admin@ops.test" }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "operator provisioning broke: {body}"
+    );
+    let (status, _) = call_json(&app, get("/api/metrics", token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call_json(&app, get("/api/operator/users?locked=true", token)).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[actix_web::test]
 async fn demo_routes_are_opt_in_only() {
     let state = state_for("http://127.0.0.1:1", 256).await;
     let app = init_app_with_state(state.clone()).await;

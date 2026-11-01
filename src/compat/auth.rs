@@ -187,6 +187,18 @@ pub async fn authorize_project(
         let org = resolve_org(&store, org_ref)
             .ok_or_else(|| CompatError::NotFound("organisation not found".into()))?
             .clone();
+        // SC-015: the operator's authority is deployment-level only.
+        if store
+            .users
+            .get(&auth.user_id)
+            .is_some_and(|user| user.is_operator)
+        {
+            return Err(CompatError::NotFound("project not found".into()));
+        }
+        // SC-014: a demo-scoped identity never reaches a real organisation.
+        if store.is_demo_user(auth.user_id) && !org.is_demo {
+            return Err(CompatError::NotFound("organisation not found".into()));
+        }
         let project = resolve_project(&store, &org, project_ref)
             .ok_or_else(|| CompatError::NotFound("project not found".into()))?
             .clone();
@@ -214,6 +226,16 @@ pub async fn authorize_org(
         let org = resolve_org(&store, org_ref)
             .ok_or_else(|| CompatError::NotFound("organisation not found".into()))?
             .clone();
+        if store
+            .users
+            .get(&auth.user_id)
+            .is_some_and(|user| user.is_operator)
+        {
+            return Err(CompatError::NotFound("organisation not found".into()));
+        }
+        if store.is_demo_user(auth.user_id) && !org.is_demo {
+            return Err(CompatError::NotFound("organisation not found".into()));
+        }
         let org_role = store.org_role_for(auth.user_id, org.id);
         (org, org_role)
     };

@@ -152,6 +152,7 @@ async fn auth_project(
 ) -> Result<(Uuid, String, Role), ApiError> {
     let (user_id, email) = auth_user(req, state).await?;
     let store = state.store.read().await;
+    deny_project_access(&store, user_id, project_id)?;
     if !project_is_active(&store, project_id) {
         return Err(ApiError::NotFound("project not found".into()));
     }
@@ -159,6 +160,36 @@ async fn auth_project(
         .role_for(user_id, project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
     Ok((user_id, email, role))
+}
+
+/// The shared project-scoped access rule: the operator is denied outright
+/// (FR-012, SC-015) and a demo session may only reach demo organisations
+/// (FR-011, SC-014). Both resolve as not-found so existence never leaks.
+fn deny_project_access(
+    store: &crate::store::Store,
+    user_id: Uuid,
+    project_id: Uuid,
+) -> Result<(), ApiError> {
+    if store
+        .users
+        .get(&user_id)
+        .is_some_and(|user| user.is_operator)
+    {
+        return Err(ApiError::NotFound("project not found".into()));
+    }
+    if store.is_demo_user(user_id) && !project_in_demo_org(store, project_id) {
+        return Err(ApiError::NotFound("project not found".into()));
+    }
+    Ok(())
+}
+
+/// Whether the project belongs to an organisation marked as demo.
+fn project_in_demo_org(store: &crate::store::Store, project_id: Uuid) -> bool {
+    store
+        .projects
+        .get(&project_id)
+        .and_then(|project| store.orgs.get(&project.org_id))
+        .is_some_and(|org| org.is_demo)
 }
 
 /// A soft-deleted project is hidden from every normal read, but its rows remain.
@@ -178,12 +209,22 @@ fn issue_state_str(state: IssueState) -> &'static str {
 }
 
 fn memberships_json(store: &crate::store::Store, user_id: Uuid) -> Vec<Value> {
+    let demo_confined = store.is_demo_user(user_id);
     store
         .memberships
         .iter()
         .filter(|((uid, _), _)| *uid == user_id)
         .filter_map(|((_, project_id), role)| {
             let project = store.projects.get(project_id)?;
+            // A demo session must not learn that a real project exists.
+            if demo_confined
+                && !store
+                    .orgs
+                    .get(&project.org_id)
+                    .is_some_and(|org| org.is_demo)
+            {
+                return None;
+            }
             Some(json!({
                 "project_id": project_id,
                 "project_name": project.name,
@@ -303,6 +344,10 @@ pub async fn demo_accounts(state: web::Data<AppState>) -> Result<HttpResponse, A
     let store = state.store.read().await;
     let mut accounts = Vec::new();
     for user in store.users.values().filter(|user| !user.is_operator) {
+        // SC-014: only members of the seeded demo organisation are listed.
+        if !store.is_demo_user(user.id) {
+            continue;
+        }
         let memberships = memberships_json(&store, user.id);
         accounts.push(json!({
             "email": user.email,
@@ -315,26 +360,17 @@ pub async fn demo_accounts(state: web::Data<AppState>) -> Result<HttpResponse, A
 }
 
 pub async fn reset_demo(state: web::Data<AppState>) -> HttpResponse {
-    // A demo reset must not delete the deployment operator: it cannot be
-    // recreated without a restart and its password must never be reset here.
-    let operator = {
-        let store = state.store.read().await;
-        store.users.values().find(|user| user.is_operator).cloned()
-    };
-    let (mut fresh, raws) = crate::store::seed(&state.self_url);
-    if let Some(operator) = operator {
-        fresh
-            .users_by_email
-            .insert(operator.email.to_ascii_lowercase(), operator.id);
-        fresh.users.insert(operator.id, operator);
-    }
+    // A demo reset replaces only demo-organisation rows: real organisations,
+    // their projects and records, live sessions, and the deployment operator are
+    // preserved by `Store::reset_demo` (FR-011, SC-014).
+    let (fresh, raws) = crate::store::seed(&state.self_url);
     for (key, data) in raws {
         if let Err(error) = state.objects.put_create(&key, data).await {
             return HttpResponse::InternalServerError()
                 .json(json!({ "error": format!("could not reseed raw payload: {error}") }));
         }
     }
-    *state.store.write().await = fresh;
+    state.store.write().await.reset_demo(fresh);
     crate::classifier::reset_outage();
     HttpResponse::Ok().json(json!({ "ok": true }))
 }
@@ -447,6 +483,7 @@ pub async fn list_projects(
 ) -> Result<HttpResponse, ApiError> {
     let (user_id, _) = auth_user(&req, &state).await?;
     let store = state.store.read().await;
+    let demo_confined = store.is_demo_user(user_id);
     let mut projects = Vec::new();
     for ((member, project_id), role) in &store.memberships {
         if *member != user_id {
@@ -456,6 +493,10 @@ pub async fn list_projects(
             continue;
         };
         if project.deleted_at.is_some() {
+            continue;
+        }
+        // SC-014: a demo session sees only demo-organisation projects.
+        if demo_confined && !project_in_demo_org(&store, *project_id) {
             continue;
         }
         let org_name = store
@@ -591,6 +632,17 @@ async fn auth_org_admin(
 ) -> Result<(Uuid, String), ApiError> {
     let (user_id, email) = auth_user(req, state).await?;
     let store = state.store.read().await;
+    // FR-012: deployment-level only; organisation administration stays with the
+    // organisation's own members.
+    if store
+        .users
+        .get(&user_id)
+        .is_some_and(|user| user.is_operator)
+    {
+        return Err(ApiError::Forbidden(
+            "organisation administration belongs to its members".into(),
+        ));
+    }
     if store.org_role_for(user_id, org_id) != Some(OrgRole::Admin) {
         return Err(ApiError::Forbidden(
             "organisation admin role is required".into(),
@@ -670,7 +722,16 @@ pub async fn list_orgs(
     let mut organisations: Vec<Value> = store
         .orgs
         .values()
-        .map(|org| json!({ "id": org.id, "name": org.name, "created_by": org.created_by, "created_at": org.created_at }))
+        .map(|org| {
+            json!({
+                "id": org.id,
+                "name": org.name,
+                "slug": org.slug,
+                "is_demo": org.is_demo,
+                "created_by": org.created_by,
+                "created_at": org.created_at,
+            })
+        })
         .collect();
     organisations.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     Ok(HttpResponse::Ok().json(json!({ "organisations": organisations })))
@@ -1340,6 +1401,7 @@ pub async fn get_issue(
         .get(&issue_id)
         .cloned()
         .ok_or_else(|| ApiError::NotFound("issue not found".into()))?;
+    deny_project_access(&store, user_id, issue.project_id)?;
     store
         .role_for(user_id, issue.project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
@@ -1395,6 +1457,7 @@ pub async fn list_occurrences(
         .issues
         .get(&issue_id)
         .ok_or_else(|| ApiError::NotFound("issue not found".into()))?;
+    deny_project_access(&store, user_id, issue.project_id)?;
     store
         .role_for(user_id, issue.project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
@@ -1434,6 +1497,7 @@ pub async fn get_raw(
         .issues
         .get(&issue_id)
         .ok_or_else(|| ApiError::NotFound("issue not found".into()))?;
+    deny_project_access(&store, user_id, issue.project_id)?;
     store
         .role_for(user_id, issue.project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
@@ -1477,6 +1541,7 @@ pub async fn set_issue_state(
         .get(&issue_id)
         .map(|i| i.project_id)
         .ok_or_else(|| ApiError::NotFound("issue not found".into()))?;
+    deny_project_access(&store, user_id, project_id)?;
     let role = store
         .role_for(user_id, project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;
@@ -1519,6 +1584,7 @@ pub async fn categorise(
         .get(&issue_id)
         .map(|i| i.project_id)
         .ok_or_else(|| ApiError::NotFound("issue not found".into()))?;
+    deny_project_access(&store, user_id, project_id)?;
     let role = store
         .role_for(user_id, project_id)
         .ok_or_else(|| ApiError::Forbidden("no access to this project".into()))?;

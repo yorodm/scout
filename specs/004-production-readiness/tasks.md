@@ -131,16 +131,16 @@ a demo session cannot reach the real project while a demo reset preserves it.
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T042 [US2] Add SC-015 tests in `src/tests.rs`: the operator is denied every project-scoped route (issues, events, logs, raw, attachments, keys, settings) with `404`/`403` and no existence leak, while organisation creation and setup-token issuance still succeed
-- [ ] T043 [US2] Add SC-014 tests in `src/tests.rs`: with real and demo organisations present, a demo session lists only demo accounts, reads only demo projects, and receives `404` for the real project; `POST /api/demo/reset` leaves the real organisation, project, and operator intact
+- [x] T042 [US2] Add SC-015 tests in `src/tests.rs`: the operator is denied every project-scoped route (issues, events, logs, raw, attachments, keys, settings) with `404`/`403` and no existence leak, while organisation creation and setup-token issuance still succeed
+- [x] T043 [US2] Add SC-014 tests in `src/tests.rs`: with real and demo organisations present, a demo session lists only demo accounts, reads only demo projects, and receives `404` for the real project; `POST /api/demo/reset` leaves the real organisation, project, and operator intact
 - [ ] T044 [US2] Add initial-admin tests in `src/tests.rs`: a new-account token sets a password and returns recovery codes once; an existing account must sign in first, keeps its password, and gains the admin role; an expired/used/revoked token returns `410`
 - [ ] T045 [US2] Add recovery-code tests in `src/tests.rs`: reissuing invalidates prior unused codes, only the newest set works, and no plaintext is stored or returned twice
 
 ### Implementation for User Story 2
 
-- [ ] T046 [US2] Enforce operator scope in `src/api.rs`: `auth_project`/`auth_org_admin` deny the operator on project routes while the operator keeps deployment-level routes; reuse the existing not-found/forbidden split
-- [ ] T047 [US2] Scope the demo endpoints in `src/api.rs` and the store methods they use: accounts list only demo members; reset replaces demo-organisation rows only and never the operator or real organisations
-- [ ] T048 [US2] Include `slug` and `is_demo` in `GET /api/orgs` in `src/api.rs` per the native API contract
+- [x] T046 [US2] Enforce operator scope in `src/api.rs`: `auth_project`/`auth_org_admin` deny the operator on project routes while the operator keeps deployment-level routes; reuse the existing not-found/forbidden split
+- [x] T047 [US2] Scope the demo endpoints in `src/api.rs` and the store methods they use: accounts list only demo members; reset replaces demo-organisation rows only and never the operator or real organisations
+- [x] T048 [US2] Include `slug` and `is_demo` in `GET /api/orgs` in `src/api.rs` per the native API contract
 - [ ] T049 [P] [US2] Complete real sign-in, recovery, invitation acceptance, and one-time recovery-code display in `ui/src/components/overlays.rs`, hiding demo shortcuts when `GET /api/demo/accounts` is unavailable
 - [ ] T050 [US2] Add the operator console to `ui/src/components/other.rs` (organisation list with slug and demo badge, creation form, one-time setup-token block with copy) and its navigation entry in `ui/src/components/app.rs`
 - [ ] T051 [US2] Add member and invitation screens to `ui/src/components/other.rs` (list, add, role change, removal with last-owner message, invite link shown once, revoke)
