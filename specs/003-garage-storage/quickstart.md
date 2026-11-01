@@ -153,8 +153,6 @@ documentation change, not a Garage-only dependency.
 
 ## Environment gate
 
-Steps 1–6 require Docker and a running Garage. The workspace used to build this feature has no Docker,
-so those steps are a completion gate rather than an automated check; the in-memory suite and code
-review cover the logic. When the gate is run, also run `docker compose config` and confirm it reports
-no warnings, and record the verified migration counts. SC-001 has no time bound: the gate is that the
-documented steps complete on a clean host with no MinIO and no undocumented manual step.
+Steps 1–6 require Docker and a running Garage. Verified on a Docker host on 2026-11-01: `docker compose`
+started Garage, PostgreSQL, and Scout, and Scout's startup probe passed against both the object store
+and the metadata database. Re-run this path after changing deployment configuration.
