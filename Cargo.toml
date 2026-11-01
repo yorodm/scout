@@ -32,6 +32,7 @@ sqlx = { version = "0.8", default-features = false, features = [
     "json",
 ] }
 object_store = { version = "0.12", features = ["aws"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 argon2 = "0.5"
 openidconnect = "4"
 rand = "0.9"

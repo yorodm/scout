@@ -13,11 +13,11 @@ services:
       SCOUT_SELF_URL: ${SCOUT_SELF_URL:-http://127.0.0.1:8080}
       RUST_LOG: ${RUST_LOG:-info}
       DATABASE_URL: postgres://scout:scout@postgres:5432/scout
-      SCOUT_S3_ENDPOINT: http://minio:9000
+      SCOUT_S3_ENDPOINT: http://garage:3900
       SCOUT_S3_BUCKET: scout-raw
-      AWS_ACCESS_KEY_ID: ${SCOUT_S3_ACCESS_KEY:-scout}
-      AWS_SECRET_ACCESS_KEY: ${SCOUT_S3_SECRET_KEY:-scout-secret}
-      AWS_REGION: ${SCOUT_S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${SCOUT_S3_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${SCOUT_S3_SECRET_KEY:-}
+      AWS_REGION: ${SCOUT_S3_REGION:-garage}
       SCOUT_OPERATOR_EMAIL: ${SCOUT_OPERATOR_EMAIL:-operator@scout.local}
       SCOUT_OPERATOR_PASSWORD: ${SCOUT_OPERATOR_PASSWORD:-change-me-now}
       # Demo data plus /api/demo/* (including an unauthenticated reset). Set to
@@ -30,8 +30,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
+      garage:
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:
@@ -49,43 +49,25 @@ services:
       retries: 20
     restart: unless-stopped
 
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${SCOUT_S3_ACCESS_KEY:-scout}
-      MINIO_ROOT_PASSWORD: ${SCOUT_S3_SECRET_KEY:-scout-secret}
+  # Single-node Garage (S3-compatible). Layout, bucket, and access-key setup are
+  # documented in the README; this service intentionally does not automate them.
+  garage:
+    image: dxflrs/garage:v2.5.0
+    command: ["server"]
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "3900:3900"
+      # The admin API is for local operators only.
+      - "127.0.0.1:3903:3903"
     volumes:
-      - minio-data:/data
+      - ./deploy/garage.toml:/etc/garage.toml:ro
+      - garage-data:/var/lib/garage
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      test: ["CMD", "/garage", "status"]
       interval: 5s
       timeout: 5s
       retries: 20
     restart: unless-stopped
 
-  # Creates the raw-payload bucket once and exits; the app waits for it so the
-  # first ingest cannot race bucket creation.
-  minio-init:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
-        mc mb --ignore-existing local/scout-raw &&
-        mc anonymous set none local/scout-raw
-    environment:
-      MINIO_ROOT_USER: ${SCOUT_S3_ACCESS_KEY:-scout}
-      MINIO_ROOT_PASSWORD: ${SCOUT_S3_SECRET_KEY:-scout-secret}
-    restart: "no"
-
 volumes:
   postgres-data:
-  minio-data:
+  garage-data:

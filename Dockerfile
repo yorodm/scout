@@ -43,4 +43,7 @@ ENV PORT=8080 \
     RUST_LOG=info \
     SCOUT_UI_DIR=/app/ui/dist
 EXPOSE 8080
-CMD ["scout"]
+# ENTRYPOINT plus an overridable command lets the same image run the server or a
+# subcommand such as `migrate-objects` (feature 003).
+ENTRYPOINT ["scout"]
+CMD []

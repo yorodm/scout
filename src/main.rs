@@ -8,6 +8,7 @@ mod error;
 mod grouping;
 mod ingest;
 mod middleware;
+mod migrate;
 mod models;
 mod objects;
 mod state;
@@ -35,6 +36,17 @@ async fn main() -> std::io::Result<()> {
         )
         .init();
 
+    if std::env::args().nth(1).as_deref() == Some(crate::migrate::MODE) {
+        return match crate::migrate::run_from_env().await {
+            Ok(0) => Ok(()),
+            Ok(_) => std::process::exit(1),
+            Err(error) => {
+                eprintln!("migrate: {error}");
+                std::process::exit(1);
+            }
+        };
+    }
+
     let config = Config::from_env();
     let port = config.port;
     let self_url = config.self_url.clone();
@@ -46,12 +58,24 @@ async fn main() -> std::io::Result<()> {
     }
 
     let objects = match crate::objects::Objects::from_config(&config) {
-        Ok(objects) => Arc::new(objects),
+        Ok(objects) => objects,
         Err(error) => {
             tracing::error!("{error}");
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, error));
         }
     };
+
+    // FR-005: prove the bucket is writable before any telemetry is accepted.
+    // `verify_writable` names the endpoint, bucket, and likely cause on failure.
+    if let Err(error) = objects.verify_writable().await {
+        let message = format!("object storage startup check failed: {error}");
+        tracing::error!("{message}");
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            message,
+        ));
+    }
+    let objects = Arc::new(objects);
 
     // Demo fixtures carry known credentials, so they are opt-in only.
     let (mut seeded_store, seeded_raw) = if demo_mode {
