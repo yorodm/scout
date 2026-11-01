@@ -14,7 +14,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       DATABASE_URL: postgres://scout:scout@postgres:5432/scout
       SCOUT_S3_ENDPOINT: http://garage:3900
-      SCOUT_S3_BUCKET: scout-raw
+      SCOUT_S3_BUCKET: ${SCOUT_S3_DEFAULT_BUCKET:-scout-raw}
       AWS_ACCESS_KEY_ID: ${SCOUT_S3_ACCESS_KEY:-}
       AWS_SECRET_ACCESS_KEY: ${SCOUT_S3_SECRET_KEY:-}
       AWS_REGION: ${SCOUT_S3_REGION:-garage}
@@ -49,11 +49,17 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # Single-node Garage (S3-compatible). Layout, bucket, and access-key setup are
-  # documented in the README; this service intentionally does not automate them.
+  # Single-node Garage (S3-compatible). The image has no ENTRYPOINT, so the
+  # command below is the full argv. `--single-node` assigns the layout and
+  # `--default-bucket` creates the bucket and access key from GARAGE_DEFAULT_*,
+  # which compose maps from the SCOUT_S3_* exports.
   garage:
     image: dxflrs/garage:v2.5.0
-    command: ["server"]
+    command: ["/garage", "server", "--single-node", "--default-bucket"]
+    environment:
+      GARAGE_DEFAULT_ACCESS_KEY: ${SCOUT_S3_ACCESS_KEY:-}
+      GARAGE_DEFAULT_SECRET_KEY: ${SCOUT_S3_SECRET_KEY:-}
+      GARAGE_DEFAULT_BUCKET: ${SCOUT_S3_DEFAULT_BUCKET:-scout-raw}
     ports:
       - "3900:3900"
       # The admin API is for local operators only.

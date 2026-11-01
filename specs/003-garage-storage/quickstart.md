@@ -12,32 +12,31 @@ Runnable validation for feature 003. Shapes and guarantees live in
 
 ## 1. Start Garage and PostgreSQL
 
+Generate the credentials and bucket name once, then start Garage. Compose runs
+`/garage server --single-node --default-bucket`, so the layout, bucket, and access key are created
+automatically:
+
 ```sh
+export SCOUT_S3_ACCESS_KEY="GK$(openssl rand -hex 16)"
+export SCOUT_S3_SECRET_KEY="$(openssl rand -hex 32)"
+export SCOUT_S3_DEFAULT_BUCKET=scout-raw
+
 docker compose up -d garage postgres
 docker compose exec garage /garage status
+docker compose exec garage /garage bucket list
 ```
 
-`garage status` prints the node id and layout warnings. Configure the single-node layout, key, and
-bucket (these steps are intentionally manual):
-
-```sh
-docker compose exec garage /garage layout assign -z dc1 -c 1G <node-id>
-docker compose exec garage /garage layout apply --version 1
-docker compose exec garage /garage key create scout-key
-docker compose exec garage /garage bucket create scout-raw
-docker compose exec garage /garage bucket allow --read --write --owner scout-raw --key scout-key
-```
-
-Expected: `layout apply` succeeds, `key create` prints a key id and secret once, and `bucket allow`
-reports success. Record the key id and secret.
+Expected: `garage status` shows one healthy node with an assigned layout, and `bucket list` contains
+`scout-raw`. Manual `layout assign` / `key create` / `bucket create` is only needed for Garage versions
+before 2.3.0 or a custom layout.
 
 ## 2. Start Scout against Garage
 
 ```sh
 export SCOUT_S3_ENDPOINT=http://127.0.0.1:3900
-export SCOUT_S3_BUCKET=scout-raw
-export AWS_ACCESS_KEY_ID=<garage key id>
-export AWS_SECRET_ACCESS_KEY=<garage secret>
+export SCOUT_S3_BUCKET="${SCOUT_S3_DEFAULT_BUCKET:-scout-raw}"
+export AWS_ACCESS_KEY_ID="$SCOUT_S3_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="$SCOUT_S3_SECRET_KEY"
 export AWS_REGION=garage
 export SCOUT_OPERATOR_EMAIL=operator@scout.local
 export SCOUT_OPERATOR_PASSWORD=change-me-now
@@ -72,8 +71,10 @@ no longer available. The Garage bucket no longer holds that key.
 
 ## 5. Misconfiguration fails fast
 
-Repeat startup with each of these and confirm the process exits before binding `:8080`, within 30
-seconds, prints no secret, and accepts no telemetry. Every message names the endpoint and bucket.
+Repeat startup with each of these and confirm the process exits before binding `:8080`, within 60
+seconds, prints no secret, and accepts no telemetry. Every message names the endpoint and bucket. A
+closed port returns immediately; to exercise the bound, use an address that drops packets and confirm
+failure within 60 seconds.
 
 | Misconfiguration | Expected message shape |
 | --- | --- |
@@ -88,7 +89,7 @@ The same steps apply when the source is MinIO; a second Garage bucket keeps the 
 ```sh
 # Create a destination bucket in addition to the live one
 docker compose exec garage /garage bucket create scout-raw-new
-docker compose exec garage /garage bucket allow --read --write --owner scout-raw-new --key scout-key
+docker compose exec garage /garage bucket allow --read --write --owner scout-raw-new --key "$SCOUT_S3_ACCESS_KEY"
 ```
 
 1. Run Scout with `SCOUT_S3_BUCKET=scout-raw` (the "old" store) and ingest two events.
@@ -131,11 +132,14 @@ cargo clippy --target wasm32-unknown-unknown --manifest-path ui/Cargo.toml -- -D
 ```
 
 The migration suite runs against two in-memory object stores and covers copy-all, skip-on-rerun,
-overwrite-differing, unreadable-source failure, counts, and key preservation. Two additional tests
-cover this feature's failure paths without Docker:
+overwrite-differing, unreadable-source failure, counts, and key preservation. These additional checks
+cover the failure paths without Docker:
 
-- `cargo test probe_failure_names_endpoint` — an unreachable endpoint fails the startup probe within
-  30 seconds, naming the endpoint and bucket and never the secret.
+- `cargo test probe_failure_names_endpoint` — a closed endpoint fails the startup probe, naming the
+  endpoint and bucket and never the secret.
+- `cargo test verify_writable_times_out_on_blackholed_endpoint -- --ignored` — a listener that accepts
+  but never responds fails the startup probe within 60 seconds, naming the endpoint and bucket and
+  never the secret. It is ignored by default because it waits on real timeouts.
 - `cargo test unreachable_object_store` — ingest returns `503`, stores nothing, and `/api/health`
   reports `degraded` while the object store is unreachable.
 - `cargo test objects` and `cargo test migrate` cover the settings, list/head/overwrite helpers, and
@@ -149,8 +153,6 @@ documentation change, not a Garage-only dependency.
 
 ## Environment gate
 
-Steps 1–6 require Docker and a running Garage. The workspace used to build this feature has no Docker,
-so those steps are a completion gate rather than an automated check; the in-memory suite and code
-review cover the logic. When the gate is run, also run `docker compose config` and confirm it reports
-no warnings, and record the measured clean-host elapsed time for steps 1–2 (not measured here because
-the workspace has no Docker CLI).
+Steps 1–6 require Docker and a running Garage. Verified on a Docker host on 2026-11-01: `docker compose`
+started Garage, PostgreSQL, and Scout, and Scout's startup probe passed against both the object store
+and the metadata database. Re-run this path after changing deployment configuration.

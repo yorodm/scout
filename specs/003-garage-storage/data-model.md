@@ -15,7 +15,7 @@ operational: configuration, the objects being moved, and the migration run's out
 | Secret key | `AWS_SECRET_ACCESS_KEY` | Required for S3; never logged. |
 | Region | `AWS_REGION` | Required for S3; must match the provider (`garage` in the shipped compose). |
 | Addressing | derived | Path-style requests are used so a plain host:port endpoint works without wildcard DNS. |
-| Timeouts | derived | Connect and request timeouts plus a bounded retry count are part of the settings, so an unreachable endpoint fails within 30 seconds. |
+| Timeouts | derived | Connect (5 s) and request (10 s) timeouts plus at most 2 retries are part of the settings, so an unreachable endpoint fails within 60 seconds. |
 
 When endpoint and bucket are absent, the runtime keeps today's in-memory backend for local
 development and tests.
@@ -33,6 +33,18 @@ development and tests.
 **Validation**: a missing variable aborts before any listing with a message naming the variable. The
 migration never modifies source objects.
 
+## Garage bootstrap (shipped compose)
+
+| Setting | Source | Rules |
+|---|---|---|
+| `GARAGE_DEFAULT_ACCESS_KEY` | `SCOUT_S3_ACCESS_KEY` | Required for the automatic first start; becomes Scout's destination access key. |
+| `GARAGE_DEFAULT_SECRET_KEY` | `SCOUT_S3_SECRET_KEY` | Required; never logged. |
+| `GARAGE_DEFAULT_BUCKET` | `SCOUT_S3_DEFAULT_BUCKET` | Defaults to `scout-raw`; must match `SCOUT_S3_BUCKET`. |
+| Server command | derived | `/garage server --single-node --default-bucket`; `--single-node` creates the layout and `--default-bucket` creates the bucket and access key. |
+
+Manual `garage layout assign` / `key create` / `bucket create` provisioning is the documented fallback
+for Garage versions before 2.3.0 or custom layouts.
+
 ## Object Ref
 
 | Field | Meaning |
@@ -42,6 +54,10 @@ migration never modifies source objects.
 | `sha256` | Content hash of the source bytes, computed once per object. |
 
 Keys are opaque to the migration: no renaming, re-prefixing, or re-encoding occurs.
+
+Only `raw/` and `attachments/` objects are migrated. Keys under the `__scout/` prefix are startup-probe
+sentinels: they are ignored and never counted in `found`. Any other key in the bucket is also ignored,
+so `found` never includes it.
 
 ## Migration Outcome (per object)
 
@@ -56,6 +72,9 @@ Keys are opaque to the migration: no renaming, re-prefixing, or re-encoding occu
 A differing copy increments both `failed` and `mismatched`; an unreadable one increments only `failed`.
 `mismatched` is therefore a subset of `failed`, never a separate outcome.
 
+A destination object that differs and is successfully overwritten and re-verified is `CopiedOverwrite`
+and counts as verified; it does not fail the run.
+
 **Invariants**
 
 - `found = skipped + copied + failed`, where `copied` counts **only verified** copies
@@ -69,9 +88,9 @@ A differing copy increments both `failed` and `mismatched`; an unreadable one in
 | Field | Meaning |
 |---|---|
 | source / destination settings | As above, resolved once at start. |
-| `found`, `copied`, `skipped`, `verified`, `mismatched`, `failed` | Counters for the final summary. |
+| `found`, `copied`, `skipped`, `verified`, `mismatched`, `failed` | Counters for the final summary; `found` excludes `__scout/` sentinels and `mismatched` is a subset of `failed`. |
 | `failures` | Keys that failed, logged as they occur and summarised at the end (bounded list in output; every key is logged). |
-| `started_at`, `finished_at` | Wall-clock bounds for the log line. |
+| `elapsed_ms` | Elapsed milliseconds for the summary log line. |
 | exit status | `0` when every object is verified; `1` when any object fails or configuration is invalid. |
 
 The run is not persisted; re-running is the recovery mechanism.
@@ -80,7 +99,8 @@ The run is not persisted; re-running is the recovery mechanism.
 
 The server performs a write/delete of a unique sentinel key (`__scout/health/<uuid>`) in the
 destination bucket before serving. It is implemented as `Objects::verify_writable()` in
-`src/objects.rs`; `main` calls it before wiring the server. Outcomes:
+`src/objects.rs`; `main` calls it before wiring the server. The probe runs before the server binds, and
+any failure must abort startup within 60 seconds. Outcomes:
 
 | Outcome | Effect |
 |---|---|

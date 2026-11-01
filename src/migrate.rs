@@ -107,6 +107,11 @@ pub async fn run(source: &Objects, destination: &Objects) -> Summary {
         if key.starts_with("__scout/") {
             continue;
         }
+        // Only Scout's payload prefixes are in scope; `found` counts payloads and
+        // attachments only (FR-012).
+        if !(key.starts_with("raw/") || key.starts_with("attachments/")) {
+            continue;
+        }
         summary.found += 1;
         tracing::info!(key = %key, size, "migrate: listed");
         let permit = semaphore
@@ -410,6 +415,28 @@ mod tests {
             .is_none());
     }
 
+    #[actix_web::test]
+    async fn non_payload_keys_are_ignored() {
+        let source = store(&[
+            ("raw/p-a/e1", b"one"),
+            ("foreign/data", b"x"),
+            ("__scout/health/abc", b"ok"),
+        ])
+        .await;
+        let destination = Objects::memory();
+
+        let summary = run(&source, &destination).await;
+
+        assert_eq!(summary.found, 1);
+        assert_eq!(summary.copied, 1);
+        assert_eq!(summary.failed, 0);
+        assert!(destination
+            .head_size("foreign/data")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
     #[test]
     fn missing_source_variables_are_named_without_leaking_secrets() {
         let base = [
@@ -464,5 +491,104 @@ mod tests {
             failed: 0,
         };
         assert_eq!(complete.exit_code(), 0);
+    }
+
+    #[test]
+    fn docs_describe_stages_without_external_tooling_or_minio_setup() {
+        let readme = include_str!("../README.md");
+        let architecture = include_str!("../architecture.md");
+        let compose = include_str!("../docker-compose.yml");
+        let readme_lower = readme.to_lowercase();
+
+        assert!(
+            readme_lower.contains("separate operational stages"),
+            "README must state that migration and ingestion are separate stages"
+        );
+        assert!(
+            readme_lower.contains("downtime"),
+            "README must state that the operator schedules downtime"
+        );
+        assert!(
+            readme_lower.contains("scout migrate-objects"),
+            "README must document the migration command"
+        );
+        for tool in ["mc mirror", "aws s3 sync", "rclone", "s3cmd"] {
+            assert!(
+                !readme_lower.contains(tool),
+                "README must not require external object-storage tooling ({tool})"
+            );
+        }
+
+        assert!(
+            !compose.to_lowercase().contains("minio"),
+            "the shipped compose file must not require MinIO"
+        );
+        assert!(
+            compose.contains("--single-node") && compose.contains("--default-bucket"),
+            "Garage must start with automatic single-node/default-bucket provisioning"
+        );
+        assert!(
+            compose.contains("GARAGE_DEFAULT_ACCESS_KEY")
+                && compose.contains("GARAGE_DEFAULT_SECRET_KEY")
+                && compose.contains("GARAGE_DEFAULT_BUCKET"),
+            "the compose file must pass the GARAGE_DEFAULT_* bootstrap variables"
+        );
+        assert!(
+            readme.contains("GARAGE_DEFAULT_ACCESS_KEY"),
+            "README must document the bootstrap variables"
+        );
+        assert!(
+            readme.contains("SCOUT_S3_DEFAULT_BUCKET"),
+            "README must document the bucket variable"
+        );
+        for doc in [readme, architecture] {
+            let doc = doc.to_lowercase();
+            assert!(
+                !doc.contains("minio-init"),
+                "MinIO setup must not be required"
+            );
+            assert!(
+                !doc.contains("install minio"),
+                "MinIO setup must not be required"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_settings_read_only_storage_variables() {
+        use std::cell::RefCell;
+
+        let seen = RefCell::new(Vec::new());
+        let get = |name: &str| -> Option<String> {
+            seen.borrow_mut().push(name.to_string());
+            match name {
+                "SCOUT_MIGRATE_SOURCE_ENDPOINT" => Some("http://source:9000".into()),
+                "SCOUT_MIGRATE_SOURCE_BUCKET" => Some("old-raw".into()),
+                "SCOUT_MIGRATE_SOURCE_ACCESS_KEY_ID" => Some("source-key".into()),
+                "SCOUT_MIGRATE_SOURCE_SECRET_ACCESS_KEY" => Some("source-secret".into()),
+                "SCOUT_MIGRATE_SOURCE_REGION" => Some("us-east-1".into()),
+                "SCOUT_S3_ENDPOINT" => Some("http://garage:3900".into()),
+                "SCOUT_S3_BUCKET" => Some("scout-raw".into()),
+                "AWS_ACCESS_KEY_ID" => Some("dest-key".into()),
+                "AWS_SECRET_ACCESS_KEY" => Some("dest-secret".into()),
+                "AWS_REGION" => Some("garage".into()),
+                _ => None,
+            }
+        };
+
+        MigrationSettings::from_lookup(&get).expect("complete storage settings");
+        let seen = seen.into_inner();
+        assert!(
+            !seen.iter().any(|name| name == "SCOUT_SELF_URL"),
+            "{seen:?}"
+        );
+        for name in &seen {
+            assert!(
+                name.starts_with("SCOUT_S3_")
+                    || name.starts_with("SCOUT_MIGRATE_SOURCE_")
+                    || name.starts_with("AWS_"),
+                "FR-017: migration settings must not read the service variable {name}"
+            );
+        }
     }
 }

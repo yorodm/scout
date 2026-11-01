@@ -105,10 +105,11 @@ Ingest keys are per project and cannot read.
 ## Deployment
 
 `scout` (API + UI + worker) · `postgres` · `garage`, from a single compose file. Garage is the default
-S3-compatible object store; its cluster layout, bucket, and access key are documented one-time
-operator steps, not automated by compose. Any other S3-compatible provider (MinIO included) works by
-setting the usual endpoint, bucket, region, and credentials. Migrations run on startup against an
-advisory lock, so several replicas can start at once.
+S3-compatible object store. The shipped compose starts it with `--single-node --default-bucket` and the
+`GARAGE_DEFAULT_*` values, so the single-node layout, bucket, and access key are created automatically;
+manual CLI provisioning remains the fallback for Garage versions before 2.3.0 or custom layouts. Any
+other S3-compatible provider (MinIO included) works by setting the usual endpoint, bucket, region, and
+credentials. Migrations run on startup against an advisory lock, so several replicas can start at once.
 
 ## Sentry compatibility
 
