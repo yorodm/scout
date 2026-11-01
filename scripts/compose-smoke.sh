@@ -131,7 +131,7 @@ operator_session() {
 }
 
 provision() {
-  local org_body org_id setup_token admin_token project_body
+  local org_body org_id setup_token admin_token project_body key_body
   org_body="$(api POST /api/orgs "$OPERATOR_TOKEN" \
     "{\"name\":\"Smoke $(date +%s)\",\"initial_admin_email\":\"smoke-admin@example.test\"}")"
   org_id="$(jq -r '.organisation.id // empty' <<<"$org_body")"
@@ -144,15 +144,27 @@ provision() {
   [ -n "$admin_token" ] || fail "initial-admin setup token redemption failed"
   record "initial admin redeemed the setup token"
 
-  project_body="$(api POST "/api/orgs/$org_id/projects" "$admin_token" \
-    '{"name":"smoke","slug":"smoke"}')"
+  # FR-034: only the operator creates projects, and it must name an existing
+  # organisation member as the initial owner.
+  project_body="$(api POST "/api/orgs/$org_id/projects" "$OPERATOR_TOKEN" \
+    '{"name":"smoke","slug":"smoke","initial_owner_email":"smoke-admin@example.test"}')"
   PROJECT_ID="$(jq -r '.project.id // empty' <<<"$project_body")"
   DSN_ID="$(jq -r '.project.dsn_id // empty' <<<"$project_body")"
-  INGEST_KEY="$(jq -r '.key // empty' <<<"$project_body")"
-  [ -n "$PROJECT_ID" ] && [ -n "$DSN_ID" ] && [ -n "$INGEST_KEY" ] \
+  [ -n "$PROJECT_ID" ] && [ -n "$DSN_ID" ] \
     || fail "project creation failed: $project_body"
+  # FR-012: the operator must never receive a credential.
+  [ -z "$(jq -r '.key // empty' <<<"$project_body")" ] \
+    || fail "project creation returned an ingest key to the operator"
+  [ -z "$(jq -r '.dsn // empty' <<<"$project_body")" ] \
+    || fail "project creation returned a DSN to the operator"
+  record "operator created project $PROJECT_ID with DSN id $DSN_ID and received no credential"
+
+  # The named owner creates the first key and is the only holder of it.
+  key_body="$(api POST "/api/projects/$PROJECT_ID/keys" "$admin_token" '{"label":"Smoke"}')"
+  INGEST_KEY="$(jq -r '.key // empty' <<<"$key_body")"
+  [ -n "$INGEST_KEY" ] || fail "the initial owner could not create an ingest key: $key_body"
   ADMIN_TOKEN="$admin_token"
-  record "project $PROJECT_ID created with DSN id $DSN_ID"
+  record "initial owner created the first ingest key and holds its DSN"
 }
 
 ingest_and_read() {
