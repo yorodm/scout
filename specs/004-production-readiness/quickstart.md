@@ -118,11 +118,13 @@ initial-admin issuance, invitation creation/acceptance, and role change.
 ## 7. Retention and restart durability (US1, SC-001, SC-009)
 
 ```sh
-# Age one project's rows honestly, inside the shipped database.
+# Age one project's rows honestly, inside the shipped database. Retention is
+# measured from the server receipt time, so only that column matters; the
+# client-supplied timestamp is used for display and ordering.
 docker compose exec -T postgres psql -U scout -d scout -c \
   "UPDATE events SET received_at = now() - interval '40 days';"
 docker compose exec -T postgres psql -U scout -d scout -c \
-  "UPDATE log_lines SET timestamp = now() - interval '40 days';"
+  "UPDATE log_lines SET received_at = now() - interval '40 days';"
 ```
 
 Restart Scout with `SCOUT_RETENTION_INTERVAL_SECONDS=2`, wait two intervals, then:
@@ -228,6 +230,43 @@ and organisation slug and per-project issue-number uniqueness hold.
 | Five consecutive failed sign-ins for one account | Every later attempt, including the correct password, returns the generic invalid-credentials message; the operator unlocks the account from the console and sign-in then succeeds |
 | A session idles past the configured window, or ages past the absolute maximum | The next request returns `401` and the UI returns to sign-in; a compatibility API token from the same account keeps working |
 
+## 13. Backup and restore (FR-027, SC-019)
+
+Scout ships no backup tooling. The mechanics of [the README](../../README.md#backup-and-restore) apply;
+this section is the round trip that proves them. Use `pg_dump`/`pg_restore` for metadata and your object
+store's copy command for raw payloads.
+
+```sh
+# 1. Back up objects first, then metadata (the metadata snapshot must never
+#    reference an object that is absent from the object backup).
+aws --endpoint-url "$SCOUT_S3_ENDPOINT" s3 sync \
+  "s3://$SCOUT_S3_DEFAULT_BUCKET" ./backup/objects
+docker compose exec -T postgres pg_dump -U scout -Fc scout > ./backup/scout.dump
+
+# 2. Restore into an empty stack: stop Scout, recreate Postgres and the bucket,
+#    restore objects, then metadata, then start Scout.
+docker compose stop scout
+docker compose exec -T postgres dropdb -U scout --if-exists scout
+docker compose exec -T postgres createdb -U scout scout
+docker compose exec -T postgres pg_restore -U scout -d scout < ./backup/scout.dump
+aws --endpoint-url "$SCOUT_S3_ENDPOINT" s3 sync ./backup/objects \
+  "s3://$SCOUT_S3_DEFAULT_BUCKET"
+docker compose up -d scout
+```
+
+Then confirm, in order:
+
+1. `/api/health` returns `200` with `"storage":"ok"` and `"durability":"durable"`.
+2. The operator signs in and lists the same organisations and projects as before the backup.
+3. `GET /api/issues/{id}/raw` for a pre-backup issue returns `200` with the original bytes.
+4. `SELECT count(*) FROM audit_log` and `SELECT version FROM _sqlx_migrations ORDER BY version` match
+   the values recorded before the dump.
+5. Ingest a fresh envelope; it is acknowledged and becomes visible, proving the restore left the stack
+   writable rather than merely readable.
+
+Expected: every organisation, project, issue, log line, and raw payload that existed at backup time is
+present after the restore, and no plaintext secret was added to the backup.
+
 ## Evidence checklist
 
 - [ ] Quality gates pass (section 1)
@@ -243,4 +282,5 @@ and organisation slug and per-project issue-number uniqueness hold.
 - [ ] OIDC verified-email sign-in, denial, and local fallback (section 9)
 - [ ] Load check within targets or recorded shortfall (section 10)
 - [ ] Sentry compatibility paths (section 11)
+- [ ] Backup and restore round trip restores metadata and raw payloads (section 13)
 - [ ] Degraded health and retryable ingest on dependency loss (section 12)

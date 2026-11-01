@@ -465,6 +465,56 @@ run, and an interrupted run is resumed by the next pass. Because the command nev
 ingest, events written after the final pass and before cutover remain on the old store — the reason
 for stopping the service first.
 
+## Backup and restore
+
+Scout ships no backup tooling by design: use the snapshot or export facilities of your platform and of
+PostgreSQL, Garage, or whichever S3-compatible store you run. The procedure below is written so that a
+restore on a clean host brings back every organisation, project, issue, log line, and raw payload.
+
+### Artifacts to preserve
+
+| Artifact | What it holds | Why it matters |
+| --- | --- | --- |
+| PostgreSQL database (`scout`) | Every durable metadata record: organisations, projects, users, memberships and roles, sessions, recovery codes, invitations, ingest keys, issues and their state history, event and attachment metadata, log lines, suggestions, decisions, audit entries, background jobs, and the `_sqlx_migrations` ledger | It is the system of record; without it the object store has no usable index |
+| Object-storage bucket (`SCOUT_S3_DEFAULT_BUCKET`, `scout-raw` by default) | The exact received bytes for every event, and attachment payloads, keyed by the references stored in PostgreSQL | The raw payload is the source of truth; a missing object turns into an explicit expired/404 state |
+| Deployment configuration | `SCOUT_OPERATOR_EMAIL`, `SCOUT_OPERATOR_PASSWORD`, `DATABASE_URL`, the `SCOUT_S3_*` / `AWS_*` credentials and bucket, `SCOUT_STORE`, `SCOUT_DEMO_MODE`, `SCOUT_SENTRY_API_COMPAT_ENABLED`, `SCOUT_SESSION_TTL_DAYS`, `SCOUT_SESSION_IDLE_HOURS`, `SCOUT_RETENTION_INTERVAL_SECONDS` | Without the operator variables the deployment has no operator; without the store credentials nothing is reachable |
+| Image tag or commit | The exact `scout` build that produced the snapshot | The embedded migrations must match; a build older than the snapshot aborts on startup |
+
+### Backup order
+
+1. Take the **object-store** snapshot first.
+2. Then take the **PostgreSQL** snapshot (`pg_dump -Fc`, or a storage-level snapshot).
+
+That order guarantees the metadata snapshot never references an object that is absent from the object
+backup. Objects written after the first step are simply unreferenced and harmless; they are cleaned up
+when they age past the project retention window.
+
+### Restore order
+
+1. Stop every Scout instance so nothing writes during the restore.
+2. Restore the **object store** into an empty bucket using the same key layout.
+3. Restore **PostgreSQL** from the dump into an empty database. If the dump is older than the target
+   build, let startup apply the pending migrations; if it is newer, startup aborts and the dump is not
+   touched.
+4. Restore the **configuration** and point `DATABASE_URL` and the `SCOUT_S3_*` / `AWS_*` variables at the
+   restored services.
+5. Start Scout and wait for `/api/health` to report `"status":"ok"` with
+   `"durability":"durable"`.
+
+### Checks that confirm success
+
+1. `curl -fsS http://127.0.0.1:8080/api/health | jq .` returns `200` with `storage: "ok"` and
+   `object_store` naming the restored backend.
+2. The operator signs in and can list organisations and projects.
+3. A known project-scoped member signs in and sees the same issue count as before the backup.
+4. Open a pre-backup issue and fetch its raw payload: `GET /api/issues/{id}/raw` returns `200` with the
+   original bytes, not `404`/`410`.
+5. The newest `audit_log` rows match the backup time, proving no audit history was lost.
+6. `SELECT version FROM _sqlx_migrations ORDER BY version` shows the same ledger the backup held.
+
+A quickstart walkthrough that performs this round trip is section 13 of
+[specs/004-production-readiness/quickstart.md](specs/004-production-readiness/quickstart.md).
+
 ## Documentation
 
 | Document | Covers |
