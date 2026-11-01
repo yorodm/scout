@@ -49,11 +49,12 @@ services:
       retries: 20
     restart: unless-stopped
 
-  # Single-node Garage (S3-compatible). Layout, bucket, and access-key setup are
-  # documented in the README; this service intentionally does not automate them.
+  # Single-node Garage (S3-compatible). The image has no ENTRYPOINT: its default
+  # CMD is ["/garage", "server"], so do not override `command` here. Layout,
+  # bucket, and access-key setup are documented in the README; this service
+  # intentionally does not automate them.
   garage:
     image: dxflrs/garage:v2.5.0
-    command: ["server"]
     ports:
       - "3900:3900"
       # The admin API is for local operators only.
