@@ -43,6 +43,8 @@ base64 = "0.22"
 # Named in the in-crate integration tests so helpers can be generic over the
 # Actix service body type.
 actix-http = "3"
+# Signs the ID tokens of the in-process mock OIDC provider used by the tests.
+rsa = { version = "0.9", features = ["sha2"] }
 
 [profile.dev]
 debug = 0

@@ -470,9 +470,13 @@ impl std::fmt::Debug for OidcConnection {
 /// One in-progress OIDC sign-in. Single use, 10-minute TTL, never exposed.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OidcLoginFlow {
+    /// Capability value, like the nonce and verifier below: never serialized.
+    #[serde(skip_serializing)]
     pub state: String,
     pub org_id: Uuid,
+    #[serde(skip_serializing)]
     pub nonce: String,
+    #[serde(skip_serializing)]
     pub pkce_verifier: String,
     pub return_to: Option<String>,
     pub created_at: DateTime<Utc>,

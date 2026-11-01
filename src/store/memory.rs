@@ -44,6 +44,10 @@ pub struct Store {
     pub invitations: HashMap<Uuid, Invitation>,
     pub invitations_by_token: HashMap<String, Uuid>,
     pub recovery_codes: Vec<RecoveryCode>,
+    /// Optional per-organisation OIDC connection, keyed by organisation (FR-018).
+    pub oidc_connections: HashMap<Uuid, OidcConnection>,
+    /// In-progress OIDC sign-ins, keyed by `state`. Single use, 10-minute TTL.
+    pub oidc_flows: HashMap<String, OidcLoginFlow>,
     /// Long-lived API tokens for the Sentry-compatible surface.
     pub api_tokens: HashMap<Uuid, ApiToken>,
     /// Token hash → token id, so authentication is a single map lookup.
@@ -73,6 +77,8 @@ impl Store {
             invitations: HashMap::new(),
             invitations_by_token: HashMap::new(),
             recovery_codes: Vec::new(),
+            oidc_connections: HashMap::new(),
+            oidc_flows: HashMap::new(),
             api_tokens: HashMap::new(),
             api_tokens_by_hash: HashMap::new(),
         }
@@ -266,12 +272,41 @@ impl Store {
         self.api_tokens_by_hash.extend(fresh.api_tokens_by_hash);
     }
 
-    /// Remove expired sessions. Returns the number removed.
+    /// Remove expired sessions and OIDC flows. Returns the number of sessions removed.
     pub fn sweep_sessions(&mut self) -> usize {
         let now = Utc::now();
+        self.oidc_flows.retain(|_, flow| flow.expires_at > now);
         let before = self.sessions.len();
         self.sessions.retain(|_, session| session.expires_at > now);
         before - self.sessions.len()
+    }
+
+    pub fn oidc_connection(&self, org_id: Uuid) -> Option<&OidcConnection> {
+        self.oidc_connections.get(&org_id)
+    }
+
+    /// Create or replace the organisation's connection. `created_at` is kept from
+    /// an existing row so `configured_at` reports the original setup.
+    pub fn set_oidc_connection(&mut self, mut connection: OidcConnection) {
+        if let Some(existing) = self.oidc_connections.get(&connection.org_id) {
+            connection.created_at = existing.created_at;
+        }
+        self.oidc_connections.insert(connection.org_id, connection);
+    }
+
+    pub fn remove_oidc_connection(&mut self, org_id: Uuid) -> bool {
+        self.oidc_connections.remove(&org_id).is_some()
+    }
+
+    pub fn insert_oidc_flow(&mut self, flow: OidcLoginFlow) {
+        self.oidc_flows.insert(flow.state.clone(), flow);
+    }
+
+    /// Consume a flow: the row is deleted before the code is exchanged, so a
+    /// replayed callback finds nothing. Expired flows are treated as unknown.
+    pub fn take_oidc_flow(&mut self, state: &str) -> Option<OidcLoginFlow> {
+        let flow = self.oidc_flows.remove(state)?;
+        (flow.expires_at > Utc::now()).then_some(flow)
     }
 
     pub fn user_by_email(&self, email: &str) -> Option<&User> {

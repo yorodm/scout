@@ -35,6 +35,27 @@ pub fn set_hash(hash: &str) {
     }
 }
 
+/// Parse the `#oidc=<outcome>&token=<session>` landing fragment. The fragment is
+/// never sent to the server, so it is the safest place for the session token.
+pub fn oidc_landing(hash: &str) -> Option<(String, Option<String>)> {
+    let fragment = hash.strip_prefix('#')?;
+    if !fragment.starts_with("oidc=") {
+        return None;
+    }
+    let mut outcome = None;
+    let mut token = None;
+    for pair in fragment.split('&') {
+        if let Some((key, value)) = pair.split_once('=') {
+            match key {
+                "oidc" => outcome = Some(value.to_string()),
+                "token" => token = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+    outcome.map(|outcome| (outcome, token))
+}
+
 pub fn reload() {
     let _ = window().location().reload();
 }

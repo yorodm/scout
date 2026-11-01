@@ -82,6 +82,10 @@ pub struct AppState {
     pub pending_recovery_codes: Vec<String>,
     /// Accounts currently locked by failed sign-ins, for the operator console.
     pub locked_users: Vec<api::LockedUser>,
+    /// The current project organisation's optional OIDC connection (FR-018).
+    pub oidc: Option<api::OidcConfig>,
+    /// Distinguishes "loaded and not configured" from "not loaded yet".
+    pub oidc_loaded: bool,
     pub filters: Filters,
     pub log_filters: LogFilters,
     pub search_query: String,
@@ -112,6 +116,8 @@ impl Default for AppState {
             new_token: None,
             pending_recovery_codes: Vec::new(),
             locked_users: Vec::new(),
+            oidc: None,
+            oidc_loaded: false,
             filters: Filters::default(),
             log_filters: LogFilters::default(),
             search_query: String::new(),
@@ -257,6 +263,44 @@ pub fn acknowledge_recovery_codes(store: Signal<AppState>) {
         state.pending_recovery_codes.clear();
         state.modal = None;
     });
+}
+
+/// Handle the identity provider's `#oidc=<outcome>&token=<session>` landing.
+/// Returns true when the fragment was an OIDC landing and has been consumed.
+pub async fn apply_oidc_landing(store: Signal<AppState>) -> bool {
+    let Some((outcome, token)) = util::oidc_landing(&util::current_hash()) else {
+        return false;
+    };
+    // Strip the fragment before anything else so the token is not left in the
+    // address bar or in history.
+    util::set_hash("#/issues");
+
+    if let Some(token) = token {
+        util::storage_set("scout_token", &token);
+        match api::me(&token).await {
+            Ok(data) => {
+                store.update(|state| {
+                    state.token = Some(token);
+                    state.me = Some(data.user);
+                });
+                load_projects(store).await;
+                sync_from_hash(store).await;
+                toast(store, "Signed in with your identity provider", "success");
+                return true;
+            }
+            Err(_) => util::storage_remove("scout_token"),
+        }
+    }
+
+    let message = match outcome.as_str() {
+        "email_unverified" => "Your provider did not verify your email address.",
+        "membership_unknown" => "No membership in this organisation matches that account.",
+        "state_invalid" => "That sign-in link expired or was already used.",
+        "provider_error" => "The identity provider could not complete sign-in.",
+        _ => "Single sign-on did not complete.",
+    };
+    toast(store, message, "error");
+    true
 }
 
 pub async fn change_password(
@@ -446,6 +490,81 @@ pub async fn load_settings(store: Signal<AppState>) {
     }
     match api::settings(&token, &project_id).await {
         Ok(data) => store.update(|state| state.settings = Some(data)),
+        Err(error) => toast(store, error, "error"),
+    }
+    load_oidc(store).await;
+}
+
+/// The organisation the current project belongs to.
+fn settings_org_id(state: &AppState) -> Option<String> {
+    state
+        .settings
+        .as_ref()
+        .map(|settings| settings.project.org_id.clone())
+}
+
+pub async fn load_oidc(store: Signal<AppState>) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    let Some(org_id) = store.with(settings_org_id) else {
+        return;
+    };
+    match api::oidc_config(&token, &org_id).await {
+        Ok(config) => store.update(|state| {
+            state.oidc = config;
+            state.oidc_loaded = true;
+        }),
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn save_oidc(
+    store: Signal<AppState>,
+    issuer: String,
+    client_id: String,
+    client_secret: String,
+    scopes: String,
+) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    let Some(org_id) = store.with(settings_org_id) else {
+        return;
+    };
+    match api::put_oidc(
+        &token,
+        &org_id,
+        &issuer,
+        &client_id,
+        &client_secret,
+        &scopes,
+    )
+    .await
+    {
+        Ok(config) => {
+            store.update(|state| {
+                state.oidc = Some(config);
+                state.oidc_loaded = true;
+            });
+            toast(store, "Identity provider saved", "success");
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn remove_oidc(store: Signal<AppState>) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    let Some(org_id) = store.with(settings_org_id) else {
+        return;
+    };
+    match api::delete_oidc(&token, &org_id).await {
+        Ok(_) => {
+            store.update(|state| state.oidc = None);
+            toast(store, "Identity provider removed", "success");
+        }
         Err(error) => toast(store, error, "error"),
     }
 }

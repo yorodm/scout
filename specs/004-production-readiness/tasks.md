@@ -164,19 +164,19 @@ unverified identity are denied with no account created, then sign in locally wit
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T056 [US3] Add OIDC flow tests with a local mock provider in `src/tests.rs`: verified-email match signs in, unverified email and unknown membership are denied with the fixed outcome codes, and no user row is created
-- [ ] T057 [US3] Add OIDC hardening tests in `src/tests.rs`: a replayed `state` fails, an expired flow fails, a removed connection fails the flow, and the client secret never appears in any response body or log line
-- [ ] T058 [US3] Add configuration tests in `src/tests.rs`: discovery failure returns `400` and changes nothing; `PUT`/`DELETE` require organisation admin; both actions are audited
+- [x] T056 [US3] Add OIDC flow tests with a local mock provider in `src/tests.rs`: verified-email match signs in, unverified email and unknown membership are denied with the fixed outcome codes, and no user row is created
+- [x] T057 [US3] Add OIDC hardening tests in `src/tests.rs`: a replayed `state` fails, an expired flow fails, a removed connection fails the flow, and the client secret never appears in any response body or log line
+- [x] T058 [US3] Add configuration tests in `src/tests.rs`: discovery failure returns `400` and changes nothing; `PUT`/`DELETE` require organisation admin; both actions are audited
 
 ### Implementation for User Story 3
 
-- [ ] T059 [US3] Implement `src/oidc.rs`: discovery and metadata validation at save time, PKCE S256 start, state/nonce generation, token exchange, and ID-token validation (issuer, audience, expiry, nonce, signature) using the already-declared `openidconnect` crate
-- [ ] T060 [US3] Add `oidc_connections` and `oidc_login_flows` repository methods to `src/store/mod.rs`, `src/store/memory.rs`, and `src/store/postgres.rs`, including the 10-minute flow TTL and sweep
-- [ ] T061 [US3] Add the routes in `src/api.rs`/`src/main.rs`: `GET|PUT|DELETE /api/orgs/{org_id}/oidc` (organisation admin) and `GET /api/oidc/{org_slug}/start` + `GET /api/oidc/callback` (public), matching [contracts/oidc.md](./contracts/oidc.md) exactly
-- [ ] T062 [US3] Implement the matching rule in `src/oidc.rs`: verified email only, existing membership or pending invitation in that organisation, no account creation, no role escalation, and identical denial for unverified and unknown emails
-- [ ] T063 [US3] Audit `oidc.configured` and `oidc.removed` and redact the client secret, authorization code, PKCE verifier, nonce, and ID token from logs in `src/oidc.rs` and `src/audit.rs`
-- [ ] T064 [P] [US3] Add the OIDC configuration section (issuer, client id, write-only secret, scopes, removal note) to `ui/src/components/other.rs`
-- [ ] T065 [US3] Add the OIDC landing handler to `ui/src/components/app.rs`/`ui/src/state.rs` (read the `#oidc=<outcome>&token=` fragment, store the session, strip the fragment, show the failure code) and the calls in `ui/src/api.rs`
+- [x] T059 [US3] Implement `src/oidc.rs`: discovery and metadata validation at save time, PKCE S256 start, state/nonce generation, token exchange, and ID-token validation (issuer, audience, expiry, nonce, signature) using the already-declared `openidconnect` crate
+- [x] T060 [US3] Add `oidc_connections` and `oidc_login_flows` repository methods to `src/store/mod.rs`, `src/store/memory.rs`, and `src/store/postgres.rs`, including the 10-minute flow TTL and sweep
+- [x] T061 [US3] Add the routes in `src/api.rs`/`src/main.rs`: `GET|PUT|DELETE /api/orgs/{org_id}/oidc` (organisation admin) and `GET /api/oidc/{org_slug}/start` + `GET /api/oidc/callback` (public), matching [contracts/oidc.md](./contracts/oidc.md) exactly
+- [x] T062 [US3] Implement the matching rule in `src/oidc.rs`: verified email only, existing membership or pending invitation in that organisation, no account creation, no role escalation, and identical denial for unverified and unknown emails
+- [x] T063 [US3] Audit `oidc.configured` and `oidc.removed` and redact the client secret, authorization code, PKCE verifier, nonce, and ID token from logs in `src/oidc.rs` and `src/audit.rs`
+- [x] T064 [P] [US3] Add the OIDC configuration section (issuer, client id, write-only secret, scopes, removal note) to `ui/src/components/other.rs`
+- [x] T065 [US3] Add the OIDC landing handler to `ui/src/components/app.rs`/`ui/src/state.rs` (read the `#oidc=<outcome>&token=` fragment, store the session, strip the fragment, show the failure code) and the calls in `ui/src/api.rs`
 
 **Checkpoint**: Local sign-in is unaffected before, during, and after provider configuration.
 

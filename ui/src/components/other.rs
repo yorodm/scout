@@ -736,6 +736,8 @@ fn settings_view(
 
             (outage_panel)
 
+            (oidc_panel(store))
+
             section(class="panel panel-pad") {
                 (section_title(
                     "Demo data",
@@ -763,6 +765,166 @@ fn settings_view(
             }
         }
     }
+}
+
+/// Organisation-level single sign-on. Local sign-in stays available whether or
+/// not a provider is configured (FR-018, US3/AC4).
+fn oidc_panel(store: Signal<AppState>) -> View {
+    let config = create_selector(move || store.with(|state| state.oidc.clone()));
+    let loaded = create_selector(move || store.with(|state| state.oidc_loaded));
+    let issuer = create_signal(String::new());
+    let client_id = create_signal(String::new());
+    let client_secret = create_signal(String::new());
+    let scopes = create_signal("openid email profile".to_string());
+
+    // Prefill from the stored connection. The secret is never returned, so the
+    // field stays empty and is write-only.
+    create_effect(move || {
+        if let Some(config) = config.get_clone() {
+            issuer.set(config.issuer);
+            client_id.set(config.client_id);
+            scopes.set(config.scopes);
+        }
+    });
+
+    let body = View::from_dynamic(move || -> View {
+        if !loaded.get() {
+            return view! { (skeleton("90px")) };
+        }
+        let configured = config.get_clone().is_some();
+        let badge_class = if configured {
+            "badge resolved"
+        } else {
+            "badge"
+        };
+        let badge_label = if configured { "configured" } else { "optional" };
+        view! {
+            section(class="panel panel-pad") {
+                div(class="section-title") {
+                    h3 { "Single sign-on" }
+                    span(class=badge_class) { (badge_label) }
+                }
+                p(class="muted small") {
+                    "Optional per-organisation OpenID Connect. Only a verified email that matches an existing membership can sign in; local email-and-password sign-in always keeps working."
+                }
+                div(class="form-grid", style="margin-top:12px") {
+                    label(class="field full") {
+                        "Issuer"
+                        input(
+                            class="input",
+                            placeholder="https://idp.example.com",
+                            value=move || issuer.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<HtmlInputElement>();
+                                    issuer.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    label(class="field") {
+                        "Client id"
+                        input(
+                            class="input",
+                            value=move || client_id.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<HtmlInputElement>();
+                                    client_id.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    label(class="field") {
+                        "Client secret"
+                        input(
+                            class="input",
+                            r#type="password",
+                            autocomplete="new-password",
+                            placeholder="write-only; never shown again",
+                            value=move || client_secret.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<HtmlInputElement>();
+                                    client_secret.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    label(class="field full") {
+                        "Scopes"
+                        input(
+                            class="input",
+                            placeholder="openid email profile",
+                            value=move || scopes.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<HtmlInputElement>();
+                                    scopes.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                }
+                div(class="form-actions", style="justify-content:space-between") {
+                    (if configured {
+                        view! {
+                            button(
+                                class="btn btn-danger btn-sm",
+                                r#type="button",
+                                on:click=move |_| {
+                                    if util::window()
+                                        .confirm_with_message(
+                                            "Remove the identity provider? Local sign-in keeps working.",
+                                        )
+                                        .unwrap_or(false)
+                                    {
+                                        spawn_local(state::remove_oidc(store));
+                                    }
+                                },
+                            ) {
+                                "Remove"
+                            }
+                        }
+                    } else {
+                        View::new()
+                    })
+                    button(
+                        class="btn btn-primary",
+                        r#type="button",
+                        on:click=move |_| {
+                            let issuer = issuer.get_clone().trim().to_string();
+                            let client_id = client_id.get_clone().trim().to_string();
+                            let secret = client_secret.get_clone();
+                            let scopes = scopes.get_clone().trim().to_string();
+                            if issuer.is_empty() || client_id.is_empty() || secret.is_empty() {
+                                state::toast(
+                                    store,
+                                    "Issuer, client id, and client secret are required",
+                                    "error",
+                                );
+                                return;
+                            }
+                            spawn_local(state::save_oidc(
+                                store,
+                                issuer,
+                                client_id,
+                                secret,
+                                scopes,
+                            ));
+                        },
+                    ) {
+                        "Save provider"
+                    }
+                }
+                div(class="hint") {
+                    "The issuer is validated with a discovery request before it is saved. Redeeming a sign-in consumes the pending invitation exactly like a local acceptance."
+                }
+            }
+        }
+    });
+
+    view! { (body) }
 }
 
 fn key_row(store: Signal<AppState>, key: &IngestKey) -> View {

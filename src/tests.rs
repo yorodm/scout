@@ -5217,3 +5217,500 @@ async fn short_passwords_are_rejected_and_leave_the_recovery_code_usable() {
     .await;
     assert_eq!(status, StatusCode::OK, "the code stays usable: {body}");
 }
+
+// --- optional OIDC sign-in (FR-018, SC-007) --------------------------------
+
+const MOCK_CLIENT_ID: &str = "scout-test-client";
+const MOCK_CLIENT_SECRET: &str = "scout-test-secret";
+
+#[derive(Clone)]
+struct MockIdentity {
+    email: Option<String>,
+    email_verified: bool,
+}
+
+struct MockState {
+    private: std::sync::Arc<rsa::RsaPrivateKey>,
+    n: String,
+    e: String,
+    identity: std::sync::Arc<std::sync::Mutex<MockIdentity>>,
+}
+
+/// A real, loopback HTTP OpenID provider. The in-process Actix test app is not
+/// reachable over a socket, so discovery and the token exchange need one.
+struct MockProvider {
+    base: String,
+    identity: std::sync::Arc<std::sync::Mutex<MockIdentity>>,
+    handle: actix_web::dev::ServerHandle,
+}
+
+impl MockProvider {
+    fn set_identity(&self, email: Option<&str>, verified: bool) {
+        let mut guard = self.identity.lock().expect("mock identity lock");
+        guard.email = email.map(str::to_string);
+        guard.email_verified = verified;
+    }
+}
+
+impl Drop for MockProvider {
+    fn drop(&mut self) {
+        let _ = self.handle.stop(true);
+    }
+}
+
+async fn mock_discovery(req: actix_web::HttpRequest) -> HttpResponse {
+    let base = format!("http://{}/mock", req.connection_info().host());
+    HttpResponse::Ok().json(json!({
+        "issuer": base,
+        "authorization_endpoint": format!("{base}/authorize"),
+        "token_endpoint": format!("{base}/token"),
+        "jwks_uri": format!("{base}/jwks"),
+        "response_types_supported": ["code"],
+        "subject_types_supported": ["public"],
+        "id_token_signing_alg_values_supported": ["RS256"],
+    }))
+}
+
+async fn mock_jwks(state: web::Data<MockState>) -> HttpResponse {
+    HttpResponse::Ok().json(json!({
+        "keys": [{
+            "kty": "RSA",
+            "use": "sig",
+            "alg": "RS256",
+            "kid": "mock",
+            "n": state.n,
+            "e": state.e,
+        }]
+    }))
+}
+
+fn sign_id_token(state: &MockState, claims: &Value) -> String {
+    use base64::Engine;
+    use rsa::signature::{SignatureEncoding, Signer};
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = json!({ "alg": "RS256", "typ": "JWT", "kid": "mock" });
+    let payload = format!(
+        "{}.{}",
+        engine.encode(serde_json::to_vec(&header).expect("header json")),
+        engine.encode(serde_json::to_vec(claims).expect("claims json"))
+    );
+    let key = rsa::pkcs1v15::SigningKey::<rsa::sha2::Sha256>::new((*state.private).clone());
+    let signature = key.sign(payload.as_bytes());
+    format!("{payload}.{}", engine.encode(signature.to_bytes()))
+}
+
+/// The authorization code carries the nonce, so the token endpoint can echo it
+/// into the ID token without sharing state with the authorize request.
+async fn mock_token(
+    form: web::Form<std::collections::HashMap<String, String>>,
+    state: web::Data<MockState>,
+    req: actix_web::HttpRequest,
+) -> HttpResponse {
+    let nonce = form.get("code").cloned().unwrap_or_default();
+    let identity = state.identity.lock().expect("mock identity lock").clone();
+    let now = chrono::Utc::now().timestamp();
+    let claims = json!({
+        "iss": format!("http://{}/mock", req.connection_info().host()),
+        "aud": MOCK_CLIENT_ID,
+        "sub": "mock-subject",
+        "iat": now,
+        "exp": now + 300,
+        "nonce": nonce,
+        "email": identity.email,
+        "email_verified": identity.email_verified,
+    });
+    HttpResponse::Ok().json(json!({
+        "access_token": "mock-access-token",
+        "token_type": "Bearer",
+        "expires_in": 300,
+        "id_token": sign_id_token(&state, &claims),
+    }))
+}
+
+async fn mock_provider() -> MockProvider {
+    use base64::Engine;
+    use rsa::traits::PublicKeyParts;
+
+    let mut rng = rsa::rand_core::OsRng;
+    let private = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("generate the provider key");
+    let public = rsa::RsaPublicKey::from(&private);
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let identity = std::sync::Arc::new(std::sync::Mutex::new(MockIdentity {
+        email: None,
+        email_verified: true,
+    }));
+    let data = web::Data::new(MockState {
+        private: std::sync::Arc::new(private),
+        n: engine.encode(public.n().to_bytes_be()),
+        e: engine.encode(public.e().to_bytes_be()),
+        identity: identity.clone(),
+    });
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind the mock provider");
+    let address = listener.local_addr().expect("mock provider address");
+    let server = HttpServer::new(move || {
+        App::new()
+            .app_data(data.clone())
+            .route(
+                "/mock/.well-known/openid-configuration",
+                web::get().to(mock_discovery),
+            )
+            .route("/mock/jwks", web::get().to(mock_jwks))
+            .route("/mock/token", web::post().to(mock_token))
+    })
+    .workers(1)
+    .listen(listener)
+    .expect("listen on the mock provider")
+    .run();
+    let handle = server.handle();
+    actix_web::rt::spawn(server);
+
+    MockProvider {
+        base: format!("http://{address}/mock"),
+        identity,
+        handle,
+    }
+}
+
+fn query_param(location: &str, key: &str) -> Option<String> {
+    let query = location.split_once('?')?.1;
+    query.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name == key).then(|| value.to_string())
+    })
+}
+
+fn fragment_param(location: &str, key: &str) -> Option<String> {
+    let fragment = location.split_once('#')?.1;
+    fragment.split('&').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name == key).then(|| value.to_string())
+    })
+}
+
+async fn call_location<S, B>(app: &S, req: Request) -> (StatusCode, String)
+where
+    S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
+    B: MessageBody,
+{
+    let res = call(app, req).await;
+    let status = res.status();
+    let location = res
+        .headers()
+        .get("location")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    (status, location)
+}
+
+async fn demo_org_id(state: &AppState) -> Uuid {
+    state
+        .store
+        .read()
+        .await
+        .orgs
+        .values()
+        .find(|org| org.name == "Acme")
+        .map(|org| org.id)
+        .expect("the seeded demo organisation")
+}
+
+async fn configure_oidc<S, B>(
+    app: &S,
+    token: &str,
+    org_id: Uuid,
+    issuer: &str,
+) -> (StatusCode, Value)
+where
+    S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
+    B: MessageBody,
+{
+    call_json(
+        app,
+        put_json(
+            &format!("/api/orgs/{org_id}/oidc"),
+            token,
+            json!({
+                "issuer": issuer,
+                "client_id": MOCK_CLIENT_ID,
+                "client_secret": MOCK_CLIENT_SECRET,
+            }),
+        ),
+    )
+    .await
+}
+
+/// Start a flow and return `(state, nonce)` from the authorize redirect.
+async fn begin_oidc<S, B>(app: &S, slug: &str) -> (String, String)
+where
+    S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
+    B: MessageBody,
+{
+    let (status, location) =
+        call_location(app, get_public(&format!("/api/oidc/{slug}/start"))).await;
+    assert_eq!(status, StatusCode::FOUND, "start failed: {location}");
+    assert!(
+        query_param(&location, "code_challenge").is_some(),
+        "PKCE challenge missing: {location}"
+    );
+    assert!(
+        query_param(&location, "code_challenge_method").as_deref() == Some("S256"),
+        "PKCE method missing: {location}"
+    );
+    (
+        query_param(&location, "state").expect("state in the authorize URL"),
+        query_param(&location, "nonce").expect("nonce in the authorize URL"),
+    )
+}
+
+/// Complete the callback and return `(outcome, token)` from the landing fragment.
+async fn finish_oidc<S, B>(app: &S, state: &str, code: &str) -> (String, Option<String>)
+where
+    S: Service<Request, Response = ServiceResponse<B>, Error = Error>,
+    B: MessageBody,
+{
+    let (status, location) = call_location(
+        app,
+        get_public(&format!("/api/oidc/callback?code={code}&state={state}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FOUND, "callback: {location}");
+    (
+        fragment_param(&location, "oidc").expect("an outcome code"),
+        fragment_param(&location, "token"),
+    )
+}
+
+#[actix_web::test]
+async fn oidc_verified_email_signs_in_and_uninvited_identities_are_denied() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let provider = mock_provider().await;
+    let org_id = demo_org_id(&state).await;
+
+    let admin = login(&app, "demo@scout.local").await;
+    let admin_token = admin["token"].as_str().expect("admin session");
+    let (status, body) = configure_oidc(&app, admin_token, org_id, &provider.base).await;
+    assert_eq!(status, StatusCode::OK, "configure failed: {body}");
+    assert_eq!(body["configured"], true);
+    assert_eq!(body["issuer"], provider.base);
+    assert!(
+        body.get("client_secret").is_none(),
+        "the secret must never be returned: {body}"
+    );
+
+    // A verified email with an existing organisation membership signs in.
+    provider.set_identity(Some("demo@scout.local"), true);
+    let (flow_state, nonce) = begin_oidc(&app, "acme").await;
+    let (outcome, token) = finish_oidc(&app, &flow_state, &nonce).await;
+    assert_eq!(outcome, "signed_in");
+    let token = token.expect("a session token");
+    let (status, me) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(me["user"]["email"], "demo@scout.local");
+
+    // An unverified email is denied with the fixed code.
+    provider.set_identity(Some("demo@scout.local"), false);
+    let (flow_state, nonce) = begin_oidc(&app, "acme").await;
+    let (outcome, token) = finish_oidc(&app, &flow_state, &nonce).await;
+    assert_eq!(outcome, "email_unverified");
+    assert!(token.is_none());
+
+    // A verified email with no membership is denied and creates nothing.
+    let users_before = state.store.read().await.users.len();
+    provider.set_identity(Some("stranger@example.test"), true);
+    let (flow_state, nonce) = begin_oidc(&app, "acme").await;
+    let (outcome, token) = finish_oidc(&app, &flow_state, &nonce).await;
+    assert_eq!(outcome, "membership_unknown");
+    assert!(token.is_none());
+    assert_eq!(
+        state.store.read().await.users.len(),
+        users_before,
+        "provider sign-in must never create an account"
+    );
+
+    // An existing account with a pending invitation matches and is consumed.
+    let web = project_id(&app, admin_token, "scout-web").await;
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/invitations"),
+            admin_token,
+            json!({ "email": "viewer@scout.local", "project_id": web, "role": "triager" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "invite failed: {body}");
+    let viewer_id = state
+        .store
+        .read()
+        .await
+        .user_by_email("viewer@scout.local")
+        .map(|user| user.id)
+        .expect("the viewer account");
+    assert_eq!(
+        state.store.read().await.org_role_for(viewer_id, org_id),
+        None,
+        "the invitation is not a membership yet"
+    );
+
+    provider.set_identity(Some("viewer@scout.local"), true);
+    let (flow_state, nonce) = begin_oidc(&app, "acme").await;
+    let (outcome, _) = finish_oidc(&app, &flow_state, &nonce).await;
+    assert_eq!(outcome, "signed_in");
+    {
+        let store = state.store.read().await;
+        assert_eq!(
+            store.org_role_for(viewer_id, org_id),
+            Some(crate::models::OrgRole::Member),
+            "the invitation is consumed with exactly its own role"
+        );
+        assert!(
+            !store
+                .invitations
+                .values()
+                .any(|invitation| invitation.email == "viewer@scout.local"
+                    && invitation.is_pending()),
+            "the invitation is no longer pending"
+        );
+    }
+}
+
+#[actix_web::test]
+async fn oidc_flows_are_single_use_and_fail_closed() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let provider = mock_provider().await;
+    let org_id = demo_org_id(&state).await;
+    let admin = login(&app, "demo@scout.local").await;
+    let admin_token = admin["token"].as_str().expect("admin session");
+    let (status, body) = configure_oidc(&app, admin_token, org_id, &provider.base).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    provider.set_identity(Some("demo@scout.local"), true);
+
+    // A flow row is single use: the second callback fails as state_invalid.
+    let (flow_state, nonce) = begin_oidc(&app, "acme").await;
+    let (outcome, _) = finish_oidc(&app, &flow_state, &nonce).await;
+    assert_eq!(outcome, "signed_in");
+    let (outcome, token) = finish_oidc(&app, &flow_state, &nonce).await;
+    assert_eq!(outcome, "state_invalid");
+    assert!(token.is_none());
+
+    // An unknown state fails the same way.
+    let (outcome, _) = finish_oidc(&app, "not-a-real-state", "code").await;
+    assert_eq!(outcome, "state_invalid");
+
+    // An expired flow is treated as unknown.
+    {
+        let mut store = state.store.write().await;
+        let now = chrono::Utc::now();
+        store.insert_oidc_flow(crate::models::OidcLoginFlow {
+            state: "expired-state".into(),
+            org_id,
+            nonce: "nonce".into(),
+            pkce_verifier: "verifier".into(),
+            return_to: None,
+            created_at: now - chrono::Duration::minutes(11),
+            expires_at: now - chrono::Duration::minutes(1),
+        });
+    }
+    let (outcome, _) = finish_oidc(&app, "expired-state", "nonce").await;
+    assert_eq!(outcome, "state_invalid");
+
+    // Removing the connection fails an in-progress flow closed.
+    let (flow_state, nonce) = begin_oidc(&app, "acme").await;
+    let (status, _) = call_json(
+        &app,
+        delete(&format!("/api/orgs/{org_id}/oidc"), admin_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (outcome, token) = finish_oidc(&app, &flow_state, &nonce).await;
+    assert_eq!(outcome, "provider_error");
+    assert!(token.is_none());
+
+    // Provider sign-in stops and local sign-in still works.
+    let (status, _) = call_json(&app, get_public("/api/oidc/acme/start")).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "local sign-in is never affected");
+}
+
+#[actix_web::test]
+async fn oidc_configuration_is_admin_only_and_fails_fast() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let provider = mock_provider().await;
+    let org_id = demo_org_id(&state).await;
+    let admin = login(&app, "demo@scout.local").await;
+    let admin_token = admin["token"].as_str().expect("admin session");
+
+    // An unreachable issuer is a 400 naming discovery, and changes nothing.
+    let (status, body) = configure_oidc(&app, admin_token, org_id, "http://127.0.0.1:1").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap()
+            .contains("provider discovery failed"),
+        "actionable discovery error: {body}"
+    );
+    assert!(state.store.read().await.oidc_connection(org_id).is_none());
+
+    // A non-admin cannot read or change the connection.
+    let triager = login(&app, "triager@scout.local").await;
+    let triager_token = triager["token"].as_str().expect("triager session");
+    let (status, _) = configure_oidc(&app, triager_token, org_id, &provider.base).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call_json(
+        &app,
+        delete(&format!("/api/orgs/{org_id}/oidc"), triager_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = call_json(
+        &app,
+        get(&format!("/api/orgs/{org_id}/oidc"), triager_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // The seeded admin may configure; the secret is write-only.
+    let (status, body) = configure_oidc(&app, admin_token, org_id, &provider.base).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let serialised = body.to_string();
+    assert!(!serialised.contains(MOCK_CLIENT_SECRET));
+    {
+        let store = state.store.read().await;
+        let connection = store.oidc_connection(org_id).expect("stored");
+        let debug = format!("{connection:?}");
+        assert!(
+            !debug.contains(MOCK_CLIENT_SECRET),
+            "the secret must be redacted from Debug: {debug}"
+        );
+        assert_eq!(connection.scopes, "openid email profile");
+    }
+
+    // The deployment operator may also configure any organisation.
+    bootstrap_operator(&state).await;
+    let (_, operator) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    let operator_token = operator["token"].as_str().expect("operator session");
+    let (status, _) = configure_oidc(&app, operator_token, org_id, &provider.base).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Both changes are audited.
+    let (status, _) = call_json(
+        &app,
+        delete(&format!("/api/orgs/{org_id}/oidc"), admin_token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let store = state.store.read().await;
+    for action in ["oidc.configured", "oidc.removed"] {
+        assert!(
+            store.audit.iter().any(|entry| entry.action == action),
+            "missing audit row {action}"
+        );
+    }
+}

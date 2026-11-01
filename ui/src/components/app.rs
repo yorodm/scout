@@ -17,6 +17,11 @@ pub fn App() -> View {
     on_mount(move || {
         spawn_local(async move {
             state::load_accounts(store).await;
+            // An identity-provider landing carries the session in the fragment;
+            // consume it before looking at a stored session.
+            if state::apply_oidc_landing(store).await {
+                return;
+            }
             if let Some(token) = util::storage_get("scout_token") {
                 store.update(|state| state.token = Some(token.clone()));
                 match api::me(&token).await {

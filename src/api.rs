@@ -39,6 +39,11 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             "/api/orgs/{org_id}/projects",
             web::post().to(create_project),
         )
+        .route("/api/orgs/{org_id}/oidc", web::get().to(get_oidc))
+        .route("/api/orgs/{org_id}/oidc", web::put().to(put_oidc))
+        .route("/api/orgs/{org_id}/oidc", web::delete().to(delete_oidc))
+        .route("/api/oidc/{org_slug}/start", web::get().to(oidc_start))
+        .route("/api/oidc/callback", web::get().to(oidc_callback))
         .route(
             "/api/invitations/{token}",
             web::get().to(preview_invitation),
@@ -1031,6 +1036,310 @@ pub async fn revoke_invitation(
         Some(invitation_id.to_string()),
     );
     Ok(HttpResponse::Ok().json(json!({ "ok": true })))
+}
+
+// --- organisation OIDC (FR-018) --------------------------------------------
+
+/// Organisation admins manage the connection; the deployment operator may do so
+/// for any organisation (contracts/oidc.md).
+async fn auth_org_admin_or_operator(
+    req: &HttpRequest,
+    state: &AppState,
+    org_id: Uuid,
+) -> Result<(Uuid, String), ApiError> {
+    let (user_id, email) = auth_user(req, state).await?;
+    let store = state.store.read().await;
+    if !store.orgs.contains_key(&org_id) {
+        return Err(ApiError::NotFound("organisation not found".into()));
+    }
+    let is_operator = store
+        .users
+        .get(&user_id)
+        .is_some_and(|user| user.is_operator);
+    if is_operator || store.org_role_for(user_id, org_id) == Some(OrgRole::Admin) {
+        Ok((user_id, email))
+    } else {
+        Err(ApiError::Forbidden(
+            "organisation admin role is required".into(),
+        ))
+    }
+}
+
+fn oidc_json(connection: &OidcConnection) -> Value {
+    json!({
+        "configured": true,
+        "issuer": connection.issuer,
+        "client_id": connection.client_id,
+        "scopes": connection.scopes,
+        "configured_at": connection.created_at,
+    })
+}
+
+pub async fn get_oidc(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let org_id = path.into_inner();
+    auth_org_admin_or_operator(&req, &state, org_id).await?;
+    let store = state.store.read().await;
+    let connection = store
+        .oidc_connection(org_id)
+        .ok_or_else(|| ApiError::NotFound("no OIDC connection configured".into()))?;
+    Ok(HttpResponse::Ok().json(oidc_json(connection)))
+}
+
+#[derive(Deserialize)]
+pub struct OidcConfigRequest {
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    #[serde(default)]
+    pub scopes: Option<String>,
+}
+
+pub async fn put_oidc(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    body: web::Json<OidcConfigRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let org_id = path.into_inner();
+    let (_, email) = auth_org_admin_or_operator(&req, &state, org_id).await?;
+
+    let issuer = body.issuer.trim().trim_end_matches('/').to_string();
+    if !crate::oidc::valid_issuer(&issuer) {
+        return Err(ApiError::BadRequest(
+            "issuer must be an absolute http(s) URL".into(),
+        ));
+    }
+    let client_id = body.client_id.trim().to_string();
+    if client_id.is_empty() {
+        return Err(ApiError::BadRequest("client_id is required".into()));
+    }
+    if body.client_secret.is_empty() {
+        return Err(ApiError::BadRequest("client_secret is required".into()));
+    }
+    let scopes =
+        crate::oidc::normalise_scopes(body.scopes.as_deref()).map_err(ApiError::BadRequest)?;
+
+    // Validate discovery synchronously so an unreachable or malformed provider
+    // fails here and changes nothing.
+    crate::oidc::discover(&issuer)
+        .await
+        .map_err(|error| ApiError::BadRequest(format!("provider discovery failed: {error}")))?;
+
+    let now = Utc::now();
+    let mut store = state.store.write().await;
+    store.set_oidc_connection(OidcConnection {
+        org_id,
+        issuer: issuer.clone(),
+        client_id,
+        client_secret: body.client_secret.clone(),
+        scopes,
+        created_at: now,
+        updated_at: now,
+    });
+    crate::audit::record(
+        &mut store,
+        Some(org_id),
+        None,
+        &email,
+        "oidc.configured",
+        Some(issuer),
+    );
+    let connection = store.oidc_connection(org_id).expect("just stored");
+    Ok(HttpResponse::Ok().json(oidc_json(connection)))
+}
+
+pub async fn delete_oidc(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let org_id = path.into_inner();
+    let (_, email) = auth_org_admin_or_operator(&req, &state, org_id).await?;
+    let mut store = state.store.write().await;
+    if !store.remove_oidc_connection(org_id) {
+        return Err(ApiError::NotFound("no OIDC connection configured".into()));
+    }
+    crate::audit::record(&mut store, Some(org_id), None, &email, "oidc.removed", None);
+    Ok(HttpResponse::Ok().json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize, Default)]
+pub struct OidcCallbackQuery {
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// The fixed landing target. The fragment is deliberate: browsers never send it
+/// to a server, and the UI strips it after storing the session.
+fn oidc_landing(state: &AppState, outcome: &str, token: Option<&str>) -> HttpResponse {
+    let mut url = format!("{}/#oidc={outcome}", state.self_url.trim_end_matches('/'));
+    if let Some(token) = token {
+        url.push_str("&token=");
+        url.push_str(token);
+    }
+    HttpResponse::Found()
+        .insert_header(("Location", url))
+        .finish()
+}
+
+pub async fn oidc_start(
+    path: web::Path<String>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let slug = path.into_inner();
+    let (org_id, connection) = {
+        let store = state.store.read().await;
+        let org = store
+            .orgs
+            .values()
+            .find(|org| org.slug == slug)
+            .ok_or_else(|| ApiError::NotFound("organisation not found".into()))?;
+        let connection = store
+            .oidc_connection(org.id)
+            .cloned()
+            .ok_or_else(|| ApiError::NotFound("no OIDC connection configured".into()))?;
+        (org.id, connection)
+    };
+
+    let started = crate::oidc::start(&connection, &state.self_url)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "OIDC start failed");
+            ApiError::ServiceUnavailable("the identity provider is unavailable".into())
+        })?;
+
+    let now = Utc::now();
+    state.store.write().await.insert_oidc_flow(OidcLoginFlow {
+        state: started.state,
+        org_id,
+        nonce: started.nonce,
+        pkce_verifier: started.pkce_verifier,
+        return_to: None,
+        created_at: now,
+        expires_at: now + chrono::Duration::minutes(10),
+    });
+    Ok(HttpResponse::Found()
+        .insert_header(("Location", started.authorize_url))
+        .finish())
+}
+
+/// Consume a pending invitation exactly like a local acceptance, granting only
+/// the role it already carries.
+fn consume_oidc_invitation(store: &mut Store, invitation: &Invitation, user_id: Uuid, email: &str) {
+    match invitation.kind {
+        InvitationKind::OrgAdminSetup => {
+            store
+                .org_members
+                .insert((user_id, invitation.org_id), OrgRole::Admin);
+        }
+        InvitationKind::ProjectInvite => {
+            if let (Some(project_id), Some(role)) = (invitation.project_id, invitation.role) {
+                store.memberships.insert((user_id, project_id), role);
+            }
+            store
+                .org_members
+                .entry((user_id, invitation.org_id))
+                .or_insert(OrgRole::Member);
+        }
+    }
+    if let Some(stored) = store.invitations.get_mut(&invitation.id) {
+        stored.accepted_at = Some(Utc::now());
+        stored.accepted_user_id = Some(user_id);
+    }
+    crate::audit::record(
+        store,
+        Some(invitation.org_id),
+        invitation.project_id,
+        email,
+        "invitation.accepted",
+        Some(invitation.id.to_string()),
+    );
+}
+
+pub async fn oidc_callback(
+    query: web::Query<OidcCallbackQuery>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Some(state_param) = query.state.clone().filter(|value| !value.is_empty()) else {
+        return oidc_landing(&state, "state_invalid", None);
+    };
+    // Single use: the row is removed before the code is exchanged.
+    let flow = state.store.write().await.take_oidc_flow(&state_param);
+    let Some(flow) = flow else {
+        return oidc_landing(&state, "state_invalid", None);
+    };
+
+    let connection = {
+        let store = state.store.read().await;
+        store.oidc_connection(flow.org_id).cloned()
+    };
+    let Some(connection) = connection else {
+        return oidc_landing(&state, "provider_error", None);
+    };
+    if query.error.is_some() {
+        return oidc_landing(&state, "provider_error", None);
+    }
+    let Some(code) = query.code.clone().filter(|value| !value.is_empty()) else {
+        return oidc_landing(&state, "provider_error", None);
+    };
+
+    let identity = match crate::oidc::finish(&connection, &state.self_url, &flow, &code).await {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::warn!(%error, "OIDC token exchange or ID-token validation failed");
+            return oidc_landing(&state, "provider_error", None);
+        }
+    };
+    tracing::debug!(subject = %identity.subject, "OIDC identity verified");
+
+    if !identity.email_verified {
+        return oidc_landing(&state, "email_unverified", None);
+    }
+    let Some(email) = identity
+        .email
+        .map(|email| email.trim().to_ascii_lowercase())
+        .filter(|email| !email.is_empty())
+    else {
+        return oidc_landing(&state, "email_unverified", None);
+    };
+
+    let mut store = state.store.write().await;
+    let Some(user) = store.user_by_email(&email).cloned() else {
+        // No account is created by provider sign-in (US3/AC2).
+        return oidc_landing(&state, "membership_unknown", None);
+    };
+    if user.disabled_at.is_some() {
+        return oidc_landing(&state, "membership_unknown", None);
+    }
+    if store.org_role_for(user.id, flow.org_id).is_none() {
+        // An invitation in this organisation also matches, and is consumed with
+        // exactly the role it already carries.
+        let pending = store
+            .invitations
+            .values()
+            .find(|invitation| {
+                invitation.org_id == flow.org_id
+                    && invitation.is_pending()
+                    && invitation.email.eq_ignore_ascii_case(&email)
+            })
+            .cloned();
+        let Some(invitation) = pending else {
+            return oidc_landing(&state, "membership_unknown", None);
+        };
+        consume_oidc_invitation(&mut store, &invitation, user.id, &email);
+    }
+
+    let token = store.issue_session(user.id, state.session_ttl_days);
+    drop(store);
+    oidc_landing(&state, "signed_in", Some(&token))
 }
 
 #[derive(Deserialize)]

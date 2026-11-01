@@ -300,6 +300,17 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct OidcConfig {
+    #[serde(default)]
+    pub configured: bool,
+    pub issuer: String,
+    pub client_id: String,
+    pub scopes: String,
+    #[serde(default)]
+    pub configured_at: Option<String>,
+}
+
 // ------------------------------------------------------------------ requests
 
 fn with_auth(request: RequestBuilder, token: Option<&str>) -> RequestBuilder {
@@ -445,6 +456,47 @@ pub async fn unlock_user(token: &str, user_id: &str) -> Result<OkResponse, Strin
         &serde_json::json!({}),
     )
     .await
+}
+
+/// `404` means the organisation has no connection, which is not an error.
+async fn get_optional<T: DeserializeOwned>(path: &str, token: &str) -> Result<Option<T>, String> {
+    let response = with_auth(Request::get(path), Some(token))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if response.status() == 404 {
+        return Ok(None);
+    }
+    read_response(response).await.map(Some)
+}
+
+pub async fn oidc_config(token: &str, org_id: &str) -> Result<Option<OidcConfig>, String> {
+    get_optional(&format!("/api/orgs/{org_id}/oidc"), token).await
+}
+
+pub async fn put_oidc(
+    token: &str,
+    org_id: &str,
+    issuer: &str,
+    client_id: &str,
+    client_secret: &str,
+    scopes: &str,
+) -> Result<OidcConfig, String> {
+    put(
+        &format!("/api/orgs/{org_id}/oidc"),
+        Some(token),
+        &serde_json::json!({
+            "issuer": issuer,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "scopes": scopes,
+        }),
+    )
+    .await
+}
+
+pub async fn delete_oidc(token: &str, org_id: &str) -> Result<OkResponse, String> {
+    delete(&format!("/api/orgs/{org_id}/oidc"), Some(token)).await
 }
 
 // ------------------------------------------------------------------ data
