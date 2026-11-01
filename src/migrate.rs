@@ -107,6 +107,11 @@ pub async fn run(source: &Objects, destination: &Objects) -> Summary {
         if key.starts_with("__scout/") {
             continue;
         }
+        // Only Scout's payload prefixes are in scope; `found` counts payloads and
+        // attachments only (FR-012).
+        if !(key.starts_with("raw/") || key.starts_with("attachments/")) {
+            continue;
+        }
         summary.found += 1;
         tracing::info!(key = %key, size, "migrate: listed");
         let permit = semaphore
@@ -405,6 +410,28 @@ mod tests {
         assert_eq!(summary.found, 1);
         assert!(destination
             .head_size("__scout/health/abc")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[actix_web::test]
+    async fn non_payload_keys_are_ignored() {
+        let source = store(&[
+            ("raw/p-a/e1", b"one"),
+            ("foreign/data", b"x"),
+            ("__scout/health/abc", b"ok"),
+        ])
+        .await;
+        let destination = Objects::memory();
+
+        let summary = run(&source, &destination).await;
+
+        assert_eq!(summary.found, 1);
+        assert_eq!(summary.copied, 1);
+        assert_eq!(summary.failed, 0);
+        assert!(destination
+            .head_size("foreign/data")
             .await
             .unwrap()
             .is_none());

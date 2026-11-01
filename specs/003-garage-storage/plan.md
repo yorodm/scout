@@ -124,6 +124,9 @@ gates run.
   so `allow_http` now lives on `ClientOptions`. Without this, every `http://` deployment failed with
   "builder error"; the closed-port probe test now asserts that plain HTTP is allowed.
 - Not run: the Docker gates (T030, T033, T040); this workspace has no Docker CLI.
+- Convergence T042–T044: README now documents replacing the Garage `rpc_secret`/`admin_token` development
+  values and the loopback-only admin port; `AWS_REGION` is required for S3 destination settings; migration
+  ignores keys outside `raw/` and `attachments/`. `cargo test`: 123 passed, 0 failed, 2 ignored.
 
 ## Project Structure
 

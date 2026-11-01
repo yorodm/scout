@@ -243,3 +243,11 @@ Task: "503 storage-failure regression test in src/tests.rs"
 - [X] T039 [P] [US3] Add `verify_writable_times_out_on_blackholed_endpoint` in `src/objects.rs` (a `TcpListener` that accepts connections but never responds) asserting `verify_writable()` fails within 60 s, names the endpoint and bucket, and never prints the secret, per SC-005; mark it `#[ignore]` so the default `cargo test` gate stays fast, and run it explicitly with `cargo test verify_writable_times_out_on_blackholed_endpoint -- --ignored` during the verification gates
 - [ ] T040 [US4] Run quickstart step 8 against MinIO or another non-Garage S3-compatible provider in compose, confirm ingest, raw retrieval, attachments, and retention behave identically, read back at least one raw payload and one attachment per project after cutover and confirm byte identity, verify all migrated raw payloads and attachments are byte-identical after the provider switch, and record the result in `quickstart.md`, per SC-002 and SC-007 — **environment gate** where Docker is unavailable
 - [X] T041 [P] Document `SCOUT_S3_REGION` (default `garage`) in the `contracts/garage-deployment.md` environment table and `README.md`, and confirm T011's `${SCOUT_S3_REGION:-garage}` mapping matches the compose file and the documented default
+
+---
+
+## Phase 9: Convergence
+
+- [X] T042 Document in `README.md` that `deploy/garage.toml` ships development values for `rpc_secret` and `admin_token` that must be replaced outside a local stack, and that the admin API is bound to `127.0.0.1:3903`; alternatively correct the claim in `contracts/garage-deployment.md` if the `garage.toml` comment is sufficient, per plan: garage-deployment contract (partial)
+- [X] T043 Require `AWS_REGION` when building S3 destination settings instead of silently defaulting to `us-east-1`, or document the default in `README.md` and `contracts/garage-deployment.md` and align the data model and T008's "all fields required" wording, per plan: destination storage settings (partial)
+- [X] T044 Restrict the migration listing and `found` count to `raw/` and `attachments/` keys, or explicitly document that every non-`__scout/` key is treated as a payload, and add a test with a foreign-key fixture, per FR-012 (partial)

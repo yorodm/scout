@@ -364,6 +364,10 @@ docker compose up -d scout
 Plain HTTP and path-style addressing are used inside the compose network, so no TLS or wildcard DNS
 is required. Running Scout outside compose needs the same five variables.
 
+`deploy/garage.toml` ships development values for `rpc_secret` and `admin_token`; replace both before
+exposing the stack beyond a local machine, and keep the admin API published on loopback
+(`127.0.0.1:3903`), as the compose file does.
+
 **Startup probe.** Before serving, Scout writes and then deletes a sentinel object at
 `__scout/health/<uuid>`. A missing bucket, rejected credentials, or an unreachable endpoint stops
 startup with the endpoint, bucket, and the likely cause; the service never accepts telemetry it

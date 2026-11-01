@@ -44,7 +44,8 @@ migration never modifies source objects.
 Keys are opaque to the migration: no renaming, re-prefixing, or re-encoding occurs.
 
 Only `raw/` and `attachments/` objects are migrated. Keys under the `__scout/` prefix are startup-probe
-sentinels: they are ignored and never counted in `found`.
+sentinels: they are ignored and never counted in `found`. Any other key in the bucket is also ignored,
+so `found` never includes it.
 
 ## Migration Outcome (per object)
 

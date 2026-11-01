@@ -123,9 +123,7 @@ impl S3Settings {
         bucket: String,
         get: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
-        let region = get("AWS_REGION")
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "us-east-1".to_string());
+        let region = required(get, "AWS_REGION")?;
         Self::new(
             endpoint,
             bucket,
@@ -470,6 +468,18 @@ mod tests {
         let missing = lookup(&[("SCOUT_S3_ENDPOINT", "http://garage:3900")]);
         let error = S3Settings::from_runtime_lookup(&missing).expect_err("must fail");
         assert!(error.contains("SCOUT_S3_BUCKET"), "{error}");
+    }
+
+    #[test]
+    fn runtime_settings_require_a_region() {
+        let missing = lookup(&[
+            ("SCOUT_S3_ENDPOINT", "http://garage:3900"),
+            ("SCOUT_S3_BUCKET", "scout-raw"),
+            ("AWS_ACCESS_KEY_ID", "key-id"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+        ]);
+        let error = S3Settings::from_runtime_lookup(&missing).expect_err("region is required");
+        assert!(error.contains("AWS_REGION"), "{error}");
     }
 
     #[actix_web::test]

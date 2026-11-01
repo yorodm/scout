@@ -36,7 +36,7 @@ destination setting uses the same message style. Secrets are never printed.
 1. Build source and destination clients with path-style addressing; `http://` endpoints allow plain
    HTTP.
 2. List every object in the source bucket, in listing order, ignoring keys under the `__scout/` prefix
-   (startup-probe sentinels are not payloads and are never counted in `found`).
+   and keys outside `raw/` and `attachments/` (only payloads and attachments are counted in `found`).
 3. For each object: read the bytes, hash them, compare with the destination copy, and either skip
    (identical), create (absent), or overwrite (different).
 4. Re-read the destination and compare hashes before counting the object as verified.
