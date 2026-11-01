@@ -46,7 +46,7 @@ export SCOUT_TEST_DATABASE_URL=postgres://scout:scout@127.0.0.1:5432/scout_test
 cargo test -- --ignored
 ```
 
-Expected: migration, restart-durability, concurrent-start, and repository parity tests pass. Create the
+Expected: migration-engine startup, restart-durability, and repository parity tests pass. Create the
 database fresh before this run; the suite wipes the schema it uses.
 
 ## 2. Clean-host stack (SC-009, part 1)
@@ -79,6 +79,9 @@ organisation list does not reveal it.
 3. Accept it in another private window; confirm the account lands on the project with `triager` access.
 4. Change that member's role to `viewer`; the same session loses triage actions within one minute.
 5. Sign out and back in with the initial admin's password; recovery codes still work once each.
+6. Age an unused invitation past its seven-day window (`UPDATE invitations SET expires_at = now() -
+   interval '1 day';` in the shipped database), then open its link and confirm the dashboard says the
+   token expired rather than that it is unknown; an unknown token must produce a different message.
 
 Expected: every change is immediate, no restart, and the audit trail shows organisation creation,
 initial-admin issuance, invitation creation/acceptance, and role change.
@@ -126,33 +129,45 @@ Restart Scout with `SCOUT_RETENTION_INTERVAL_SECONDS=2`, wait two intervals, the
 Expected: every record created before the restart is present afterwards, and nothing is acknowledged
 that was not stored.
 
-## 8. Schema behaviour (SC-002, SC-003, SC-011)
+## 8. Startup migrations and multi-instance serving (FR-003, SC-016, SC-021)
+
+Startup migrations run before the service reports ready:
 
 ```sh
-# Idempotent restart: no migration is applied twice, startup succeeds.
-docker compose restart scout && docker compose logs --tail=20 scout
-
-# Concurrent starts against one store. `run` does not publish host ports, so
-# three instances can share the same service definition.
-for n in 1 2 3; do
-  docker compose run -d --no-deps --name "scout-start-$n" scout
-done
-sleep 20
-docker logs scout-start-1 2>&1 | tail -5
-docker logs scout-start-2 2>&1 | tail -5
-docker logs scout-start-3 2>&1 | tail -5
+# The engine applies pending migrations during startup.
+docker compose logs scout | grep -i migrat || true
+curl -fsS http://127.0.0.1:8080/api/health | jq -r .status
 docker compose exec -T postgres psql -U scout -d scout \
-  -c "SELECT count(*) AS applied FROM _sqlx_migrations;"
-docker compose rm -sf scout-start-1 scout-start-2 scout-start-3
+  -c "SELECT version FROM _sqlx_migrations ORDER BY version;"
+
+# A restart with nothing pending applies nothing and still serves.
+docker compose restart scout && docker compose logs --tail=20 scout
 ```
 
-Expected: exactly one instance applies pending changes, all three log a successful start with no
-migration error, no duplicate or partial schema change exists, and `_sqlx_migrations` lists one row per
-migration.
+Expected: every shipped migration appears once in `_sqlx_migrations`, health is `ok`, and a restart
+with nothing pending applies nothing.
 
-Version skew: run the previous image against the upgraded database (`docker compose run --rm scout` with
-the older tag). Expected: startup aborts with a message naming the stored version and the build's
-maximum, and no HTTP listener is opened.
+Upgrade planning, the order in which instances are replaced, and rollback belong to the operator; this
+feature makes no concurrency, idempotency-on-reapply, or version-skew guarantees, so there is nothing to
+verify there beyond the checks above.
+
+Serving-mode consistency (SC-016): start two more instances on distinct host ports so they can be
+probed directly, change a member's role through the first instance, then read the same project through
+the other two.
+
+```sh
+docker compose run -d --no-deps -p 8081:8080 --name scout-serve-2 scout
+docker compose run -d --no-deps -p 8082:8080 --name scout-serve-3 scout
+sleep 5
+curl -sS -H "Authorization: Bearer <member-token>" \
+  http://127.0.0.1:8081/api/projects/<project-id>/members
+curl -sS -H "Authorization: Bearer <member-token>" \
+  http://127.0.0.1:8082/api/projects/<project-id>/members
+```
+
+Every instance must reflect the change on its next request; a stale answer means an instance-local
+metadata cache exists and the design is wrong. Remove the probes with
+`docker compose rm -sf scout-serve-2 scout-serve-3` afterwards.
 
 ## 9. Optional OIDC (US3, SC-007)
 
@@ -169,13 +184,18 @@ email matches an invited member:
 ## 10. Load check (SC-010)
 
 ```sh
+# The visibility measurement needs a project-scoped member session, not the
+# operator: SC-015 denies the operator project data.
+export SCOUT_PROJECT_ID="<project uuid>"
+export SCOUT_API_TOKEN="<session token from a project owner or triager>"
 ./scripts/load-ingest.sh --rate 500 --duration 60 --size 10240
 ```
 
-Expected: the script prints accepted events/s, p95 acknowledgement latency, and 95% time-to-visibility,
-and writes a dated result file under `specs/004-production-readiness/evidence/`. Targets: ≥500 accepted
-events/s, p95 ≤150 ms, 95% visible within 10 s. A shortfall must be recorded with the host profile and an
-explicit acceptance note.
+Expected: the script prints accepted events/s, p95 acknowledgement latency, and 95% time-to-visibility
+(the last one is reported as `skipped` only when the two variables above are absent), and writes a dated
+result file under `specs/004-production-readiness/evidence/`. Targets: ≥500 accepted events/s, p95
+≤150 ms, 95% visible within 10 s. A shortfall must be recorded with the host profile and an explicit
+acceptance note.
 
 ## 11. Sentry compatibility surface (SC-011)
 
@@ -187,17 +207,17 @@ docker compose up -d --force-recreate scout
 
 Expected: every documented path in
 [feature 002's contract](../../002-sentry-api-compatibility/contracts/sentry-compat-api.md) returns its
-documented response; the compatibility schema additions are present, re-applying them changes nothing,
+documented response; the compatibility schema additions are present.
 and organisation slug and per-project issue-number uniqueness hold.
 
-## 12. Failure modes (SC-004, FR-004, FR-005)
+## 12. Failure modes (SC-004, FR-005)
 
 | Action | Expected |
 |---|---|
 | `docker compose stop postgres` | `/api/health` → `503`, `"storage":"unavailable"`; ingest returns `503` with `Retry-After`; nothing is acknowledged |
 | `docker compose stop garage` | `/api/health` → `503`, `"object_store":"unavailable"`; ingest returns retryable `503` |
 | Start Scout with `SCOUT_STORE=memory` | Startup logs a durability warning and `/api/health` reports `"durability":"ephemeral"` |
-| Corrupt a migration (or apply a newer one out of band) | Startup aborts with an actionable message and binds no port |
+| A startup migration fails | Startup aborts with an actionable message and binds no port |
 
 ## Evidence checklist
 
@@ -205,11 +225,13 @@ and organisation slug and per-project issue-number uniqueness hold.
 - [ ] Health reports durable storage and both dependencies (section 2)
 - [ ] Onboarding under five minutes with a one-time token (section 3)
 - [ ] Roles and invitations effective immediately (section 4)
+- [ ] Expired token reported distinctly from an unknown one (section 4)
+- [ ] Three serving instances agree on every mutation (section 8)
 - [ ] Demo session confined; reset preserves real data (section 5)
 - [ ] Issue detail, raw-expired state, search, suggestion/decision, settings (section 6)
 - [ ] Retention expires raw data while triage history survives; restart preserves everything (section 7)
-- [ ] Migrations idempotent and concurrency-safe; version skew aborts (section 8)
+- [ ] Startup migrations applied before the service reports ready (section 8)
 - [ ] OIDC verified-email sign-in, denial, and local fallback (section 9)
 - [ ] Load check within targets or recorded shortfall (section 10)
-- [ ] Sentry compatibility paths and schema idempotency (section 11)
+- [ ] Sentry compatibility paths (section 11)
 - [ ] Degraded health and retryable ingest on dependency loss (section 12)

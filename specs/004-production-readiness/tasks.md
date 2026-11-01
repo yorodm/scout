@@ -65,27 +65,27 @@ until this phase compiles and the full existing suite passes.
 
 ---
 
-## Phase 3: User Story 1 — Keep every record across restarts and upgrades (Priority: P1) 🎯 MVP
+## Phase 3: User Story 1 — Keep every record across restarts (Priority: P1) 🎯 MVP
 
-**Goal**: PostgreSQL is the system of record; schema changes apply automatically, idempotently, and
-safely under concurrent starts; a failed or future-versioned schema aborts startup; health reflects
-durability; the in-memory store remains only for tests and explicit local development.
+**Goal**: PostgreSQL is the system of record; the application runs its shipped migrations at startup
+before reporting ready, while planning, sequencing, and rolling back upgrades stay with the operator;
+health reflects durability; the in-memory store remains only for tests and explicit local development.
 
 **Independent Test**: Start the stack against PostgreSQL, create an organisation, project, member, key,
 issue, log line, and audit entry, restart the application, and confirm every record, count, and history
-entry is unchanged while health reports durable storage. Then start three instances at once and confirm
-exactly one applies pending schema changes.
+entry is unchanged while health reports durable storage. Then start against a store with pending
+migrations and confirm they are applied before the service reports ready.
 
 ### Tests for User Story 1 ⚠️
 
 > Write these first; they fail until the implementation lands. PostgreSQL-backed tests use
 > `SCOUT_TEST_DATABASE_URL` and `#[ignore]`.
 
-- [ ] T013 [P] [US1] Add migration tests in `src/tests.rs`: fresh database applies `0001`–`0008`; a second run applies nothing; `_sqlx_migrations` has one row per file (`#[ignore]`)
-- [ ] T014 [P] [US1] Add a three-concurrent-start test in `src/tests.rs` that spawns three migrator runs against one database and asserts no error, one applied set, and no partially created table (`#[ignore]`)
-- [ ] T015 [P] [US1] Add a version-skew test in `src/tests.rs` that inserts a migration version above the embedded maximum and asserts the startup error names both versions and leaves no listener (`#[ignore]`)
-- [ ] T016 [P] [US1] Add repository parity tests in `src/tests.rs` that replay the identity, project, telemetry, and audit fixtures through both `Store` variants and assert identical results (`#[ignore]` for the PostgreSQL arm)
-- [ ] T017 [P] [US1] Add a retryable-failure test in `src/tests.rs`: with the store marked unavailable, `POST /api/1/envelope/` returns `503` with `Retry-After` and no event row is created
+- [ ] T013 [US1] Add startup-migration tests in `src/tests.rs`: a fresh database ends with every shipped migration recorded in `_sqlx_migrations`, pending migrations are applied during startup, and a restart with nothing pending applies nothing (`#[ignore]`)
+- [ ] T014 [US1] Add a failed-startup-migration test in `src/tests.rs`: a migration that errors leaves the service unable to serve and previously applied migrations recorded; the application never reverts applied migrations (`#[ignore]`)
+- [ ] T015 [US1] Add a startup-gating test in `src/tests.rs`: while migrations are pending, health is not `ok` and no API request succeeds; once they complete, health returns `ok` (FR-003, SC-021)
+- [ ] T016 [US1] Add repository parity tests in `src/tests.rs` that replay the identity, project, telemetry, and audit fixtures through both `Store` variants and assert identical results (`#[ignore]` for the PostgreSQL arm)
+- [ ] T017 [US1] Add a retryable-failure test in `src/tests.rs`: with the store marked unavailable, `POST /api/1/envelope/` returns `503` with `Retry-After` and no event row is created
 
 ### Implementation for User Story 1
 
@@ -131,10 +131,10 @@ a demo session cannot reach the real project while a demo reset preserves it.
 
 ### Tests for User Story 2 ⚠️
 
-- [ ] T042 [P] [US2] Add SC-015 tests in `src/tests.rs`: the operator is denied every project-scoped route (issues, events, logs, raw, attachments, keys, settings) with `404`/`403` and no existence leak, while organisation creation and setup-token issuance still succeed
-- [ ] T043 [P] [US2] Add SC-014 tests in `src/tests.rs`: with real and demo organisations present, a demo session lists only demo accounts, reads only demo projects, and receives `404` for the real project; `POST /api/demo/reset` leaves the real organisation, project, and operator intact
-- [ ] T044 [P] [US2] Add initial-admin tests in `src/tests.rs`: a new-account token sets a password and returns recovery codes once; an existing account must sign in first, keeps its password, and gains the admin role; an expired/used/revoked token returns `410`
-- [ ] T045 [P] [US2] Add recovery-code tests in `src/tests.rs`: reissuing invalidates prior unused codes, only the newest set works, and no plaintext is stored or returned twice
+- [ ] T042 [US2] Add SC-015 tests in `src/tests.rs`: the operator is denied every project-scoped route (issues, events, logs, raw, attachments, keys, settings) with `404`/`403` and no existence leak, while organisation creation and setup-token issuance still succeed
+- [ ] T043 [US2] Add SC-014 tests in `src/tests.rs`: with real and demo organisations present, a demo session lists only demo accounts, reads only demo projects, and receives `404` for the real project; `POST /api/demo/reset` leaves the real organisation, project, and operator intact
+- [ ] T044 [US2] Add initial-admin tests in `src/tests.rs`: a new-account token sets a password and returns recovery codes once; an existing account must sign in first, keeps its password, and gains the admin role; an expired/used/revoked token returns `410`
+- [ ] T045 [US2] Add recovery-code tests in `src/tests.rs`: reissuing invalidates prior unused codes, only the newest set works, and no plaintext is stored or returned twice
 
 ### Implementation for User Story 2
 
@@ -142,9 +142,9 @@ a demo session cannot reach the real project while a demo reset preserves it.
 - [ ] T047 [US2] Scope the demo endpoints in `src/api.rs` and the store methods they use: accounts list only demo members; reset replaces demo-organisation rows only and never the operator or real organisations
 - [ ] T048 [US2] Include `slug` and `is_demo` in `GET /api/orgs` in `src/api.rs` per the native API contract
 - [ ] T049 [P] [US2] Complete real sign-in, recovery, invitation acceptance, and one-time recovery-code display in `ui/src/components/overlays.rs`, hiding demo shortcuts when `GET /api/demo/accounts` is unavailable
-- [ ] T050 [P] [US2] Add the operator console to `ui/src/components/other.rs` (organisation list with slug and demo badge, creation form, one-time setup-token block with copy) and its navigation entry in `ui/src/components/app.rs`
-- [ ] T051 [P] [US2] Add member and invitation screens to `ui/src/components/other.rs` (list, add, role change, removal with last-owner message, invite link shown once, revoke)
-- [ ] T052 [P] [US2] Add ingest-key screens to `ui/src/components/other.rs` (list with prefixes, create, rotate, revoke, plaintext shown once)
+- [ ] T050 [US2] Add the operator console to `ui/src/components/other.rs` (organisation list with slug and demo badge, creation form, one-time setup-token block with copy) and its navigation entry in `ui/src/components/app.rs`
+- [ ] T051 [US2] Add member and invitation screens to `ui/src/components/other.rs` (list, add, role change, removal with last-owner message, invite link shown once, revoke)
+- [ ] T052 [US2] Add ingest-key screens to `ui/src/components/other.rs` (list with prefixes, create, rotate, revoke, plaintext shown once)
 - [ ] T053 [US2] Add the auth/org/invite/member/key calls and state to `ui/src/api.rs` and `ui/src/state.rs`
 - [ ] T054 [US2] Make navigation role-aware in `ui/src/components/app.rs` (operator console only for the operator, organisation admin entry only for org admins, project settings only for owners/admins)
 - [ ] T055 [US2] Apply the shared loading/empty/permission/error primitives from `ui/src/components/common.rs` to every admin screen added in this phase
@@ -164,9 +164,9 @@ unverified identity are denied with no account created, then sign in locally wit
 
 ### Tests for User Story 3 ⚠️
 
-- [ ] T056 [P] [US3] Add OIDC flow tests with a local mock provider in `src/tests.rs`: verified-email match signs in, unverified email and unknown membership are denied with the fixed outcome codes, and no user row is created
-- [ ] T057 [P] [US3] Add OIDC hardening tests in `src/tests.rs`: a replayed `state` fails, an expired flow fails, a removed connection fails the flow, and the client secret never appears in any response body or log line
-- [ ] T058 [P] [US3] Add configuration tests in `src/tests.rs`: discovery failure returns `400` and changes nothing; `PUT`/`DELETE` require organisation admin; both actions are audited
+- [ ] T056 [US3] Add OIDC flow tests with a local mock provider in `src/tests.rs`: verified-email match signs in, unverified email and unknown membership are denied with the fixed outcome codes, and no user row is created
+- [ ] T057 [US3] Add OIDC hardening tests in `src/tests.rs`: a replayed `state` fails, an expired flow fails, a removed connection fails the flow, and the client secret never appears in any response body or log line
+- [ ] T058 [US3] Add configuration tests in `src/tests.rs`: discovery failure returns `400` and changes nothing; `PUT`/`DELETE` require organisation admin; both actions are audited
 
 ### Implementation for User Story 3
 
@@ -194,9 +194,9 @@ the model/retention form all work in the UI with loading, empty, and error state
 
 ### Tests for User Story 4 ⚠️
 
-- [ ] T066 [P] [US4] Add backend tests in `src/tests.rs`: the occurrences endpoint returns newest-first event metadata; `GET /api/issues/{id}/raw` returns the stored bytes and, after retention, an explicit expired state with `410` and no body
-- [ ] T067 [P] [US4] Add backend tests in `src/tests.rs`: unified search returns issues and logs in one ordered set, honours `state`/`level`/`category`/`q`/`sort`, applies the documented result cap, and never returns another project's rows
-- [ ] T068 [P] [US4] Add backend tests in `src/tests.rs`: confirming or overriding a suggestion updates the authoritative decision, preserves the original suggestion, and does not move the issue or its event
+- [ ] T066 [US4] Add backend tests in `src/tests.rs`: the occurrences endpoint returns newest-first event metadata; `GET /api/issues/{id}/raw` returns the stored bytes and, after retention, an explicit expired state with `410` and no body
+- [ ] T067 [US4] Add backend tests in `src/tests.rs`: unified search returns issues and logs in one ordered set, honours `state`/`level`/`category`/`q`/`sort`, applies the documented result cap, and never returns another project's rows
+- [ ] T068 [US4] Add backend tests in `src/tests.rs`: confirming or overriding a suggestion updates the authoritative decision, preserves the original suggestion, and does not move the issue or its event
 
 ### Implementation for User Story 4
 
@@ -234,7 +234,7 @@ compatibility paths answer, and the quality gates pass.
 - [x] T081 [US5] Expose `GET /api/metrics` in `src/api.rs` per [contracts/native-api.md](./contracts/native-api.md), operator-only, and emit the same numbers as periodic `INFO` lines
 - [x] T082 [US5] Write `scripts/compose-smoke.sh`: `docker compose up -d --build --force-recreate`, wait for health, operator sign-in, organisation + initial admin + token redemption, project creation, event and log ingest, raw retrieval, retention via the documented backdating step, restart, re-read, compatibility path check (`--compat-only`), and demo-confinement check; write a dated evidence file
 - [x] T083 [US5] Write `scripts/load-ingest.sh`: 10 KB envelopes at a target rate, accepted rate, p95 acknowledgement latency, and 95% time-to-visibility, compared against SC-010 and written to a dated evidence file
-- [x] T084 [US5] Verify feature 002's outstanding migration proof inside `scripts/compose-smoke.sh`: apply `migrations/0007_sentry_compat.sql` on the shipped database, re-apply it, assert organisation slug and per-project issue-number uniqueness with seeded duplicates, and assert it is a no-op the second time (closes 002 T047/T050)
+- [x] T084 [US5] Verify feature 002's compatibility schema inside `scripts/compose-smoke.sh`: after the startup migrations, assert `organisations_slug_key` and `issues_project_number_key` exist and that organisation slug and per-project issue-number uniqueness hold with seeded duplicates (closes 002 T047/T050)
 - [ ] T085 [US5] Run `scripts/compose-smoke.sh` on the clean host and commit the result under `specs/004-production-readiness/evidence/`
 - [ ] T086 [US5] Run `scripts/load-ingest.sh` on the documented 4 vCPU reference deployment and commit the result, recording any accepted shortfall with its justification
 - [ ] T087 [US5] Update `README.md`, `architecture.md`, and `docker-compose.yml` to describe PostgreSQL as the metadata store, the in-memory mode, the bootstrap variables, the new routes, and every verification step in `quickstart.md`
@@ -281,17 +281,17 @@ compatibility paths answer, and the quality gates pass.
 
 - Setup: T002–T005 are independent files.
 - Foundational: T007–T010 and T012 touch different files and can run together; T006 and T011 are sequential.
-- US1: T013–T017 (tests) are independent of each other; T023–T026 are different SQL domains in one file and must be sequenced; T028–T030 are sequential edits to `src/api.rs`.
-- US2: T049, T050, T051, T052 touch different files (T050–T052 share `other.rs`, so run them in order); T042–T045 are independent test files/sections.
+- US1: T013–T017 share `src/tests.rs` and must be written in order; T023–T026 are different SQL domains in one file and must be sequenced; T028–T030 are sequential edits to `src/api.rs`.
+- US2: T049, T053 and T054 touch different files and can run together; T050–T052 share `other.rs` and must be ordered; T042–T045 share `src/tests.rs` and must be ordered.
 - US3: T064 (`other.rs`) and T065 (`app.rs`, `state.rs`) can run together.
 - US4: T069–T073 share `issues.rs` and must be ordered; T074–T075 share `other.rs` and must be ordered.
-- US5: T078–T079 are independent; T082/T083 are independent scripts.
+- US5: T078–T079 share `src/tests.rs` and must be ordered; T082/T083 are independent scripts.
 
 ### Parallel Example: User Story 1
 
 ```text
 # Tests (independent sections of src/tests.rs)
-T013 migration tests · T014 concurrent starts · T015 version skew · T016 repository parity · T017 retryable 503
+T013 startup migrations · T014 failed migration · T015 startup gating · T016 repository parity · T017 retryable 503
 
 # Different SQL domains in src/store/postgres.rs (sequence them in one branch)
 T023 identity · T024 projects · T025 telemetry · T026 ops/jobs/retention
@@ -333,3 +333,49 @@ T049 overlays.rs · T050–T052 other.rs (sequential) · T053 api.rs + state.rs 
   claimed.
 - Commit after each task or logical group, as in features 001–003.
 - Do not modify custom reviewer checklists (`checklists/*`) on the reviewer's behalf.
+
+---
+
+## Phase 9: Clarification Follow-ups (appended 2026-11-01)
+
+**Purpose**: Fold the second clarification session into the existing plan without renumbering or
+rewriting any completed task. These tasks augment Phases 3–5; they do not replace them.
+
+**Mapping from clarifications to work**
+
+| Clarification | Requirement | Task |
+|---|---|---|
+| Every instance reads the shared store per request | FR-031, SC-016 | T096 |
+| Ingest fails fast with a retry hint | FR-009, SC-004 | T097 |
+| Audit trail is storage-only | FR-007 | T098 |
+| Invitations and setup tokens expire in seven days | FR-013 | T099 |
+| Counters are operator-only | FR-025 | Already satisfied by T079 |
+
+- [ ] T096 [US1] Add a three-instance sharing test in `src/tests.rs` (marked `#[ignore]`): start three `AppState` values against one `SCOUT_TEST_DATABASE_URL` database, create a project and member through instance A, revoke that role through instance B, and assert instance C denies access on its next request; after each mutation, read through all three instances and assert none serves instance-local metadata (FR-031, SC-016)
+- [ ] T097 [US1] Assert fail-fast ingest behaviour in `src/tests.rs`: with the store marked unavailable, `POST /api/{dsn}/envelope` returns `503` with `Retry-After` on the first attempt, no retry or in-memory buffering occurs, no event row or raw object is created, and the ingest permit is released so the next request is admitted (FR-009, SC-004)
+- [ ] T098 [US1] Assert the audit trail has no read surface and records complete entries in `src/tests.rs`: no route registered in `src/api.rs` or `src/compat/mod.rs` exposes audit entries, and an administrative action persists actor, target, action, and time in `audit_log` (FR-007)
+- [ ] T099 [US2] Enforce the seven-day lifetime for invitations and initial-admin tokens in `src/store/postgres.rs` (default `expires_at = issued_at + interval '7 days'`) and `src/api.rs`: an expired token returns `410 Gone` with an expiry message, an unknown token returns `404`, and redemption by the wrong account is refused without consuming the token; cover all three paths in `src/tests.rs` (FR-013)
+
+**Checkpoint**: the clarification decisions are executable and traceable; Phases 3–7 keep their
+original numbering and completion state.
+
+---
+
+## Phase 10: Latest Clarifications (credentials, retention, backup, revocation)
+
+**Purpose**: Fold the third clarification session into the plan without renumbering completed work.
+
+| Clarification | Requirement | Task |
+|---|---|---|
+| Operator changes its password and receives recovery codes once | FR-012, SC-017 | T100 |
+| Retention follows the server receipt time | FR-010, SC-018 | T101 |
+| Backup and restore are documented, not shipped | FR-027, SC-019 | T102 |
+| Disabling or removing an account ends its sessions and tokens | FR-014, SC-020 | T103 |
+| Startup runs pending migrations before the service is ready | FR-003, SC-021 | T013–T015 |
+
+- [ ] T100 [US2] Implement and test operator credential self-service in `src/api.rs`, `src/store/postgres.rs`, and `ui/src/components/other.rs`: the operator changes its own password, one set of recovery codes is issued once on first sign-in and shown once, reissuing invalidates prior unused codes, and no plaintext is stored or re-shown (FR-012, SC-017)
+- [ ] T101 [US1] Make retention use the server receipt time for both events and log lines in `src/store/memory.rs` and `src/store/postgres.rs`, leaving client timestamps as display/order attributes only; cover past and future client clocks in `src/tests.rs` (FR-010, SC-018)
+- [ ] T102 [US5] Document the operator-run backup and restore procedure in `README.md` and `specs/004-production-readiness/quickstart.md`: every artifact to preserve, the restore order, and the checks that confirm success, with no shipped tooling (FR-027, SC-019)
+- [ ] T103 [US2] Reject requests from disabled accounts and removed members on their next request, including sessions and API tokens, in `src/api.rs` and `src/compat/auth.rs`; cover both paths in `src/tests.rs` (FR-014, SC-020)
+
+**Checkpoint**: every clarification in the spec is traceable to an executable task.

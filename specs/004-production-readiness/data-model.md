@@ -11,11 +11,11 @@ currently disagree.
 |---|---|---|
 | `Organisation` | `organisations` | `slug` from `0007`; `is_demo` added in `0008`; `sso_provider`/`sso_config` retained for the legacy field, OIDC uses `oidc_connections` |
 | `OrgRole`, `Role` | `org_members.role`, `project_members.role` | Enum ⇄ `text` with checked values |
-| `Project` (+`ModelConfig`) | `projects` | `model.endpoint` → `model_endpoint`, `model.model` → `model_name`, `model.api_key` → `model_api_key_ref` (replayable secret, never serialized), `model.confidence_threshold` → `confidence_threshold` |
+| `Project` (+`ModelConfig`) | `projects` | `model.endpoint` → `model_endpoint`, `model.model` → `model_name`, `model.api_key` → `model_api_key_ref` (replayable secret: never serialized, never logged, never returned; at-rest exposure recorded in the plan's Complexity Tracking), `model.confidence_threshold` → `confidence_threshold` |
 | `IngestKey` | `ingest_keys` | `revoked` ⇄ `revoked_at IS NOT NULL`; `last_used_at` written on successful ingest-key lookup |
 | `User` | `users` | `is_operator` unique partial index already enforces one operator |
 | `Session` | `sessions` | Keyed by `token_hash`; `sweep_sessions` becomes `DELETE … WHERE expires_at <= now()` |
-| `Invitation` | `invitations` | `token_hash` unique; `is_pending()` = not accepted, not revoked, not expired |
+| `Invitation` | `invitations` | `token_hash` unique; `expires_at` defaults to `issued_at + 7 days` (FR-013); `is_pending()` = not accepted, not revoked, not expired; expired is reported as `410`, unknown as `404` |
 | `RecoveryCode` | `recovery_codes` | `issue_recovery_codes` revokes unused rows in the same transaction |
 | `ApiToken` | `api_tokens` | From `0007`; live roles are always re-derived, never stored on the token |
 | `Issue` | `issues` + `issue_state_changes` | `tags`/`frames`/`breadcrumbs` as `jsonb`; `suggestion_*` and `decision_*` columns flatten `Suggestion`/`CategorisationDecision` |
@@ -27,7 +27,7 @@ currently disagree.
 
 ## 2. Migration `0008_production_readiness.sql`
 
-Additive and idempotent (`IF NOT EXISTS` throughout), applied in one transaction by the migrator.
+Additive and `IF NOT EXISTS`-idempotent, applied by the startup migration engine.
 
 ```sql
 -- Demo confinement (FR-011, SC-014)
@@ -67,8 +67,9 @@ CREATE INDEX IF NOT EXISTS issues_title_trgm_idx ON issues USING gin (title gin_
 CREATE INDEX IF NOT EXISTS log_lines_message_trgm_idx ON log_lines USING gin (message gin_trgm_ops);
 ```
 
-`0001`–`0007` are unchanged and are executed for the first time by `src/schema.rs`. `0007`'s
-idempotency (`IF NOT EXISTS`, backfill `WHERE … IS NULL`) is what SC-011 re-verifies.
+`0001`–`0007` are unchanged and are executed for the first time by `src/schema.rs`. The startup engine
+applies every pending migration before the service reports ready (FR-003, SC-021); re-application,
+concurrent-start behaviour, and rollback are operator concerns and are not feature guarantees.
 
 ## 3. Why the events table carries no payload
 
@@ -135,3 +136,7 @@ Flow rows are never exposed through the API. A callback with an unknown, expired
   history, and never rewrites a stored payload.
 - Soft-deleted projects keep every row and object.
 - `deleted_at IS NULL` is required for a project to resolve from a DSN or an API request.
+- The audit trail is stored durably and completely, and this feature exposes no route or screen for
+  reading it (FR-007); completeness is verified by tests and direct queries.
+- Operational counters are process-local and readable only by the deployment operator (FR-025); they
+  are never served on a project-scoped or member-accessible route.

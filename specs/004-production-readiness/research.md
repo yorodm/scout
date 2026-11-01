@@ -22,13 +22,15 @@ with asynchronous repository methods (`find_user_by_email`, `create_project`, `i
 `Arc<RwLock<Store>>`; handlers, ingest, the worker, `audit.rs`, and `compat/` call repository methods.
 
 **Rationale**: Every alternative that keeps the in-memory maps as the read model makes correctness
-depend on cache invalidation. Two behaviours the specification treats as immediate would break:
+depend on cache invalidation. The specification makes three behaviours immediate:
 
-- role/key revocation while a session or API token is active (FR-008, FR-014, SC-006);
+- role/key revocation while a session or API token is active (FR-008, FR-014, FR-031);
+- every instance observing a change on its next request, not within a staleness window
+  (FR-031, SC-016);
 - acceptance-to-visibility within 10 seconds across instances that did not handle the ingest (SC-010).
 
-A per-request refresh of authorization tables would recover the first and cost an extra query per
-request; a full reload would recover the second and is impossible at 500 events/s. Direct reads cost
+A per-request refresh of authorization tables would recover the first two and cost an extra query per
+request; a full reload would recover the third and is impossible at 500 events/s. Direct reads cost
 the same indexes PostgreSQL already has (`projects_by_dsn`, `issues_project_fingerprint`, …), so the
 simpler model also wins on latency.
 
@@ -50,30 +52,31 @@ suite before the next starts.
 
 ---
 
-## R2 — Migration execution and version skew
+## R2 — Migration execution
 
-**Decision**: `src/schema.rs` owns startup schema work:
+**Decision**: `src/schema.rs` owns the startup side of schema work, and only the startup side:
 
 1. Connect the pool, with bounded retry (≈30 s) so a starting database is tolerated.
-2. If `_sqlx_migrations` exists, compare `MAX(version)` with the highest embedded migration version.
-   If the stored version is greater, abort with:
-   `database schema version N is newer than this build (M); deploy a matching build or restore a backup`
-   (FR-004, SC-002).
-3. Run the embedded migrator (`sqlx::migrate!("./migrations")`, or `Migrator::new(Path)` if the
-   `macros` feature is required to be added). SQLx takes a PostgreSQL advisory lock, so concurrent
-   starts serialize and exactly one applies each migration (FR-003, SC-003).
-4. Map every migration error to an actionable startup error and exit non-zero; never continue serving
-   (FR-004).
+2. Run the embedded migrator (`sqlx::migrate!("./migrations")`, which requires the `macros` feature)
+   whenever migrations are available, before the service reports ready (FR-003, SC-021).
+3. Map every migration error to an actionable startup error, exit non-zero, and never serve requests
+   (edge case: a failed startup migration).
+4. Never attempt to revert an applied migration.
 
-**Rationale**: The migration files already exist but have never been executed by the application; the
-`_sqlx_migrations` table gives both the idempotency record and the version signal for downgrade
-detection without inventing a parallel version table. Embedding keeps the single-binary promise; the
-Dockerfile already copies `migrations/`, so both paths work, but embedding removes a runtime path
-dependency.
+Upgrade planning, the order in which instances are replaced, and rollback preparation belong to the
+operator. The feature deliberately makes **no** concurrency, idempotency-on-reapply, or version-skew
+promises: the migrator's advisory lock and applied-version bookkeeping are implementation details that
+happen to help an operator, not requirements this feature verifies.
 
-**Alternatives considered**: a hand-rolled runner reading `migrations/` (reinvents advisory locking and
-version bookkeeping); `migrate` subcommand only (violates FR-003 "no manual database step"); automatic
-down-migrations on version skew (explicitly rejected by the clarification: rollback is operator-driven).
+**Rationale**: Running the shipped migrations at startup is what keeps "one deployment unit" true —
+the image carries the schema it needs. Everything beyond that (when to upgrade, how many instances to
+stop first, how to roll back) is deployment policy that differs per operator, and specifying it here
+would create acceptance criteria the product cannot observe.
+
+**Alternatives considered**: a hand-rolled runner reading `migrations/` (reinvents version
+bookkeeping); a `migrate` subcommand only (contradicts FR-003); version-skew refusal and
+concurrent-start guarantees (dropped from scope by the clarification session); automatic
+down-migrations (rejected: rollback is operator-driven).
 
 ---
 
@@ -82,7 +85,7 @@ down-migrations on version skew (explicitly rejected by the clarification: rollb
 **Decision**: startup is a fixed pipeline, and the listener binds only after every step passes:
 
 ```text
-config → validate storage → connect pool → schema check + migrate → bootstrap operator
+config → validate storage → connect pool → run migrations → bootstrap operator
        → object store verify_writable → bind :8080
 ```
 
@@ -308,3 +311,33 @@ self-hosting operator.
 
 **Alternatives considered**: a Rust load harness (another binary target, against "one binary"); a
 hosted CI job (no runner with the reference profile).
+
+---
+
+## R13 — Multi-instance reads, outage behaviour, token lifetime, counters, and audit surface
+
+**Decision**: Five operational rules follow from the second clarification session:
+
+1. **Per-request reads.** Every instance resolves metadata from the shared store on each request. No
+   application-level cache of organisations, projects, memberships, roles, sessions, keys, or tokens
+   exists (FR-031). Connection and statement pooling inside the driver are not metadata caches and
+   remain allowed.
+2. **Fail fast on outage.** A metadata-store failure returns the retryable status immediately with a
+   retry hint. Ingest does not retry internally, buffer in memory, or hold the in-flight slot while a
+   database recovers (FR-009, SC-004).
+3. **Seven-day tokens.** Invitations and initial-admin setup tokens expire seven days after issue. An
+   expired token is reported distinctly from an unknown one (`410` versus `404`), and a redemption by
+   the wrong account is refused without consuming the token (FR-013).
+4. **Operator-only counters.** The counters describe deployment-wide traffic, so only the deployment
+   operator may read them through an authenticated session (FR-025); `/api/metrics` answers `401` to
+   anonymous callers and `403` to everyone else.
+5. **Storage-only audit.** The audit trail is guaranteed complete and durable; no endpoint or screen
+   exposes it in this feature (FR-007). Verification is through automated checks and direct queries.
+
+**Rationale**: Each rule removes a decision that would otherwise be made differently in tests, the
+quickstart, and the release scripts. Rules 1–2 keep failure and consistency behaviour identical
+whether one or three instances are running; rules 3–5 bound the surface area this feature adds.
+
+**Alternatives considered**: a bounded-staleness cache (fails SC-016); an internal retry with backoff
+(converts a fast retryable failure into hidden latency during an incident); an audit browser (useful,
+but new product scope that the feature's assumptions exclude).
