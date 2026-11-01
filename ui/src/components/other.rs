@@ -146,6 +146,7 @@ pub fn SearchView() -> View {
                 state.search_query.clone(),
                 state.search_issues.clone(),
                 state.search_logs.clone(),
+                state.search_has_more,
             )
         })
     });
@@ -156,7 +157,7 @@ pub fn SearchView() -> View {
     };
 
     let results_view = View::from_dynamic(move || -> View {
-        let (query, issues, logs) = results.get_clone();
+        let (query, issues, logs, has_more) = results.get_clone();
         if query.is_empty() {
             return empty_state(
                 "Search your telemetry",
@@ -195,6 +196,11 @@ pub fn SearchView() -> View {
         );
         view! {
             div {
+                (if has_more {
+                    view! { div(class="hint") { "Showing the newest 200 matches; narrow the query to see more." } }
+                } else {
+                    View::new()
+                })
                 section(class="panel panel-pad", style="margin-bottom:16px") {
                     (issue_header)
                     (issue_body)

@@ -1536,12 +1536,14 @@ pub async fn search(
     query: web::Query<LogQuery>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
+    /// Combined cap across issues and logs (FR-021, SC-025).
+    const SEARCH_RESULT_CAP: usize = 200;
     let project_id = path.into_inner();
     auth_project(&req, &state, project_id).await?;
     let store = state.store.read().await;
     let needle = query.q.as_deref().unwrap_or("").trim().to_ascii_lowercase();
     if needle.is_empty() {
-        return Ok(HttpResponse::Ok().json(json!({ "issues": [], "logs": [] })));
+        return Ok(HttpResponse::Ok().json(json!({ "issues": [], "logs": [], "has_more": false })));
     }
 
     let mut issues: Vec<Issue> = store
@@ -1566,7 +1568,6 @@ pub async fn search(
         .cloned()
         .collect();
     issues.sort_by_key(|i| std::cmp::Reverse(i.last_seen));
-    issues.truncate(50);
 
     let mut logs: Vec<LogLine> = store
         .logs
@@ -1585,9 +1586,34 @@ pub async fn search(
         .cloned()
         .collect();
     logs.sort_by_key(|l| std::cmp::Reverse(l.timestamp));
-    logs.truncate(50);
 
-    Ok(HttpResponse::Ok().json(json!({ "issues": issues, "logs": logs })))
+    // Take the newest 200 matches across both kinds, then report whether
+    // anything was left out (FR-021, SC-025).
+    let mut selected_issues = Vec::new();
+    let mut selected_logs = Vec::new();
+    let (mut issue_index, mut log_index) = (0usize, 0usize);
+    while selected_issues.len() + selected_logs.len() < SEARCH_RESULT_CAP {
+        let take_issue = match (issues.get(issue_index), logs.get(log_index)) {
+            (Some(issue), Some(log)) => issue.last_seen >= log.timestamp,
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        if take_issue {
+            selected_issues.push(issues[issue_index].clone());
+            issue_index += 1;
+        } else {
+            selected_logs.push(logs[log_index].clone());
+            log_index += 1;
+        }
+    }
+    let has_more = issue_index < issues.len() || log_index < logs.len();
+
+    Ok(HttpResponse::Ok().json(json!({
+        "issues": selected_issues,
+        "logs": selected_logs,
+        "has_more": has_more,
+    })))
 }
 
 // --- members ---------------------------------------------------------------

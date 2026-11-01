@@ -195,6 +195,9 @@ pub struct LogsResponse {
 pub struct SearchResponse {
     pub issues: Vec<Issue>,
     pub logs: Vec<LogLine>,
+    /// True when more than 200 matches existed and the response was truncated.
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]

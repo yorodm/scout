@@ -67,6 +67,7 @@ pub struct AppState {
     pub logs: Vec<LogLine>,
     pub search_issues: Vec<Issue>,
     pub search_logs: Vec<LogLine>,
+    pub search_has_more: bool,
     pub issue: Option<api::IssueDetailResponse>,
     pub members: Vec<Member>,
     pub settings: Option<api::SettingsResponse>,
@@ -95,6 +96,7 @@ impl Default for AppState {
             logs: Vec::new(),
             search_issues: Vec::new(),
             search_logs: Vec::new(),
+            search_has_more: false,
             issue: None,
             members: Vec::new(),
             settings: None,
@@ -243,6 +245,7 @@ pub async fn logout(store: Signal<AppState>) {
         state.logs.clear();
         state.search_issues.clear();
         state.search_logs.clear();
+        state.search_has_more = false;
         state.issue = None;
         state.members.clear();
         state.settings = None;
@@ -420,6 +423,7 @@ pub async fn search(store: Signal<AppState>, query: String) {
         store.update(|state| {
             state.search_issues.clear();
             state.search_logs.clear();
+            state.search_has_more = false;
         });
         return;
     }
@@ -427,6 +431,7 @@ pub async fn search(store: Signal<AppState>, query: String) {
         Ok(data) => store.update(|state| {
             state.search_issues = data.issues;
             state.search_logs = data.logs;
+            state.search_has_more = data.has_more;
         }),
         Err(error) => toast(store, error, "error"),
     }

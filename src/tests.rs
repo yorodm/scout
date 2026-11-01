@@ -1842,9 +1842,10 @@ async fn logs_are_newest_first_capped_and_project_scoped() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body["logs"].as_array().unwrap().len(),
-        50,
-        "unified search caps each kind"
+        55,
+        "unified search returns every match below the combined cap"
     );
+    assert_eq!(body["has_more"], false);
 }
 
 // --- classifier thresholds and malformed answers ---------------------------
@@ -4489,4 +4490,57 @@ async fn an_idle_session_expires_and_a_recent_request_keeps_it_alive() {
         state.store.read().await.sessions.get(&hash).is_none(),
         "the expired session is removed"
     );
+}
+
+// --- unified search cap (FR-021, SC-025) -----------------------------------
+
+#[actix_web::test]
+async fn search_caps_at_two_hundred_newest_matches_and_reports_more() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().expect("session").to_string();
+    let project = project_id(&app, &token, "scout-web").await;
+
+    let items: Vec<Value> = (0..205)
+        .map(|index| json!({ "message": format!("capcheck line {index}"), "level": "info" }))
+        .collect();
+    let body = json!({ "logs": items }).to_string();
+    let req = ingest_request(
+        "1",
+        "scout_demo_key",
+        "application/json",
+        body.into_bytes(),
+        "logs",
+    );
+    let (status, ingested) = call_json(&app, req).await;
+    assert_eq!(status, StatusCode::OK, "log ingest failed: {ingested}");
+    assert_eq!(ingested["accepted"].as_u64(), Some(205));
+
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/search?q=capcheck"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "search failed: {body}");
+    let issues = body["issues"].as_array().expect("issues array").len();
+    let logs = body["logs"].as_array().expect("logs array").len();
+    assert_eq!(issues + logs, 200, "the combined cap is 200");
+    assert_eq!(body["has_more"], true, "truncation is reported");
+
+    let (status, body) = call_json(
+        &app,
+        get(
+            &format!("/api/projects/{project}/search?q=nothing-matches-this"),
+            &token,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["has_more"], false);
+    assert_eq!(body["issues"].as_array().unwrap().len(), 0);
+    assert_eq!(body["logs"].as_array().unwrap().len(), 0);
 }
