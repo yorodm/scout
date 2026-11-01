@@ -133,8 +133,8 @@ a demo session cannot reach the real project while a demo reset preserves it.
 
 - [x] T042 [US2] Add SC-015 tests in `src/tests.rs`: the operator is denied every project-scoped route (issues, events, logs, raw, attachments, keys, settings) with `404`/`403` and no existence leak, while organisation creation and setup-token issuance still succeed
 - [x] T043 [US2] Add SC-014 tests in `src/tests.rs`: with real and demo organisations present, a demo session lists only demo accounts, reads only demo projects, and receives `404` for the real project; `POST /api/demo/reset` leaves the real organisation, project, and operator intact
-- [ ] T044 [US2] Add initial-admin tests in `src/tests.rs`: a new-account token sets a password and returns recovery codes once; an existing account must sign in first, keeps its password, and gains the admin role; an expired/used/revoked token returns `410`
-- [ ] T045 [US2] Add recovery-code tests in `src/tests.rs`: reissuing invalidates prior unused codes, only the newest set works, and no plaintext is stored or returned twice
+- [x] T044 [US2] Add initial-admin tests in `src/tests.rs`: a new-account token sets a password and returns recovery codes once; an existing account must sign in first, keeps its password, and gains the admin role; an expired/used/revoked token returns `410`
+- [x] T045 [US2] Add recovery-code tests in `src/tests.rs`: reissuing invalidates prior unused codes, only the newest set works, and no plaintext is stored or returned twice
 
 ### Implementation for User Story 2
 
@@ -195,8 +195,8 @@ the model/retention form all work in the UI with loading, empty, and error state
 ### Tests for User Story 4 ⚠️
 
 - [ ] T066 [US4] Add backend tests in `src/tests.rs`: the occurrences endpoint returns newest-first event metadata; `GET /api/issues/{id}/raw` returns the stored bytes and, after retention, an explicit expired state with `410` and no body
-- [ ] T067 [US4] Add backend tests in `src/tests.rs`: unified search returns issues and logs in one ordered set, honours `state`/`level`/`category`/`q`/`sort`, applies the documented result cap, and never returns another project's rows
-- [ ] T068 [US4] Add backend tests in `src/tests.rs`: confirming or overriding a suggestion updates the authoritative decision, preserves the original suggestion, and does not move the issue or its event
+- [x] T067 [US4] Add backend tests in `src/tests.rs`: unified search returns issues and logs in one ordered set, honours `state`/`level`/`category`/`q`/`sort`, applies the documented result cap, and never returns another project's rows
+- [x] T068 [US4] Add backend tests in `src/tests.rs`: confirming or overriding a suggestion updates the authoritative decision, preserves the original suggestion, and does not move the issue or its event
 
 ### Implementation for User Story 4
 

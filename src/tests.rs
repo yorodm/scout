@@ -751,6 +751,14 @@ async fn confirm_and_override_categorisation() {
     assert_eq!(status, StatusCode::OK, "override failed: {body}");
     assert_eq!(body["issue"]["decision"]["category"], "log");
     assert_eq!(body["issue"]["decision"]["overridden"], true);
+    // The original suggestion is preserved and neither the issue nor its last
+    // event moved (FR-019).
+    assert_eq!(body["issue"]["suggestion"]["category"], "issue");
+    assert_eq!(body["issue"]["id"].as_str(), Some(issue_id.as_str()));
+    assert_eq!(
+        body["issue"]["last_event_id"], issue["last_event_id"],
+        "categorising must not move the issue's last event"
+    );
 
     // Invalid categories are rejected rather than stored.
     let (status, _) = call_json(
@@ -1161,6 +1169,22 @@ async fn search_returns_issues_and_logs_together() {
     .await;
     assert!(issue["id"].is_string());
 
+    // The same word in another project must never appear in this project's results.
+    let (status, _) = call_json(
+        &app,
+        ingest_request(
+            "2",
+            "scout_platform_key",
+            "application/json",
+            json!({ "level": "error", "message": "searchable elsewhere" })
+                .to_string()
+                .into_bytes(),
+            "logs",
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
     let (status, body) = call_json(
         &app,
         get(
@@ -1179,7 +1203,15 @@ async fn search_returns_issues_and_logs_together() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|l| l["message"] == "searchable failure observed"));
+        .any(|log| log["message"] == "searchable failure observed"));
+    assert!(
+        body["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|log| log["message"] != "searchable elsewhere"),
+        "another project's rows must never leak: {body}"
+    );
 }
 
 // --- ingest limits, durability, backpressure -------------------------------
@@ -3250,6 +3282,60 @@ async fn project_invitations_preview_accept_and_revoke() {
     )
     .await;
     assert_eq!(status, StatusCode::GONE);
+}
+
+#[actix_web::test]
+async fn an_expired_invitation_reports_gone_not_unknown() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().unwrap();
+    let web = project_id(&app, token, "scout-web").await;
+    let org_id = demo_org_id(&state).await;
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/orgs/{org_id}/invitations"),
+            token,
+            json!({ "email": "late@test.local", "project_id": web, "role": "viewer" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "invite failed: {body}");
+    let invite_token = body["token"].as_str().unwrap().to_string();
+    let invitation_id = Uuid::parse_str(body["invitation"]["id"].as_str().unwrap()).unwrap();
+    {
+        let mut store = state.store.write().await;
+        store
+            .invitations
+            .get_mut(&invitation_id)
+            .expect("the issued invitation")
+            .expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    }
+
+    // An expired token is distinct from an unknown one: 410, not 404.
+    let (status, body) = call_json(
+        &app,
+        get_public(&format!("/api/invitations/{invite_token}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE, "{body}");
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            &format!("/api/invitations/{invite_token}/accept"),
+            json!({ "name": "Late", "password": "late-pw-1234567" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GONE);
+    let (status, _) = call_json(
+        &app,
+        get_public(&format!("/api/invitations/{}", crate::auth::new_token())),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "unknown stays 404");
 }
 
 #[actix_web::test]
