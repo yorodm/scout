@@ -326,43 +326,55 @@ prototype yet.
 ### Object storage: Garage by default
 
 Garage (`dxflrs/garage:v2.5.0`) is the shipped S3-compatible object store. Compose mounts
-[`deploy/garage.toml`](deploy/garage.toml) read-only and waits for Garage's health check, but it
-deliberately does **not** create the cluster layout, bucket, or access key. Run these once on a fresh
-host:
+[`deploy/garage.toml`](deploy/garage.toml) read-only, starts it with
+`/garage server --single-node --default-bucket`, and waits for its health check. Generate the
+credentials once and export them before the first start; Garage creates the single-node layout, the
+bucket, and the access key from these values:
 
 ```sh
-docker compose up -d garage postgres
+export SCOUT_S3_ACCESS_KEY="GK$(openssl rand -hex 16)"
+export SCOUT_S3_SECRET_KEY="$(openssl rand -hex 32)"
+export SCOUT_S3_DEFAULT_BUCKET=scout-raw
 
-# The node id comes from the status output.
+docker compose up -d garage postgres
+docker compose exec garage /garage status
+docker compose exec garage /garage bucket list
+```
+
+`--single-node` assigns the node layout, and `--default-bucket` creates the bucket from
+`GARAGE_DEFAULT_BUCKET` and the key from `GARAGE_DEFAULT_ACCESS_KEY` / `GARAGE_DEFAULT_SECRET_KEY`.
+Compose maps Scout's variables from the same exports, so one setup configures both services:
+
+| Variable | Shipped value |
+| --- | --- |
+| `SCOUT_S3_ENDPOINT` | `http://garage:3900` |
+| `SCOUT_S3_BUCKET` | `SCOUT_S3_DEFAULT_BUCKET` (default `scout-raw`) |
+| `SCOUT_S3_DEFAULT_BUCKET` | `scout-raw` |
+| `GARAGE_DEFAULT_ACCESS_KEY` | `SCOUT_S3_ACCESS_KEY` |
+| `GARAGE_DEFAULT_SECRET_KEY` | `SCOUT_S3_SECRET_KEY` |
+| `GARAGE_DEFAULT_BUCKET` | `SCOUT_S3_DEFAULT_BUCKET` |
+| `AWS_ACCESS_KEY_ID` | `SCOUT_S3_ACCESS_KEY` |
+| `AWS_SECRET_ACCESS_KEY` | `SCOUT_S3_SECRET_KEY` |
+| `AWS_REGION` | `SCOUT_S3_REGION` (default `garage`) |
+
+Then start Scout with `docker compose up -d scout`.
+
+Garage versions before 2.3.0 do not support `--default-bucket`. For those, or for a custom layout,
+override the compose command with `/garage server` and run the manual setup once:
+
+```sh
 docker compose exec garage /garage status
 docker compose exec garage /garage layout assign -z dc1 -c 1G <node-id>
 docker compose exec garage /garage layout apply --version 1
-
-# Credentials for Scout; the key id and secret are printed once.
 docker compose exec garage /garage key create scout-key
 docker compose exec garage /garage bucket create scout-raw
 docker compose exec garage /garage bucket allow --read --write --owner scout-raw --key scout-key
 ```
 
-Export the printed credentials and start Scout. The compose file maps them to the variables the
-service reads:
-
-```sh
-export SCOUT_S3_ACCESS_KEY=<garage key id>
-export SCOUT_S3_SECRET_KEY=<garage secret>
-docker compose up -d scout
-```
-
-| Variable | Shipped value |
-| --- | --- |
-| `SCOUT_S3_ENDPOINT` | `http://garage:3900` |
-| `SCOUT_S3_BUCKET` | `scout-raw` |
-| `AWS_ACCESS_KEY_ID` | `SCOUT_S3_ACCESS_KEY` |
-| `AWS_SECRET_ACCESS_KEY` | `SCOUT_S3_SECRET_KEY` |
-| `AWS_REGION` | `SCOUT_S3_REGION` (default `garage`) |
+Copy the printed key id and secret into `SCOUT_S3_ACCESS_KEY` / `SCOUT_S3_SECRET_KEY`.
 
 Plain HTTP and path-style addressing are used inside the compose network, so no TLS or wildcard DNS
-is required. Running Scout outside compose needs the same five variables.
+is required. Running Scout outside compose needs the same endpoint, bucket, region, and key pair.
 
 `deploy/garage.toml` ships development values for `rpc_secret` and `admin_token`; replace both before
 exposing the stack beyond a local machine, and keep the admin API published on loopback

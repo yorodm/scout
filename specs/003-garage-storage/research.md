@@ -114,16 +114,19 @@ implementation unless a task says otherwise.
 ## R9. Compose and Garage configuration
 
 - **Decision**: Replace the `minio` and `minio-init` services with a pinned `dxflrs/garage` image,
-  a mounted `deploy/garage.toml`, ports `3900:3900` (S3) and `3903:3903` (admin), and a
-  `garage-data` volume. The compose file does **not** configure layout, buckets, or keys; the README
-  documents the `garage layout assign`, `garage layout apply`, `garage key create`,
-  `garage bucket create`, and `garage bucket allow` steps (clarification 4). Scout points at
-  `http://garage:3900`, bucket `scout-raw`, region `garage`, using the key/secret the operator
-  created.
-- **Rationale**: Matches the documented decision and Garage's own quick start. Keeping a single-node
-  default in `garage.toml` makes the dev stack usable while leaving production layout to the operator.
+  a mounted `deploy/garage.toml`, ports `3900:3900` (S3) and `127.0.0.1:3903:3903` (admin), and a
+  `garage-data` volume. Start Garage with `/garage server --single-node --default-bucket` and pass
+  `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, and `GARAGE_DEFAULT_BUCKET`, so the
+  single-node layout, bucket, and access key are created from the environment on first start. The README
+  keeps the manual `garage layout assign`, `garage layout apply`, `garage key create`, `garage bucket
+  create`, and `garage bucket allow` steps as the fallback for Garage versions before 2.3.0 or custom
+  layouts. Scout points at `http://garage:3900`, bucket `scout-raw`, region `garage`, using the same
+  key/secret.
+- **Rationale**: Matches the documented decision and Garage's own quick start. The automatic flags make
+  the clean-host flow one command while leaving production layout and replication to the operator.
 - **Alternatives considered**: An init container calling the Garage CLI — explicitly rejected by the
-  clarification. No Garage in compose — rejected: SC-001's clean-host flow.
+  clarification. Manual-only provisioning — rejected: it adds brittle first-run steps the shipped image
+  can perform itself. No Garage in compose — rejected: SC-001's clean-host flow.
 
 ## R10. Object keys and formats
 

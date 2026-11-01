@@ -15,7 +15,7 @@
 - Q: How should the migration command receive its source and destination settings? → A: Destination uses the deployment's existing object-store settings; the source uses dedicated `SCOUT_MIGRATE_SOURCE_*` variables.
 - Q: Should the migration run inside the running service or as a dedicated entry point? → A: A dedicated entry point that runs only the migration, not the service.
 - Q: How should the cutover handle events written while the migration runs? → A: Migration and ingestion are separate stages that never coordinate; the operator is responsible for scheduling service downtime.
-- Q: Should the shipped compose stack configure Garage automatically or leave setup to the operator? → A: The compose stack runs Garage only; the documentation walks through the Garage CLI steps for layout, bucket, and access key.
+- Q: Should the shipped compose stack configure Garage automatically or leave setup to the operator? → A: The compose stack now configures Garage automatically through `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, and `GARAGE_DEFAULT_BUCKET` plus the `--single-node --default-bucket` server flags; the Garage CLI steps remain the documented fallback for versions before 2.3.0 or custom layouts.
 - Q: What should the migration do when the destination already holds an object under the same key? → A: Skip it when the content already matches, overwrite it when it differs, and fail only when an object cannot be read or its destination copy cannot be verified after writing.
 - Q: When the migration overwrites a differing destination object and re-reads it successfully, should the run still exit non-zero? → A: No; a repaired and re-verified difference counts as a verified object and exits zero, and only unreadable or post-write unverifiable objects exit non-zero.
 - Q: When the object store rejects the configured credentials, should Scout fail at startup or only when the first ingest arrives? → A: At startup: the write check verifies the bucket, credentials, and reachability before the server serves; storage failures after startup still return the retryable ingest response.
@@ -134,7 +134,8 @@ S3-compatible endpoint and confirm identical behaviour.
 - The bucket is missing, private in an unexpected way, or the key lacks read/write/delete permission.
 - The configured region, endpoint style, or signature expectations do not match what the object store
   accepts.
-- Garage is running but its cluster layout or access key has not been configured yet.
+- Garage is running without automatic provisioning, or its cluster layout or access key has not been
+  configured yet.
 - Objects were written by a different provider and are read back after the switch.
 - The destination already contains an object under the same key: identical content is skipped, different
   content is overwritten, and an object that cannot be read fails the run.
@@ -153,10 +154,12 @@ S3-compatible endpoint and confirm identical behaviour.
 
 - **FR-001**: The shipped single-compose deployment MUST run Scout with Garage as its object store in
   place of MinIO, using the same one-command start.
-- **FR-002**: A fresh deployment MUST be given the raw-payload bucket and access credentials through
-  explicit, documented Garage CLI steps (cluster layout, bucket creation, access key) so that no
-  undocumented manual step is required before the first ingest; the shipped stack MUST NOT rely on an
-  automatic init container for this.
+- **FR-002**: A fresh deployment MUST be given the raw-payload bucket and access credentials with no
+  undocumented manual step before the first ingest. The shipped stack MUST use Garage's documented
+  automatic provisioning (`GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`,
+  `GARAGE_DEFAULT_BUCKET`, and the `--single-node --default-bucket` server flags) and MUST NOT rely on a
+  separate init container; manual `garage layout assign` / `key create` / `bucket create` steps remain
+  the documented fallback for Garage versions before 2.3.0 or custom layouts.
 - **FR-003**: Object storage for the running service MUST remain configured through the existing endpoint,
   bucket, credential, and region settings; adopting Garage MUST NOT require new application configuration
   concepts. The migration command's `SCOUT_MIGRATE_SOURCE_*` variables are one-shot tooling
@@ -252,10 +255,10 @@ S3-compatible endpoint and confirm identical behaviour.
 
 - Garage's S3 gateway is compatible with the S3 operations Scout already uses (put, get, head, delete)
   and supports the required signature and addressing options.
-- The operator is responsible for Garage's cluster layout and access-key provisioning, guided by
-  step-by-step Garage CLI instructions in the documentation; the shipped compose file runs a single
-  Garage node and does not configure it. Production layout and replication choices stay with the
-  operator.
+- The shipped compose file runs a single Garage node with `--single-node --default-bucket`, so the
+  cluster layout, bucket, and access key are created from the `GARAGE_DEFAULT_*` variables on first
+  start. Manual Garage CLI provisioning remains the documented fallback for Garage versions before
+  2.3.0 or custom layouts; production layout and replication choices stay with the operator.
 - The existing environment settings for endpoint, bucket, credentials, and region are reused unchanged.
 - MinIO is removed from the default stack and documentation, but remains supported as one of the
   S3-compatible providers an operator may choose.

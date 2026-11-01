@@ -251,3 +251,11 @@ Task: "503 storage-failure regression test in src/tests.rs"
 - [X] T042 Document in `README.md` that `deploy/garage.toml` ships development values for `rpc_secret` and `admin_token` that must be replaced outside a local stack, and that the admin API is bound to `127.0.0.1:3903`; alternatively correct the claim in `contracts/garage-deployment.md` if the `garage.toml` comment is sufficient, per plan: garage-deployment contract (partial)
 - [X] T043 Require `AWS_REGION` when building S3 destination settings instead of silently defaulting to `us-east-1`, or document the default in `README.md` and `contracts/garage-deployment.md` and align the data model and T008's "all fields required" wording, per plan: destination storage settings (partial)
 - [X] T044 Restrict the migration listing and `found` count to `raw/` and `attachments/` keys, or explicitly document that every non-`__scout/` key is treated as a payload, and add a test with a foreign-key fixture, per FR-012 (partial)
+
+---
+
+## Phase 10: Automatic Garage provisioning
+
+- [X] T045 Start the shipped Garage service with `/garage server --single-node --default-bucket` and pass `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, and `GARAGE_DEFAULT_BUCKET` from the existing compose variables in `docker-compose.yml`, per FR-002 (partial)
+- [X] T046 Align `spec.md`, `plan.md`, `research.md`, `data-model.md`, `contracts/garage-deployment.md`, `quickstart.md`, `README.md`, and `architecture.md` with Garage's automatic provisioning while keeping manual CLI steps as the documented fallback, per FR-002 and FR-010 (partial)
+- [X] T047 Extend `docs_describe_stages_without_external_tooling_or_minio_setup` in `src/migrate.rs` to assert the automatic provisioning flags and `GARAGE_DEFAULT_*` variables are documented, per FR-002 (partial)

@@ -8,12 +8,13 @@
 |---|---|
 | Service name | `garage` in `docker-compose.yml` (replaces `minio` and `minio-init`). |
 | Image | Pinned to `dxflrs/garage:v2.5.0` (published multi-arch image; verified on Docker Hub). The tag is recorded in the compose file and the README. |
+| Command | `/garage server --single-node --default-bucket` (the image has no ENTRYPOINT, so the full argv is the compose `command`). |
 | Ports | `3900:3900` (S3 API); `127.0.0.1:3903:3903` (admin API, local only). |
 | Configuration | `deploy/garage.toml` mounted read-only at `/etc/garage.toml`. |
 | Data | Named volume `garage-data:/var/lib/garage`, persisting both `metadata_dir` and `data_dir`. |
 | Healthcheck | Runs Garage's own status command (`/garage status`); the `scout` service waits for it. |
 | Scout dependency | `scout` depends on `postgres` (healthy) and `garage` (healthy). |
-| Provisioning | The compose file does **not** create layout, buckets, or keys. The README documents those steps. |
+| Provisioning | `--single-node` creates the layout and `--default-bucket` creates the bucket and access key from `GARAGE_DEFAULT_*`. Manual CLI is the fallback for Garage < 2.3.0 or custom layouts. |
 
 ## `deploy/garage.toml`
 
@@ -38,34 +39,42 @@ Required keys and their development defaults:
 The README must contain these steps verbatim enough to follow without leaving the quick start:
 
 ```sh
-docker compose up -d garage postgres
+export SCOUT_S3_ACCESS_KEY="GK$(openssl rand -hex 16)"
+export SCOUT_S3_SECRET_KEY="$(openssl rand -hex 32)"
+export SCOUT_S3_DEFAULT_BUCKET=scout-raw
 
-# Node id from the status output
+docker compose up -d garage postgres
+docker compose exec garage /garage status
+docker compose exec garage /garage bucket list
+```
+
+`--single-node` assigns the node layout and `--default-bucket` creates the bucket and key from the
+`GARAGE_DEFAULT_*` values; no manual `layout assign`, `key create`, or `bucket create` step is required
+on Garage 2.3.0 or later.
+
+## Manual fallback
+
+For Garage versions before 2.3.0, or a custom layout, run Garage without the flags and provision
+manually:
+
+```sh
 docker compose exec garage /garage status
 docker compose exec garage /garage layout assign -z dc1 -c 1G <node-id>
 docker compose exec garage /garage layout apply --version 1
-
-# Credentials for Scout
 docker compose exec garage /garage key create scout-key
 docker compose exec garage /garage bucket create scout-raw
 docker compose exec garage /garage bucket allow --read --write --owner scout-raw --key scout-key
-
-# Then start Scout with the key id and secret in the environment
-docker compose up -d scout
 ```
-
-The operator copies the key id and secret printed by `garage key create` into
-`SCOUT_S3_ACCESS_KEY` / `SCOUT_S3_SECRET_KEY` (the compose file maps them to `AWS_ACCESS_KEY_ID` /
-`AWS_SECRET_ACCESS_KEY`).
 
 ## Scout environment mapping
 
 | Variable | Value in the shipped stack |
 |---|---|
 | `SCOUT_S3_ENDPOINT` | `http://garage:3900` |
-| `SCOUT_S3_BUCKET` | `scout-raw` |
-| `AWS_ACCESS_KEY_ID` | Operator-created Garage key id |
-| `AWS_SECRET_ACCESS_KEY` | Operator-created Garage secret |
+| `SCOUT_S3_BUCKET` | `SCOUT_S3_DEFAULT_BUCKET` (default `scout-raw`) |
+| `SCOUT_S3_DEFAULT_BUCKET` | `scout-raw`; also sets `GARAGE_DEFAULT_BUCKET` |
+| `AWS_ACCESS_KEY_ID` | `SCOUT_S3_ACCESS_KEY` (also `GARAGE_DEFAULT_ACCESS_KEY`) |
+| `AWS_SECRET_ACCESS_KEY` | `SCOUT_S3_SECRET_KEY` (also `GARAGE_DEFAULT_SECRET_KEY`) |
 | `AWS_REGION` | `SCOUT_S3_REGION` (defaults to `garage`) |
 
 Plain HTTP and path-style addressing are used; the shipped stack does not require TLS or wildcard DNS.
@@ -78,9 +87,8 @@ secret, and region. No endpoint is hard-coded in the application.
 
 ## What is deliberately not automated
 
-- Cluster layout assignment and application.
-- Bucket creation and access-key creation.
 - Production `rpc_secret` and admin token generation.
 - Replication and placement policy beyond the single-node development default.
+- Custom multi-node layouts and manual provisioning for Garage < 2.3.0.
 
 These remain operator decisions, as recorded in the specification's clarification and assumptions.

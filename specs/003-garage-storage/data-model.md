@@ -33,6 +33,18 @@ development and tests.
 **Validation**: a missing variable aborts before any listing with a message naming the variable. The
 migration never modifies source objects.
 
+## Garage bootstrap (shipped compose)
+
+| Setting | Source | Rules |
+|---|---|---|
+| `GARAGE_DEFAULT_ACCESS_KEY` | `SCOUT_S3_ACCESS_KEY` | Required for the automatic first start; becomes Scout's destination access key. |
+| `GARAGE_DEFAULT_SECRET_KEY` | `SCOUT_S3_SECRET_KEY` | Required; never logged. |
+| `GARAGE_DEFAULT_BUCKET` | `SCOUT_S3_DEFAULT_BUCKET` | Defaults to `scout-raw`; must match `SCOUT_S3_BUCKET`. |
+| Server command | derived | `/garage server --single-node --default-bucket`; `--single-node` creates the layout and `--default-bucket` creates the bucket and access key. |
+
+Manual `garage layout assign` / `key create` / `bucket create` provisioning is the documented fallback
+for Garage versions before 2.3.0 or custom layouts.
+
 ## Object Ref
 
 | Field | Meaning |

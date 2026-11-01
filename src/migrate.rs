@@ -523,6 +523,24 @@ mod tests {
             !compose.to_lowercase().contains("minio"),
             "the shipped compose file must not require MinIO"
         );
+        assert!(
+            compose.contains("--single-node") && compose.contains("--default-bucket"),
+            "Garage must start with automatic single-node/default-bucket provisioning"
+        );
+        assert!(
+            compose.contains("GARAGE_DEFAULT_ACCESS_KEY")
+                && compose.contains("GARAGE_DEFAULT_SECRET_KEY")
+                && compose.contains("GARAGE_DEFAULT_BUCKET"),
+            "the compose file must pass the GARAGE_DEFAULT_* bootstrap variables"
+        );
+        assert!(
+            readme.contains("GARAGE_DEFAULT_ACCESS_KEY"),
+            "README must document the bootstrap variables"
+        );
+        assert!(
+            readme.contains("SCOUT_S3_DEFAULT_BUCKET"),
+            "README must document the bucket variable"
+        );
         for doc in [readme, architecture] {
             let doc = doc.to_lowercase();
             assert!(

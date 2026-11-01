@@ -11,8 +11,9 @@ Replace MinIO with Garage in the shipped single-compose deployment and add a ded
 store into the configured destination store (Garage by default), verifying content identity and
 reporting counts. The runtime S3 client stays the
 same shape (endpoint, bucket, credentials, region), object keys and formats do not change, and any
-S3-compatible provider remains supported. Documentation replaces MinIO with Garage and walks
-through the Garage CLI steps the shipped compose no longer performs automatically.
+S3-compatible provider remains supported. Documentation replaces MinIO with Garage, documents the
+`GARAGE_DEFAULT_*` automatic provisioning the shipped compose performs, and keeps the manual Garage CLI
+steps as the fallback for older versions or custom layouts.
 
 ### Clarified decisions (2026-11-01)
 
@@ -29,6 +30,9 @@ through the Garage CLI steps the shipped compose no longer performs automaticall
 - The migration destination is the configured object store (Garage by default); the spec and CLI are
   provider-neutral.
 - SC-001 has no time bound; SC-002 requires every migrated payload and attachment to be byte-identical.
+- The shipped compose starts Garage with `--single-node --default-bucket` and passes
+  `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, and `GARAGE_DEFAULT_BUCKET`, so the layout,
+  bucket, and key are created from the environment on first start; the manual CLI steps are the fallback.
 
 ## Technical Context
 
@@ -127,6 +131,10 @@ gates run.
 - Convergence T042–T044: README now documents replacing the Garage `rpc_secret`/`admin_token` development
   values and the loopback-only admin port; `AWS_REGION` is required for S3 destination settings; migration
   ignores keys outside `raw/` and `attachments/`. `cargo test`: 123 passed, 0 failed, 2 ignored.
+- Automatic Garage provisioning T045–T047: compose runs `/garage server --single-node --default-bucket`
+  with `GARAGE_DEFAULT_ACCESS_KEY`, `GARAGE_DEFAULT_SECRET_KEY`, and `GARAGE_DEFAULT_BUCKET`; FR-002, the
+  contract, quickstart, README, and architecture document the variables and retain the manual CLI
+  fallback for Garage < 2.3.0 or custom layouts. `cargo test`: 123 passed, 0 failed, 2 ignored.
 
 ## Project Structure
 

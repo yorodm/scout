@@ -12,32 +12,31 @@ Runnable validation for feature 003. Shapes and guarantees live in
 
 ## 1. Start Garage and PostgreSQL
 
+Generate the credentials and bucket name once, then start Garage. Compose runs
+`/garage server --single-node --default-bucket`, so the layout, bucket, and access key are created
+automatically:
+
 ```sh
+export SCOUT_S3_ACCESS_KEY="GK$(openssl rand -hex 16)"
+export SCOUT_S3_SECRET_KEY="$(openssl rand -hex 32)"
+export SCOUT_S3_DEFAULT_BUCKET=scout-raw
+
 docker compose up -d garage postgres
 docker compose exec garage /garage status
+docker compose exec garage /garage bucket list
 ```
 
-`garage status` prints the node id and layout warnings. Configure the single-node layout, key, and
-bucket (these steps are intentionally manual):
-
-```sh
-docker compose exec garage /garage layout assign -z dc1 -c 1G <node-id>
-docker compose exec garage /garage layout apply --version 1
-docker compose exec garage /garage key create scout-key
-docker compose exec garage /garage bucket create scout-raw
-docker compose exec garage /garage bucket allow --read --write --owner scout-raw --key scout-key
-```
-
-Expected: `layout apply` succeeds, `key create` prints a key id and secret once, and `bucket allow`
-reports success. Record the key id and secret.
+Expected: `garage status` shows one healthy node with an assigned layout, and `bucket list` contains
+`scout-raw`. Manual `layout assign` / `key create` / `bucket create` is only needed for Garage versions
+before 2.3.0 or a custom layout.
 
 ## 2. Start Scout against Garage
 
 ```sh
 export SCOUT_S3_ENDPOINT=http://127.0.0.1:3900
-export SCOUT_S3_BUCKET=scout-raw
-export AWS_ACCESS_KEY_ID=<garage key id>
-export AWS_SECRET_ACCESS_KEY=<garage secret>
+export SCOUT_S3_BUCKET="${SCOUT_S3_DEFAULT_BUCKET:-scout-raw}"
+export AWS_ACCESS_KEY_ID="$SCOUT_S3_ACCESS_KEY"
+export AWS_SECRET_ACCESS_KEY="$SCOUT_S3_SECRET_KEY"
 export AWS_REGION=garage
 export SCOUT_OPERATOR_EMAIL=operator@scout.local
 export SCOUT_OPERATOR_PASSWORD=change-me-now
@@ -90,7 +89,7 @@ The same steps apply when the source is MinIO; a second Garage bucket keeps the 
 ```sh
 # Create a destination bucket in addition to the live one
 docker compose exec garage /garage bucket create scout-raw-new
-docker compose exec garage /garage bucket allow --read --write --owner scout-raw-new --key scout-key
+docker compose exec garage /garage bucket allow --read --write --owner scout-raw-new --key "$SCOUT_S3_ACCESS_KEY"
 ```
 
 1. Run Scout with `SCOUT_S3_BUCKET=scout-raw` (the "old" store) and ingest two events.
