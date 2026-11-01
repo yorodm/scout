@@ -50,9 +50,11 @@ Keys are opaque to the migration: no renaming, re-prefixing, or re-encoding occu
 | `SkippedIdentical` | Destination already holds bytes with the same SHA-256. | skipped, verified |
 | `CopiedNew` | Destination had no object under the key; bytes written **and re-read successfully**. | copied, verified |
 | `CopiedOverwrite` | Destination held different bytes; source bytes written over them **and re-read successfully**. | copied, verified |
-| `CopyFailed` | The write succeeded but the re-read differed or was unreadable; the object is not usable at the destination. | failed only (never copied) |
-| `Mismatch` | The destination bytes differ from the source during comparison or after a copy. | mismatched, failed |
+| `CopyFailed` | The write succeeded but the re-read differed or was unreadable, or the destination bytes differ from the source during comparison or after a copy; the object is not usable at the destination. | failed (never copied); plus `mismatched` when the bytes differ |
 | `Unreadable` | Source or destination could not be read (permissions, network, missing after list). | failed |
+
+A differing copy increments both `failed` and `mismatched`; an unreadable one increments only `failed`.
+`mismatched` is therefore a subset of `failed`, never a separate outcome.
 
 **Invariants**
 
