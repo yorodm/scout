@@ -5,19 +5,27 @@
 --
 -- Contents:
 --   1. Demo confinement marker (FR-011, SC-014).
---   2. Human-readable actor labels for the audit log and issue decisions.
---   3. Optional per-organisation OIDC connections and in-progress login flows.
---   4. Trigram indexes for the unified search view (FR-021).
+--   2. Account lockout state (FR-012, FR-032, SC-023).
+--   3. Human-readable actor labels for the audit log and issue decisions.
+--   4. Optional per-organisation OIDC connections and in-progress login flows.
+--   5. Trigram indexes for the unified search view (FR-021).
 
 -- 1. Demo organisations are marked so demo sessions can be scoped away from real
 --    tenants and demo resets cannot touch real data.
 ALTER TABLE organisations ADD COLUMN IF NOT EXISTS is_demo boolean NOT NULL DEFAULT false;
 
--- 2. Actor labels survive user removal, unlike a foreign key alone.
+-- 2. Five consecutive failures lock an account regardless of elapsed time, so
+--    only a counter and the lock are stored. The counter resets on a successful
+--    sign-in or an operator unlock.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_sign_in_count integer NOT NULL DEFAULT 0
+    CHECK (failed_sign_in_count >= 0);
+
+-- 3. Actor labels survive user removal, unlike a foreign key alone.
 ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS actor_label text NOT NULL DEFAULT '';
 ALTER TABLE issues ADD COLUMN IF NOT EXISTS decision_by_label text;
 
--- 3. Optional OIDC per organisation. The client secret is replayable to the
+-- 4. Optional OIDC per organisation. The client secret is replayable to the
 --    provider, so it cannot be hashed; it is never serialized or logged.
 CREATE TABLE IF NOT EXISTS oidc_connections (
     org_id        uuid PRIMARY KEY REFERENCES organisations (id) ON DELETE CASCADE,

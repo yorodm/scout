@@ -4693,10 +4693,31 @@ async fn five_consecutive_failures_lock_the_account_for_every_sign_in() {
     // A success before the threshold resets the consecutive count.
     let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
     assert_eq!(status, StatusCode::OK, "sign-in must work before the lock");
+    {
+        let store = state.store.read().await;
+        let user = store
+            .user_by_email("demo@scout.local")
+            .expect("the demo account");
+        assert_eq!(user.failed_sign_in_count, 0, "a success resets the count");
+        assert!(user.locked_at.is_none());
+    }
 
     for _ in 0..5 {
         let (status, _) = login_with(&app, "demo@scout.local", "wrong-password").await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    {
+        let store = state.store.read().await;
+        let user = store
+            .user_by_email("demo@scout.local")
+            .expect("the demo account");
+        assert_eq!(
+            user.failed_sign_in_count,
+            crate::store::MAX_FAILED_SIGN_INS,
+            "the count lives on the account"
+        );
+        assert!(user.locked_at.is_some(), "the lock lives on the account");
     }
 
     // The correct password is refused with the same generic body while locked.
@@ -4765,6 +4786,16 @@ async fn the_operator_lists_and_unlocks_a_locked_account() {
     .await;
     assert_eq!(status, StatusCode::OK, "unlock failed: {body}");
     assert_eq!(body["ok"], true);
+
+    // Unlocking itself clears both the lock and the counter, before any sign-in.
+    {
+        let store = state.store.read().await;
+        let user = store
+            .user_by_email("demo@scout.local")
+            .expect("the demo account");
+        assert!(user.locked_at.is_none());
+        assert_eq!(user.failed_sign_in_count, 0);
+    }
 
     let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
     assert_eq!(

@@ -130,6 +130,7 @@ SCOUT_OPERATOR_PASSWORD (neither may be blank) and restart"
         is_operator: true,
         disabled_at: None,
         locked_at: None,
+        failed_sign_in_count: 0,
     };
     store.users.insert(user.id, user.clone());
     store.users_by_email.insert(email.clone(), user.id);
@@ -180,6 +181,7 @@ pub fn create_local_account(
         is_operator: false,
         disabled_at: None,
         locked_at: None,
+        failed_sign_in_count: 0,
     };
     store.users.insert(user.id, user.clone());
     store.users_by_email.insert(email, user.id);

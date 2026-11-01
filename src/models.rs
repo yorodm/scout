@@ -192,6 +192,10 @@ pub struct User {
     /// sign in until the deployment operator unlocks it (FR-032).
     #[serde(default)]
     pub locked_at: Option<DateTime<Utc>>,
+    /// Consecutive failed sign-ins since the last success or unlock. Reaching
+    /// five sets `locked_at`. Never exposed through the API.
+    #[serde(default, skip_serializing)]
+    pub failed_sign_in_count: u32,
 }
 
 /// An authenticated session. Only the SHA-256 of the opaque token is stored, and

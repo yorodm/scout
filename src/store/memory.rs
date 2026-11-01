@@ -44,8 +44,6 @@ pub struct Store {
     pub invitations: HashMap<Uuid, Invitation>,
     pub invitations_by_token: HashMap<String, Uuid>,
     pub recovery_codes: Vec<RecoveryCode>,
-    /// Consecutive failed sign-ins per user; reset on success or unlock.
-    pub failed_sign_ins: HashMap<Uuid, u32>,
     /// Long-lived API tokens for the Sentry-compatible surface.
     pub api_tokens: HashMap<Uuid, ApiToken>,
     /// Token hash → token id, so authentication is a single map lookup.
@@ -75,7 +73,6 @@ impl Store {
             invitations: HashMap::new(),
             invitations_by_token: HashMap::new(),
             recovery_codes: Vec::new(),
-            failed_sign_ins: HashMap::new(),
             api_tokens: HashMap::new(),
             api_tokens_by_hash: HashMap::new(),
         }
@@ -184,20 +181,22 @@ impl Store {
 
     /// Count a failed sign-in. Returns true when this failure locked the account.
     pub fn record_failed_sign_in(&mut self, user_id: Uuid) -> bool {
-        let count = self.failed_sign_ins.entry(user_id).or_insert(0);
-        *count = count.saturating_add(1);
-        if *count < MAX_FAILED_SIGN_INS {
+        let Some(user) = self.users.get_mut(&user_id) else {
+            return false;
+        };
+        user.failed_sign_in_count = user.failed_sign_in_count.saturating_add(1);
+        if user.failed_sign_in_count < MAX_FAILED_SIGN_INS {
             return false;
         }
-        if let Some(user) = self.users.get_mut(&user_id) {
-            user.locked_at = Some(Utc::now());
-        }
+        user.locked_at = Some(Utc::now());
         true
     }
 
     /// Clear the consecutive-failure count after a successful sign-in.
     pub fn clear_failed_sign_ins(&mut self, user_id: Uuid) {
-        self.failed_sign_ins.remove(&user_id);
+        if let Some(user) = self.users.get_mut(&user_id) {
+            user.failed_sign_in_count = 0;
+        }
     }
 
     /// Operator unlock: clears the lock and the failure count.
@@ -206,7 +205,7 @@ impl Store {
             return false;
         };
         user.locked_at = None;
-        self.failed_sign_ins.remove(&user_id);
+        user.failed_sign_in_count = 0;
         true
     }
 
@@ -504,6 +503,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         is_operator: false,
         disabled_at: None,
         locked_at: None,
+        failed_sign_in_count: 0,
     };
     let triager = User {
         id: Uuid::new_v4(),
@@ -513,6 +513,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         is_operator: false,
         disabled_at: None,
         locked_at: None,
+        failed_sign_in_count: 0,
     };
     let viewer = User {
         id: Uuid::new_v4(),
@@ -522,6 +523,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         is_operator: false,
         disabled_at: None,
         locked_at: None,
+        failed_sign_in_count: 0,
     };
     for user in [&demo, &triager, &viewer] {
         store.users.insert(user.id, user.clone());
