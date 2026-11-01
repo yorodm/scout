@@ -11,6 +11,11 @@ use uuid::Uuid;
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.route("/api/health", web::get().to(health))
         .route("/api/metrics", web::get().to(metrics))
+        .route("/api/operator/users", web::get().to(operator_users))
+        .route(
+            "/api/operator/users/{user_id}/unlock",
+            web::post().to(unlock_account),
+        )
         .route("/api/login", web::post().to(login))
         .route("/api/logout", web::post().to(logout))
         .route("/api/me", web::get().to(me))
@@ -223,13 +228,23 @@ pub async fn login(
     if user.disabled_at.is_some() {
         return Err(ApiError::Forbidden("this account is disabled".into()));
     }
+    // FR-032: a locked account looks exactly like a wrong password, even when
+    // the password is correct, so the lock never reveals that the account exists.
+    if user.locked_at.is_some() {
+        return Err(invalid_credentials());
+    }
     let Some(hash) = user.password_hash.as_deref() else {
         // An account that only authenticates through OIDC has no local password.
         return Err(invalid_credentials());
     };
     if !crate::auth::verify_password(&body.password, hash) {
+        let locked = store.record_failed_sign_in(user.id);
+        if locked {
+            tracing::warn!(account = %user.email, "account locked after repeated failed sign-ins");
+        }
         return Err(invalid_credentials());
     }
+    store.clear_failed_sign_ins(user.id);
     let token = store.issue_session(user.id, state.session_ttl_days);
     let memberships = memberships_json(&store, user.id);
     Ok(HttpResponse::Ok().json(json!({
@@ -332,6 +347,73 @@ pub async fn metrics(
 ) -> Result<HttpResponse, ApiError> {
     auth_operator(&req, &state).await?;
     Ok(HttpResponse::Ok().json(state.metrics.snapshot(state.store_kind)))
+}
+
+// --- operator account administration --------------------------------------
+
+#[derive(Deserialize, Default)]
+pub struct OperatorUserQuery {
+    /// `?locked=true` lists only accounts locked by failed sign-ins.
+    #[serde(default)]
+    pub locked: Option<bool>,
+}
+
+/// Lists accounts for the operator console. Deployment-level only: it exposes
+/// account emails and lock state, never project telemetry (FR-012).
+pub async fn operator_users(
+    req: HttpRequest,
+    query: web::Query<OperatorUserQuery>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    auth_operator(&req, &state).await?;
+    let store = state.store.read().await;
+    let mut accounts: Vec<User> = if query.locked.unwrap_or(false) {
+        store.locked_users()
+    } else {
+        store.users.values().cloned().collect()
+    };
+    if !query.locked.unwrap_or(false) {
+        accounts.sort_by(|a, b| a.email.cmp(&b.email));
+    }
+    let users: Vec<Value> = accounts
+        .into_iter()
+        .map(|user| {
+            json!({
+                "id": user.id,
+                "email": user.email,
+                "locked_at": user.locked_at,
+            })
+        })
+        .collect();
+    Ok(HttpResponse::Ok().json(json!({ "users": users })))
+}
+
+/// Unlocks a locked account and resets its failure count (FR-032, SC-023).
+pub async fn unlock_account(
+    req: HttpRequest,
+    path: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let (_, email) = auth_operator(&req, &state).await?;
+    let user_id = path.into_inner();
+    let mut store = state.store.write().await;
+    if !store.unlock_user(user_id) {
+        return Err(ApiError::NotFound("account not found".into()));
+    }
+    let target = store
+        .users
+        .get(&user_id)
+        .map(|user| user.email.clone())
+        .unwrap_or_default();
+    crate::audit::record(
+        &mut store,
+        None,
+        None,
+        &email,
+        "user.unlocked",
+        Some(target),
+    );
+    Ok(HttpResponse::Ok().json(json!({ "ok": true })))
 }
 
 // --- projects --------------------------------------------------------------

@@ -9,6 +9,9 @@ use uuid::Uuid;
 /// operator provisioning and invitation acceptance, which set their own password.
 pub const DEMO_PASSWORD: &str = "scout-demo";
 
+/// Consecutive failed sign-ins that lock an account (FR-032).
+pub const MAX_FAILED_SIGN_INS: u32 = 5;
+
 fn demo_password_hash() -> String {
     static HASH: OnceLock<String> = OnceLock::new();
     HASH.get_or_init(|| crate::auth::hash_password(DEMO_PASSWORD).expect("hash demo password"))
@@ -41,6 +44,8 @@ pub struct Store {
     pub invitations: HashMap<Uuid, Invitation>,
     pub invitations_by_token: HashMap<String, Uuid>,
     pub recovery_codes: Vec<RecoveryCode>,
+    /// Consecutive failed sign-ins per user; reset on success or unlock.
+    pub failed_sign_ins: HashMap<Uuid, u32>,
     /// Long-lived API tokens for the Sentry-compatible surface.
     pub api_tokens: HashMap<Uuid, ApiToken>,
     /// Token hash → token id, so authentication is a single map lookup.
@@ -70,6 +75,7 @@ impl Store {
             invitations: HashMap::new(),
             invitations_by_token: HashMap::new(),
             recovery_codes: Vec::new(),
+            failed_sign_ins: HashMap::new(),
             api_tokens: HashMap::new(),
             api_tokens_by_hash: HashMap::new(),
         }
@@ -146,6 +152,46 @@ impl Store {
         self.users_by_email
             .get(&email.to_ascii_lowercase())
             .and_then(|id| self.users.get(id))
+    }
+
+    /// Count a failed sign-in. Returns true when this failure locked the account.
+    pub fn record_failed_sign_in(&mut self, user_id: Uuid) -> bool {
+        let count = self.failed_sign_ins.entry(user_id).or_insert(0);
+        *count = count.saturating_add(1);
+        if *count < MAX_FAILED_SIGN_INS {
+            return false;
+        }
+        if let Some(user) = self.users.get_mut(&user_id) {
+            user.locked_at = Some(Utc::now());
+        }
+        true
+    }
+
+    /// Clear the consecutive-failure count after a successful sign-in.
+    pub fn clear_failed_sign_ins(&mut self, user_id: Uuid) {
+        self.failed_sign_ins.remove(&user_id);
+    }
+
+    /// Operator unlock: clears the lock and the failure count.
+    pub fn unlock_user(&mut self, user_id: Uuid) -> bool {
+        let Some(user) = self.users.get_mut(&user_id) else {
+            return false;
+        };
+        user.locked_at = None;
+        self.failed_sign_ins.remove(&user_id);
+        true
+    }
+
+    /// Locked accounts, newest lock first, for the operator console.
+    pub fn locked_users(&self) -> Vec<User> {
+        let mut users: Vec<User> = self
+            .users
+            .values()
+            .filter(|user| user.locked_at.is_some())
+            .cloned()
+            .collect();
+        users.sort_by(|a, b| b.locked_at.cmp(&a.locked_at));
+        users
     }
 
     /// Expire raw payloads and log lines that exceed the project's retention
@@ -427,6 +473,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         password_hash: Some(demo_hash.clone()),
         is_operator: false,
         disabled_at: None,
+        locked_at: None,
     };
     let triager = User {
         id: Uuid::new_v4(),
@@ -435,6 +482,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         password_hash: Some(demo_hash.clone()),
         is_operator: false,
         disabled_at: None,
+        locked_at: None,
     };
     let viewer = User {
         id: Uuid::new_v4(),
@@ -443,6 +491,7 @@ pub fn seed(self_url: &str) -> (Store, Vec<(String, Vec<u8>)>) {
         password_hash: Some(demo_hash),
         is_operator: false,
         disabled_at: None,
+        locked_at: None,
     };
     for user in [&demo, &triager, &viewer] {
         store.users.insert(user.id, user.clone());

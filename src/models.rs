@@ -188,6 +188,10 @@ pub struct User {
     /// A disabled account cannot sign in or start new sessions.
     #[serde(default)]
     pub disabled_at: Option<DateTime<Utc>>,
+    /// Set after repeated consecutive failed sign-ins. A locked account cannot
+    /// sign in until the deployment operator unlocks it (FR-032).
+    #[serde(default)]
+    pub locked_at: Option<DateTime<Utc>>,
 }
 
 /// An authenticated session. Only the SHA-256 of the opaque token is stored, and

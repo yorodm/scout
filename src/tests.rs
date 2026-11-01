@@ -4345,3 +4345,111 @@ async fn accepted_ingest_and_rejections_are_counted() {
     );
     assert_eq!(metrics["counters"]["ingest_rejected"]["auth"], 1);
 }
+
+// --- account lockout (FR-032, SC-023) --------------------------------------
+
+#[actix_web::test]
+async fn five_consecutive_failures_lock_the_account_for_every_sign_in() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+
+    for _ in 0..4 {
+        let (status, body) = login_with(&app, "demo@scout.local", "wrong-password").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"], "invalid email or password");
+    }
+    // A success before the threshold resets the consecutive count.
+    let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "sign-in must work before the lock");
+
+    for _ in 0..5 {
+        let (status, _) = login_with(&app, "demo@scout.local", "wrong-password").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // The correct password is refused with the same generic body while locked.
+    let (status, body) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        body["error"], "invalid email or password",
+        "a locked account must not reveal that it is locked"
+    );
+}
+
+#[actix_web::test]
+async fn the_operator_lists_and_unlocks_a_locked_account() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+
+    for _ in 0..5 {
+        let (status, _) = login_with(&app, "demo@scout.local", "wrong-password").await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // A member cannot read or change lock state.
+    let triager = login(&app, "triager@scout.local").await;
+    let triager_token = triager["token"].as_str().expect("triager session");
+    let (status, _) = call_json(&app, get("/api/operator/users?locked=true", triager_token)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, auth) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "operator login failed: {auth}");
+    let operator_token = auth["token"].as_str().expect("operator session");
+
+    let (status, body) =
+        call_json(&app, get("/api/operator/users?locked=true", operator_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let locked = body["users"]
+        .as_array()
+        .expect("a users array")
+        .iter()
+        .find(|user| user["email"] == "demo@scout.local")
+        .expect("the locked account is listed")
+        .clone();
+    let user_id = locked["id"].as_str().expect("account id");
+    assert!(locked["locked_at"].is_string(), "lock time is reported");
+
+    // A non-operator cannot unlock either.
+    let (status, _) = call_json(
+        &app,
+        post_json(
+            &format!("/api/operator/users/{user_id}/unlock"),
+            triager_token,
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/operator/users/{user_id}/unlock"),
+            operator_token,
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "unlock failed: {body}");
+    assert_eq!(body["ok"], true);
+
+    let (status, _) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the account signs in after an unlock"
+    );
+
+    // Unlocking an unknown account is a 404.
+    let (status, _) = call_json(
+        &app,
+        post_json(
+            &format!("/api/operator/users/{}/unlock", Uuid::new_v4()),
+            operator_token,
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
