@@ -11,6 +11,12 @@ pub struct User {
     pub id: String,
     pub email: String,
     pub name: String,
+    /// The single deployment-level principal (FR-012).
+    #[serde(default)]
+    pub is_operator: bool,
+    /// Set when the account was locked by repeated failed sign-ins (FR-032).
+    #[serde(default)]
+    pub locked_at: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -36,6 +42,29 @@ pub struct DemoAccountsResponse {
 pub struct LoginResponse {
     pub token: String,
     pub user: User,
+    /// The operator's recovery codes, present only on the first sign-in.
+    #[serde(default)]
+    pub recovery_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct RecoveryCodesResponse {
+    #[serde(default)]
+    pub recovery_codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct LockedUser {
+    pub id: String,
+    pub email: String,
+    #[serde(default)]
+    pub locked_at: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct OperatorUsersResponse {
+    #[serde(default)]
+    pub users: Vec<LockedUser>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -378,6 +407,44 @@ pub async fn me(token: &str) -> Result<MeResponse, String> {
 
 pub async fn logout(token: &str) -> Result<OkResponse, String> {
     post("/api/logout", Some(token), &serde_json::json!({})).await
+}
+
+pub async fn change_password(
+    token: &str,
+    current_password: &str,
+    new_password: &str,
+) -> Result<OkResponse, String> {
+    post(
+        "/api/me/password",
+        Some(token),
+        &serde_json::json!({
+            "current_password": current_password,
+            "new_password": new_password,
+        }),
+    )
+    .await
+}
+
+pub async fn reissue_recovery_codes(token: &str) -> Result<RecoveryCodesResponse, String> {
+    post(
+        "/api/me/recovery-codes",
+        Some(token),
+        &serde_json::json!({}),
+    )
+    .await
+}
+
+pub async fn locked_users(token: &str) -> Result<OperatorUsersResponse, String> {
+    get("/api/operator/users?locked=true", Some(token)).await
+}
+
+pub async fn unlock_user(token: &str, user_id: &str) -> Result<OkResponse, String> {
+    post(
+        &format!("/api/operator/users/{user_id}/unlock"),
+        Some(token),
+        &serde_json::json!({}),
+    )
+    .await
 }
 
 // ------------------------------------------------------------------ data

@@ -19,6 +19,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
         .route("/api/login", web::post().to(login))
         .route("/api/logout", web::post().to(logout))
         .route("/api/me", web::get().to(me))
+        .route("/api/me/password", web::post().to(change_password))
         .route(
             "/api/me/recovery-codes",
             web::post().to(reissue_recovery_codes),
@@ -250,11 +251,29 @@ pub async fn login(
     }
     store.clear_failed_sign_ins(user.id);
     let token = store.issue_session(user.id, state.session_ttl_days);
+    // FR-012: the operator's recovery codes are issued once, at the first
+    // successful sign-in, so a lost password is recoverable without database
+    // access. The plaintext is returned exactly once and never stored.
+    let recovery_codes = if user.is_operator && !store.has_recovery_codes(user.id) {
+        let codes = crate::auth::issue_recovery_codes(&mut store, user.id, 10);
+        crate::audit::record(
+            &mut store,
+            None,
+            None,
+            &user.email,
+            "recovery_codes.issued",
+            Some("first sign-in".into()),
+        );
+        codes
+    } else {
+        Vec::new()
+    };
     let memberships = memberships_json(&store, user.id);
     Ok(HttpResponse::Ok().json(json!({
         "token": token,
         "user": user,
         "memberships": memberships,
+        "recovery_codes": recovery_codes,
     })))
 }
 
@@ -1165,6 +1184,60 @@ pub async fn recover(
         None,
         &actor,
         "account.password_reset",
+        None,
+    );
+    Ok(HttpResponse::Ok().json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// Lets an authenticated account change its own password (FR-012, SC-017). The
+/// current password is required, the 12-character minimum is reported before the
+/// stored credential is touched, and every other session for the account ends.
+pub async fn change_password(
+    req: HttpRequest,
+    body: web::Json<ChangePasswordRequest>,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    let (user_id, email) = auth_user(&req, &state).await?;
+    // The policy is actionable, so it is reported before anything is verified or
+    // written; a rejected value leaves the old password usable.
+    crate::auth::validate_password(&body.new_password).map_err(ApiError::BadRequest)?;
+    let mut store = state.store.write().await;
+    let Some(hash) = store
+        .users
+        .get(&user_id)
+        .and_then(|user| user.password_hash.clone())
+    else {
+        return Err(ApiError::BadRequest(
+            "this account has no local password".into(),
+        ));
+    };
+    if !crate::auth::verify_password(&body.current_password, &hash) {
+        return Err(ApiError::BadRequest(
+            "the current password is incorrect".into(),
+        ));
+    }
+    let new_hash = crate::auth::hash_password(&body.new_password).map_err(|error| {
+        ApiError::ServiceUnavailable(format!("could not store the password: {error}"))
+    })?;
+    if let Some(user) = store.users.get_mut(&user_id) {
+        user.password_hash = Some(new_hash);
+    }
+    // A changed credential ends every other session. The caller keeps the session
+    // that made the change, so the dashboard does not force a re-sign-in.
+    let keep = bearer(&req).map(|token| crate::auth::hash_token(&token));
+    store.revoke_user_sessions_except(user_id, keep.as_deref());
+    crate::audit::record(
+        &mut store,
+        None,
+        None,
+        &email,
+        "account.password_changed",
         None,
     );
     Ok(HttpResponse::Ok().json(json!({ "ok": true })))

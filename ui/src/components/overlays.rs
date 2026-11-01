@@ -13,6 +13,7 @@ pub fn ModalHost() -> View {
         match modal.get() {
             Some(ModalKind::SendEvent) => view! { SendEventModal() },
             Some(ModalKind::SendLog) => view! { SendLogModal() },
+            Some(ModalKind::FirstSignInCodes) => view! { FirstSignInCodesModal() },
             None => View::new(),
         }
     });
@@ -42,6 +43,45 @@ pub fn ToastHost() -> View {
         }
     });
     view! { div(class="toasts") { (body) } }
+}
+
+#[component]
+fn FirstSignInCodesModal() -> View {
+    let store = use_store();
+    let codes = store.with(|state| state.pending_recovery_codes.clone());
+    let items: Vec<View> = codes
+        .into_iter()
+        .map(|code| view! { div(class="recovery-code") { (code) } })
+        .collect();
+    view! {
+        // Deliberately not dismissible by clicking the backdrop: the codes are
+        // shown once and must be acknowledged before the operator continues.
+        div(class="modal-backdrop") {
+            div(
+                class="modal",
+                on:click=move |event: web_sys::MouseEvent| event.stop_propagation(),
+            ) {
+                div(class="modal-head") {
+                    div {
+                        h2 { "Save your recovery codes" }
+                        p {
+                            "These are shown once and are the only way back in without database access. Each code resets your password a single time."
+                        }
+                    }
+                }
+                div(class="recovery-codes") { (items) }
+                div(class="form-actions") {
+                    button(
+                        class="btn btn-primary",
+                        r#type="button",
+                        on:click=move |_| state::acknowledge_recovery_codes(store),
+                    ) {
+                        "I saved these codes"
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[component]

@@ -14,6 +14,7 @@ pub enum ViewKind {
     Members,
     Settings,
     Tokens,
+    Account,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -45,6 +46,8 @@ pub struct LogFilters {
 pub enum ModalKind {
     SendEvent,
     SendLog,
+    /// The operator's one-time recovery codes, shown on the first sign-in.
+    FirstSignInCodes,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +77,11 @@ pub struct AppState {
     pub tokens: Vec<api::ApiToken>,
     /// The plaintext of a token created in this browser session; never persisted.
     pub new_token: Option<api::CreatedApiToken>,
+    /// Recovery codes returned by the current sign-in, shown once and cleared on
+    /// acknowledgement (FR-012, SC-017).
+    pub pending_recovery_codes: Vec<String>,
+    /// Accounts currently locked by failed sign-ins, for the operator console.
+    pub locked_users: Vec<api::LockedUser>,
     pub filters: Filters,
     pub log_filters: LogFilters,
     pub search_query: String,
@@ -102,6 +110,8 @@ impl Default for AppState {
             settings: None,
             tokens: Vec::new(),
             new_token: None,
+            pending_recovery_codes: Vec::new(),
+            locked_users: Vec::new(),
             filters: Filters::default(),
             log_filters: LogFilters::default(),
             search_query: String::new(),
@@ -138,6 +148,10 @@ pub fn can_triage(state: &AppState) -> bool {
 
 pub fn can_send(state: &AppState) -> bool {
     can_manage(state) && project(state).and_then(|p| p.key.as_ref()).is_some()
+}
+
+pub fn is_operator(state: &AppState) -> bool {
+    state.me.as_ref().is_some_and(|user| user.is_operator)
 }
 
 pub fn toast(store: Signal<AppState>, message: impl Into<String>, kind: &str) {
@@ -216,9 +230,16 @@ pub async fn login(store: Signal<AppState>, email: String, password: String) {
     match api::login(&email, &password).await {
         Ok(data) => {
             util::storage_set("scout_token", &data.token);
+            let codes = data.recovery_codes.clone();
             store.update(|state| {
                 state.token = Some(data.token.clone());
                 state.me = Some(data.user.clone());
+                state.pending_recovery_codes = codes.clone();
+                state.modal = if codes.is_empty() {
+                    None
+                } else {
+                    Some(ModalKind::FirstSignInCodes)
+                };
             });
             load_projects(store).await;
             if util::current_hash().is_empty() {
@@ -226,6 +247,69 @@ pub async fn login(store: Signal<AppState>, email: String, password: String) {
             }
             sync_from_hash(store).await;
             toast(store, format!("Signed in as {}", data.user.name), "success");
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub fn acknowledge_recovery_codes(store: Signal<AppState>) {
+    store.update(|state| {
+        state.pending_recovery_codes.clear();
+        state.modal = None;
+    });
+}
+
+pub async fn change_password(
+    store: Signal<AppState>,
+    current_password: String,
+    new_password: String,
+) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::change_password(&token, &current_password, &new_password).await {
+        Ok(_) => toast(store, "Password changed", "success"),
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn reissue_recovery_codes(store: Signal<AppState>) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::reissue_recovery_codes(&token).await {
+        Ok(data) => {
+            store.update(|state| {
+                state.pending_recovery_codes = data.recovery_codes;
+                state.modal = Some(ModalKind::FirstSignInCodes);
+            });
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn load_account(store: Signal<AppState>) {
+    if !store.with(is_operator) {
+        store.update(|state| state.locked_users.clear());
+        return;
+    }
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::locked_users(&token).await {
+        Ok(data) => store.update(|state| state.locked_users = data.users),
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn unlock_account(store: Signal<AppState>, user_id: String) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::unlock_user(&token, &user_id).await {
+        Ok(_) => {
+            toast(store, "Account unlocked", "success");
+            load_account(store).await;
         }
         Err(error) => toast(store, error, "error"),
     }
@@ -454,6 +538,7 @@ pub async fn sync_from_hash(store: Signal<AppState>) {
         ["members", ..] => (ViewKind::Members, None),
         ["settings", ..] => (ViewKind::Settings, None),
         ["tokens", ..] => (ViewKind::Tokens, None),
+        ["account", ..] => (ViewKind::Account, None),
         _ => (ViewKind::Issues, None),
     };
 
@@ -480,6 +565,7 @@ pub async fn sync_from_hash(store: Signal<AppState>) {
         ViewKind::Members => load_members(store).await,
         ViewKind::Settings => load_settings(store).await,
         ViewKind::Tokens => load_tokens(store).await,
+        ViewKind::Account => load_account(store).await,
     }
 }
 

@@ -62,9 +62,14 @@ pub fn App() -> View {
 #[component]
 fn Login() -> View {
     let store = use_store();
+    let email_input = create_signal(String::new());
+    let password_input = create_signal(String::new());
 
-    let account_cards = View::from_dynamic(move || {
+    let demo_section = View::from_dynamic(move || -> View {
         let accounts = store.with(|state| state.accounts.clone());
+        if accounts.is_empty() {
+            return View::new();
+        }
         let cards: Vec<View> = accounts
             .into_iter()
             .map(|account| {
@@ -106,7 +111,15 @@ fn Login() -> View {
                 }
             })
             .collect();
-        view! { div(class="accounts") { (cards) } }
+        view! {
+            h2(style="font-size:14px;margin:20px 0 12px") { "Or sign in with a demo account" }
+            div(class="accounts") { (cards) }
+            div(class="login-note") {
+                "Demo accounts are seeded and share the password "
+                code { "scout-demo" }
+                ". Signing in scopes every request to the projects and role shown above. Demo shortcuts exist only when demo mode is enabled."
+            }
+        }
     });
 
     view! {
@@ -122,13 +135,56 @@ fn Login() -> View {
                 p(class="lede") {
                     "Point an existing Sentry SDK at Scout — change only the DSN. Errors group into issues, logs sit beside them, and the decision model only ever suggests; a human confirms."
                 }
-                h2(style="font-size:14px;margin-bottom:12px") { "Sign in as a demo account" }
-                (account_cards)
-                div(class="login-note") {
-                    "Prototype: sessions are in-memory and seeded accounts share the password "
-                    code { "scout-demo" }
-                    ". Signing in scopes every request to the projects and role shown above. Restarting the server resets all data."
+                h2(style="font-size:14px;margin-bottom:12px") { "Sign in" }
+                form(
+                    class="form-grid",
+                    on:submit=move |event: web_sys::SubmitEvent| {
+                        event.prevent_default();
+                        let email = email_input.get_clone();
+                        let password = password_input.get_clone();
+                        if email.is_empty() || password.is_empty() {
+                            state::toast(store, "Enter your email and password", "error");
+                            return;
+                        }
+                        spawn_local(state::login(store, email, password));
+                    },
+                ) {
+                    label(class="field") {
+                        "Email"
+                        input(
+                            class="input",
+                            r#type="email",
+                            autocomplete="username",
+                            placeholder="you@example.com",
+                            value=move || email_input.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<web_sys::HtmlInputElement>();
+                                    email_input.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    label(class="field") {
+                        "Password"
+                        input(
+                            class="input",
+                            r#type="password",
+                            autocomplete="current-password",
+                            value=move || password_input.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<web_sys::HtmlInputElement>();
+                                    password_input.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    div(class="form-actions full") {
+                        button(class="btn btn-primary", r#type="submit") { "Sign in" }
+                    }
                 }
+                (demo_section)
             }
         }
     }
@@ -296,6 +352,7 @@ fn Shell() -> View {
             ViewKind::Members => view! { other::MembersView() },
             ViewKind::Settings => view! { other::SettingsView() },
             ViewKind::Tokens => view! { tokens::TokensView() },
+            ViewKind::Account => view! { other::AccountView() },
         }
     });
 
@@ -339,6 +396,10 @@ fn Shell() -> View {
                         span(class="dot") {}
                         "API tokens"
                     }
+                    a(href="#/account", class=nav_class("account")) {
+                        span(class="dot") {}
+                        "Account"
+                    }
                 }
                 div(class="sidebar-foot") {
                     (user_pill)
@@ -379,6 +440,7 @@ fn title_for(state: &AppState) -> String {
         ViewKind::Members => "Members".into(),
         ViewKind::Settings => "Settings".into(),
         ViewKind::Tokens => "API tokens".into(),
+        ViewKind::Account => "Account".into(),
     }
 }
 
@@ -412,5 +474,6 @@ fn subtitle_for(state: &AppState) -> String {
         ViewKind::Members => format!("{name} · project-scoped roles"),
         ViewKind::Settings => format!("{name} · ingest, retention, decision model"),
         ViewKind::Tokens => "Long-lived bearer tokens for /api/0/".into(),
+        ViewKind::Account => "Password, recovery codes, and locked accounts".into(),
     }
 }

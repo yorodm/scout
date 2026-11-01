@@ -3125,6 +3125,153 @@ async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
 }
 
 #[actix_web::test]
+async fn operator_changes_its_own_password_and_other_sessions_end() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+
+    let (_, first) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    let first_token = first["token"].as_str().unwrap().to_string();
+    let (_, second) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    let second_token = second["token"].as_str().unwrap().to_string();
+
+    // A value below the minimum is rejected with the minimum named, before the
+    // stored credential is touched.
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            "/api/me/password",
+            &first_token,
+            json!({ "current_password": OPERATOR_PASSWORD, "new_password": "short-pw" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("12"),
+        "the message must name the minimum: {body}"
+    );
+
+    // The current password is required.
+    let (status, _) = call_json(
+        &app,
+        post_json(
+            "/api/me/password",
+            &first_token,
+            json!({ "current_password": "wrong-password", "new_password": "operator-secret-2" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a rejected change leaves the old password usable"
+    );
+
+    let new_password = "operator-secret-2";
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            "/api/me/password",
+            &first_token,
+            json!({ "current_password": OPERATOR_PASSWORD, "new_password": new_password }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "change failed: {body}");
+
+    // The calling session keeps working; the other one ends with it.
+    let (status, _) = call_json(&app, get("/api/me", &first_token)).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = call_json(&app, get("/api/me", &second_token)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // Only the new password signs in.
+    let (status, _) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, auth) = login_with(&app, "ops@test.local", new_password).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        auth["user"].get("password_hash").is_none(),
+        "no response may contain the hash: {auth}"
+    );
+
+    let store = state.store.read().await;
+    assert!(
+        store
+            .audit
+            .iter()
+            .any(|entry| entry.action == "account.password_changed"),
+        "the change must be audited"
+    );
+    let operator_hash = store
+        .user_by_email("ops@test.local")
+        .and_then(|user| user.password_hash.clone())
+        .expect("an operator password hash");
+    assert!(operator_hash.starts_with("$argon2"), "stored as Argon2id");
+}
+
+#[actix_web::test]
+async fn operator_receives_recovery_codes_once_on_first_sign_in() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+
+    let (status, first) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK);
+    let codes: Vec<String> = first["recovery_codes"]
+        .as_array()
+        .expect("codes on the first sign-in")
+        .iter()
+        .map(|code| code.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(codes.len(), 10);
+
+    // The same set is not shown again.
+    let (status, second) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second["recovery_codes"], json!([]));
+
+    // A non-operator never gets a set from signing in.
+    let (_, member) = login_with(&app, "demo@scout.local", crate::store::DEMO_PASSWORD).await;
+    assert_eq!(member["recovery_codes"], json!([]));
+
+    // Only hashes are stored, and the codes actually recover the account.
+    {
+        let store = state.store.read().await;
+        let rows: Vec<_> = store
+            .recovery_codes
+            .iter()
+            .filter(|code| {
+                code.user_id
+                    == second["user"]["id"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<Uuid>()
+                        .unwrap()
+            })
+            .collect();
+        assert_eq!(rows.len(), 10);
+        for row in rows {
+            assert!(!codes.contains(&row.code_hash), "plaintext is never stored");
+        }
+    }
+    let (status, _) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "ops@test.local", "recovery_code": codes[0], "new_password": "operator-recovered" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = login_with(&app, "ops@test.local", "operator-recovered").await;
+    assert_eq!(status, StatusCode::OK, "a recovery code restores access");
+}
+
+#[actix_web::test]
 async fn key_rotation_revokes_the_previous_key() {
     let app = init_app("http://127.0.0.1:1").await;
     let demo = login(&app, "demo@scout.local").await;

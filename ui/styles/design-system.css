@@ -1376,6 +1376,24 @@ pre.raw {
   flex-wrap: wrap;
 }
 
+.recovery-codes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 4px;
+}
+
+.recovery-code {
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  text-align: center;
+}
+
 .outage-strip {
   display: flex;
   align-items: center;

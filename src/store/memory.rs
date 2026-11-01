@@ -152,6 +152,22 @@ impl Store {
         self.sessions.remove(&crate::auth::hash_token(token));
     }
 
+    /// End every session belonging to `user_id` except the one identified by
+    /// `keep_hash`. Used when a credential changes (FR-012) so other devices are
+    /// signed out while the caller stays signed in.
+    pub fn revoke_user_sessions_except(&mut self, user_id: Uuid, keep_hash: Option<&str>) {
+        self.sessions
+            .retain(|hash, session| session.user_id != user_id || keep_hash == Some(hash.as_str()));
+    }
+
+    /// True when this account has ever been issued recovery codes, which is how
+    /// the first sign-in is recognised once and never again.
+    pub fn has_recovery_codes(&self, user_id: Uuid) -> bool {
+        self.recovery_codes
+            .iter()
+            .any(|code| code.user_id == user_id)
+    }
+
     /// Remove expired sessions. Returns the number removed.
     pub fn sweep_sessions(&mut self) -> usize {
         let now = Utc::now();

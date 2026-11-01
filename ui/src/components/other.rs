@@ -809,3 +809,185 @@ fn key_row(store: Signal<AppState>, key: &IngestKey) -> View {
         }
     }
 }
+
+// ------------------------------------------------------------------ account
+
+/// The signed-in account's own credentials. Every account can change its own
+/// password and reissue recovery codes; the operator additionally sees locked
+/// accounts and can unlock them (FR-012, FR-032, SC-017, SC-023).
+#[component]
+pub fn AccountView() -> View {
+    let store = use_store();
+    let email = create_selector(move || {
+        store.with(|state| {
+            state
+                .me
+                .as_ref()
+                .map(|user| user.email.clone())
+                .unwrap_or_default()
+        })
+    });
+    let operator = create_selector(move || store.with(state::is_operator));
+    let current = create_signal(String::new());
+    let fresh = create_signal(String::new());
+    let busy = create_signal(false);
+
+    let submit = move || {
+        if busy.get() {
+            return;
+        }
+        let current_password = current.get_clone();
+        let new_password = fresh.get_clone();
+        if current_password.is_empty() || new_password.is_empty() {
+            state::toast(
+                store,
+                "Enter your current password and the new one",
+                "error",
+            );
+            return;
+        }
+        busy.set(true);
+        spawn_local(async move {
+            state::change_password(store, current_password, new_password).await;
+            current.set(String::new());
+            fresh.set(String::new());
+            busy.set(false);
+        });
+    };
+
+    let locked_users = create_selector(move || store.with(|state| state.locked_users.clone()));
+
+    let operator_panel = View::from_dynamic(move || -> View {
+        if !operator.get() {
+            return View::new();
+        }
+        let users = locked_users.get_clone();
+        let body = if users.is_empty() {
+            empty_state(
+                "No locked accounts",
+                "Accounts lock after five consecutive failed sign-ins and appear here for unlocking.",
+                View::new(),
+            )
+        } else {
+            let rows: Vec<View> = users
+                .into_iter()
+                .map(|user| {
+                    let id = user.id.clone();
+                    let email = user.email.clone();
+                    view! {
+                        div(class="member-row") {
+                            div(class="member-id") {
+                                div(class="who") {
+                                    strong { (email.clone()) }
+                                    small { "locked by failed sign-ins" }
+                                }
+                            }
+                            button(
+                                class="btn btn-sm",
+                                r#type="button",
+                                on:click=move |_| {
+                                    spawn_local(state::unlock_account(store, id.clone()));
+                                },
+                            ) {
+                                "Unlock"
+                            }
+                        }
+                    }
+                })
+                .collect();
+            view! { div { (rows) } }
+        };
+        view! {
+            section(class="panel panel-pad", style="margin-top:16px") {
+                (section_title(
+                    "Locked accounts",
+                    view! { span(class="badge warning") { "operator only" } },
+                ))
+                p(class="muted small") {
+                    "Five consecutive failed sign-ins lock an account regardless of elapsed time. Unlocking resets the counter; existing sessions are never ended by a lock."
+                }
+                div(style="margin-top:12px") { (body) }
+            }
+        }
+    });
+
+    view! {
+        div(class="settings-grid") {
+            section(class="panel panel-pad") {
+                (section_title(
+                    "Password",
+                    view! { span(class="muted small") { "at least 12 characters" } },
+                ))
+                label(class="field") {
+                    "Signed in as"
+                    input(class="input", readonly=true, value=move || email.get_clone())
+                }
+                div(class="form-grid", style="margin-top:12px") {
+                    label(class="field") {
+                        "Current password"
+                        input(
+                            class="input",
+                            r#type="password",
+                            autocomplete="current-password",
+                            value=move || current.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<HtmlInputElement>();
+                                    current.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    label(class="field") {
+                        "New password"
+                        input(
+                            class="input",
+                            r#type="password",
+                            autocomplete="new-password",
+                            value=move || fresh.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<HtmlInputElement>();
+                                    fresh.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                }
+                div(class="hint") {
+                    "Changing the password ends every other session for this account. The session making the change stays signed in."
+                }
+                div(class="form-actions") {
+                    button(
+                        class="btn btn-primary",
+                        r#type="button",
+                        disabled=move || busy.get(),
+                        on:click=move |_| submit(),
+                    ) {
+                        "Change password"
+                    }
+                }
+            }
+
+            section(class="panel panel-pad") {
+                (section_title(
+                    "Recovery codes",
+                    view! { span(class="badge") { "shown once" } },
+                ))
+                p(class="muted small") {
+                    "Recovery codes reset your password without database access. Reissuing revokes every unused code; only the newest set works, and it is shown once."
+                }
+                div(class="form-actions") {
+                    button(
+                        class="btn",
+                        r#type="button",
+                        on:click=move |_| spawn_local(state::reissue_recovery_codes(store)),
+                    ) {
+                        "Reissue recovery codes"
+                    }
+                }
+            }
+        }
+        (operator_panel)
+    }
+}
