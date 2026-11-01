@@ -17,6 +17,20 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// Minimum password length on every path that sets one (FR-011, SC-022).
+pub const MIN_PASSWORD_LEN: usize = 12;
+
+/// Reject a password that does not meet the product minimum. No composition
+/// rules apply; the message names the minimum so the UI and API agree.
+pub fn validate_password(password: &str) -> Result<(), String> {
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(format!(
+            "password must be at least {MIN_PASSWORD_LEN} characters"
+        ));
+    }
+    Ok(())
+}
+
 /// Hash a password with Argon2id. The returned string is the PHC encoding, so
 /// the salt and parameters travel with the hash.
 pub fn hash_password(password: &str) -> Result<String, String> {
@@ -101,6 +115,10 @@ SCOUT_OPERATOR_PASSWORD (neither may be blank) and restart"
         );
     };
 
+    // The bootstrap value sets a password, so it follows the same minimum.
+    validate_password(password)
+        .map_err(|error| format!("SCOUT_OPERATOR_PASSWORD is invalid: {error}"))?;
+
     let email = email.to_ascii_lowercase();
     let password_hash = hash_password(password)
         .map_err(|e| format!("could not hash the operator password: {e}"))?;
@@ -152,9 +170,7 @@ pub fn create_local_account(
     if store.user_by_email(&email).is_some() {
         return Err("an account with that email already exists".into());
     }
-    if password.is_empty() {
-        return Err("a password is required for a new account".into());
-    }
+    validate_password(password)?;
     let password_hash = hash_password(password)?;
     let user = User {
         id: Uuid::new_v4(),
@@ -221,6 +237,9 @@ pub fn redeem_recovery_code(
     let Some(entry) = entry else {
         return Err("invalid email or recovery code".into());
     };
+    // Validate only after the code matched, so a bad code keeps the generic
+    // message regardless of the password supplied alongside it.
+    validate_password(new_password)?;
     let password_hash = hash_password(new_password)?;
     entry.used_at = Some(now);
     if let Some(user) = store.users.get_mut(&user_id) {
@@ -306,7 +325,7 @@ mod tests {
 
         for (email, password) in [
             (None, None),
-            (Some("  "), Some("secret")),
+            (Some("  "), Some("secret-value-123")),
             (Some("ops@example.com"), Some("   ")),
         ] {
             let error = bootstrap_operator(&mut store, &config(email, password))
@@ -344,5 +363,14 @@ mod tests {
         assert_eq!(code.len(), 11);
         assert_eq!(code.as_bytes()[5], b'-');
         assert_ne!(code, new_recovery_code());
+    }
+
+    #[test]
+    fn passwords_require_twelve_characters() {
+        let error = validate_password("elevenchars").expect_err("11 characters is short");
+        assert!(error.contains("12"), "error names the minimum: {error}");
+        assert!(validate_password("").is_err());
+        assert!(validate_password("twelve-chars").is_ok());
+        assert!(validate_password("a much longer passphrase").is_ok());
     }
 }

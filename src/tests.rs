@@ -2609,7 +2609,7 @@ async fn operator_provisions_an_org_and_its_initial_admin() {
         &app,
         post_public(
             &format!("/api/invitations/{setup_token}/accept"),
-            json!({ "name": "Beta Admin", "password": "beta-pw" }),
+            json!({ "name": "Beta Admin", "password": "beta-admin-pw-1" }),
         ),
     )
     .await;
@@ -2626,14 +2626,14 @@ async fn operator_provisions_an_org_and_its_initial_admin() {
         &app,
         post_public(
             &format!("/api/invitations/{setup_token}/accept"),
-            json!({ "name": "Again", "password": "again-pw" }),
+            json!({ "name": "Again", "password": "again-admin-pw-1" }),
         ),
     )
     .await;
     assert_eq!(status, StatusCode::GONE);
 
     // The initial admin signs in and creates the first project.
-    let (status, _) = login_with(&app, "admin@beta.test", "beta-pw").await;
+    let (status, _) = login_with(&app, "admin@beta.test", "beta-admin-pw-1").await;
     assert_eq!(status, StatusCode::OK);
     let (status, body) = call_json(
         &app,
@@ -2797,7 +2797,7 @@ async fn project_invitations_preview_accept_and_revoke() {
         &app,
         post_public(
             &format!("/api/invitations/{invite_token}/accept"),
-            json!({ "name": "In Vitee", "password": "invitee-pw" }),
+            json!({ "name": "In Vitee", "password": "invitee-pw-12345" }),
         ),
     )
     .await;
@@ -2818,7 +2818,7 @@ async fn project_invitations_preview_accept_and_revoke() {
         &app,
         post_public(
             &format!("/api/invitations/{invite_token}/accept"),
-            json!({ "name": "Again", "password": "again-pw" }),
+            json!({ "name": "Again", "password": "again-admin-pw-1" }),
         ),
     )
     .await;
@@ -2875,7 +2875,7 @@ async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
         &app,
         post_public(
             "/api/recover",
-            json!({ "email": "demo@scout.local", "recovery_code": codes[0], "new_password": "reset-pw" }),
+            json!({ "email": "demo@scout.local", "recovery_code": codes[0], "new_password": "reset-pw-123456" }),
         ),
     )
     .await;
@@ -2886,7 +2886,7 @@ async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
         StatusCode::UNAUTHORIZED,
         "the old password no longer works"
     );
-    let (status, auth) = login_with(&app, "demo@scout.local", "reset-pw").await;
+    let (status, auth) = login_with(&app, "demo@scout.local", "reset-pw-123456").await;
     assert_eq!(status, StatusCode::OK);
 
     // A used code cannot be reused.
@@ -2894,7 +2894,7 @@ async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
         &app,
         post_public(
             "/api/recover",
-            json!({ "email": "demo@scout.local", "recovery_code": codes[0], "new_password": "again-pw" }),
+            json!({ "email": "demo@scout.local", "recovery_code": codes[0], "new_password": "again-admin-pw-1" }),
         ),
     )
     .await;
@@ -2902,8 +2902,8 @@ async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
 
     // An unknown code and an unknown email fail the same way.
     for body in [
-        json!({ "email": "demo@scout.local", "recovery_code": "AAAAA-BBBBB", "new_password": "nope-pw" }),
-        json!({ "email": "nobody@test.local", "recovery_code": codes[1], "new_password": "nope-pw" }),
+        json!({ "email": "demo@scout.local", "recovery_code": "AAAAA-BBBBB", "new_password": "nope-pw-1234567" }),
+        json!({ "email": "nobody@test.local", "recovery_code": codes[1], "new_password": "nope-pw-1234567" }),
     ] {
         let (status, _) = call_json(&app, post_public("/api/recover", body)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -2924,7 +2924,7 @@ async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
         &app,
         post_public(
             "/api/recover",
-            json!({ "email": "demo@scout.local", "recovery_code": codes[1], "new_password": "third-pw" }),
+            json!({ "email": "demo@scout.local", "recovery_code": codes[1], "new_password": "third-pw-123456" }),
         ),
     )
     .await;
@@ -2937,7 +2937,7 @@ async fn recovery_codes_reset_the_password_and_reissue_revokes_old_codes() {
         &app,
         post_public(
             "/api/recover",
-            json!({ "email": "demo@scout.local", "recovery_code": new_codes[0], "new_password": "third-pw" }),
+            json!({ "email": "demo@scout.local", "recovery_code": new_codes[0], "new_password": "third-pw-123456" }),
         ),
     )
     .await;
@@ -4595,4 +4595,49 @@ async fn a_disabled_or_removed_account_loses_its_existing_session() {
         StatusCode::UNAUTHORIZED,
         "a removed account must lose its session"
     );
+}
+
+// --- password minimum (FR-011, SC-022) -------------------------------------
+
+#[actix_web::test]
+async fn short_passwords_are_rejected_and_leave_the_recovery_code_usable() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().expect("session").to_string();
+
+    let (status, body) =
+        call_json(&app, post_json("/api/me/recovery-codes", &token, json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "reissue failed: {body}");
+    let code = body["recovery_codes"]
+        .as_array()
+        .and_then(|codes| codes.first())
+        .and_then(|code| code.as_str())
+        .expect("a recovery code")
+        .to_string();
+
+    let (status, body) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": code, "new_password": "too-short" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("12"),
+        "the message must name the minimum: {body}"
+    );
+
+    // A rejected weak password must not consume the code.
+    let (status, body) = call_json(
+        &app,
+        post_public(
+            "/api/recover",
+            json!({ "email": "demo@scout.local", "recovery_code": code, "new_password": "long-enough-password" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "the code stays usable: {body}");
 }

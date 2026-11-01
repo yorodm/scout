@@ -1125,6 +1125,9 @@ pub async fn recover(
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
     let mut store = state.store.write().await;
+    // The password policy is actionable, so it is reported as a 400 before the
+    // code is touched; an unknown or expired code keeps the generic 401.
+    crate::auth::validate_password(&body.new_password).map_err(ApiError::BadRequest)?;
     let user_id = crate::auth::redeem_recovery_code(
         &mut store,
         &body.email,

@@ -398,7 +398,7 @@ T082 script.
 | 200-result search cap with `has_more` | FR-021, SC-025 | T111 |
 | Smoke script follows the new creation contract | FR-023, FR-034 | T112 |
 
-- [ ] T104 [US2] Enforce the 12-character minimum with no composition rules on every password-setting path (initial-admin setup, invitation acceptance, recovery, operator password change) in `src/auth.rs` and `src/api.rs`, returning a message that names the minimum; cover all four paths in `src/tests.rs` (FR-011, SC-022)
+- [x] T104 [US2] Enforce the 12-character minimum with no composition rules on every password-setting path (initial-admin setup, invitation acceptance, recovery, operator password change) in `src/auth.rs` and `src/api.rs`, returning a message that names the minimum; cover all four paths in `src/tests.rs` (FR-011, SC-022)
 - [ ] T105 [US2] Add the lockout state to both adapters in `src/store/memory.rs` and `src/store/postgres.rs` using `users.locked_at` and `users.failed_sign_in_count` (`CHECK >= 0`), with no window column: five **consecutive** failures lock the account regardless of elapsed time, and the count resets on a successful sign-in or an unlock (FR-032, SC-023)
 - [x] T106 [US2] Return the generic invalid-credentials response for a locked account in `src/api.rs`, even when the password is correct, and leave existing sessions untouched; prove no response reveals existence or lock state in `src/tests.rs` (FR-032, SC-023)
 - [ ] T107 [US2] Add the operator account routes in `src/api.rs` — `GET /api/operator/users?locked=true` and `POST /api/operator/users/{user_id}/unlock` — auditing `user.unlocked` through `src/audit.rs`, and the locked-account list with an unlock action in `ui/src/components/other.rs` (FR-012, FR-032, SC-023)
