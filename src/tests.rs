@@ -103,6 +103,7 @@ async fn state_with_objects(
         self_url: self_url.to_string(),
         ingest_gate: Arc::new(Semaphore::new(max_in_flight.max(1))),
         session_ttl_days: 7,
+        session_idle_hours: 12,
         retention_days: 30,
         confidence_threshold: 0.5,
         objects: Arc::new(objects),
@@ -2124,6 +2125,7 @@ async fn expired_sessions_are_swept_on_login() {
         crate::models::Session {
             user_id: Uuid::new_v4(),
             expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+            last_seen_at: chrono::Utc::now() - chrono::Duration::seconds(2),
         },
     );
     assert!(state
@@ -2547,6 +2549,7 @@ fn operator_config() -> crate::config::Config {
         retention_days: 30,
         confidence_threshold: 0.5,
         session_ttl_days: 7,
+        session_idle_hours: 12,
         operator_email: Some("ops@test.local".into()),
         operator_password: Some(OPERATOR_PASSWORD.into()),
         database_url: None,
@@ -3109,6 +3112,7 @@ async fn retention_sweep_also_removes_expired_sessions() {
         crate::models::Session {
             user_id: Uuid::new_v4(),
             expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+            last_seen_at: chrono::Utc::now() - chrono::Duration::seconds(2),
         },
     );
 
@@ -4452,4 +4456,37 @@ async fn the_operator_lists_and_unlocks_a_locked_account() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// --- session lifetime (FR-033, SC-024) -------------------------------------
+
+#[actix_web::test]
+async fn an_idle_session_expires_and_a_recent_request_keeps_it_alive() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().expect("session token").to_string();
+    let hash = crate::auth::hash_token(&token);
+
+    // A request refreshes the session's last activity.
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Backdate the session beyond the configured 12-hour idle window.
+    {
+        let mut store = state.store.write().await;
+        let session = store.sessions.get_mut(&hash).expect("stored session");
+        session.last_seen_at = chrono::Utc::now() - chrono::Duration::hours(13);
+    }
+
+    let (status, body) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an idle session must be rejected: {body}"
+    );
+    assert!(
+        state.store.read().await.sessions.get(&hash).is_none(),
+        "the expired session is removed"
+    );
 }

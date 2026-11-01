@@ -241,6 +241,7 @@ mod tests {
             retention_days: 30,
             confidence_threshold: 0.5,
             session_ttl_days: 7,
+            session_idle_hours: 12,
             operator_email: email.map(str::to_string),
             operator_password: password.map(str::to_string),
             database_url: None,

@@ -113,12 +113,23 @@ impl Store {
             .and_then(|id| self.invitations.get(id))
     }
 
-    pub fn user_for_token(&self, token: &str) -> Option<Uuid> {
-        let session = self.sessions.get(&crate::auth::hash_token(token))?;
-        if session.expires_at <= Utc::now() {
+    pub fn user_for_token(&mut self, token: &str, idle_hours: i64) -> Option<Uuid> {
+        let key = crate::auth::hash_token(token);
+        let session = self.sessions.get(&key)?;
+        let now = Utc::now();
+        let absolute_expired = session.expires_at <= now;
+        // `idle_hours <= 0` disables the idle limit; the absolute limit still applies.
+        let idle_expired =
+            idle_hours > 0 && now - session.last_seen_at > Duration::hours(idle_hours);
+        if absolute_expired || idle_expired {
+            self.sessions.remove(&key);
             return None;
         }
-        Some(session.user_id)
+        let user_id = session.user_id;
+        if let Some(session) = self.sessions.get_mut(&key) {
+            session.last_seen_at = now;
+        }
+        Some(user_id)
     }
 
     /// Issue a hashed session token. The plaintext token is returned once and is
@@ -131,6 +142,7 @@ impl Store {
             Session {
                 user_id,
                 expires_at: now + Duration::days(ttl_days),
+                last_seen_at: now,
             },
         );
         token

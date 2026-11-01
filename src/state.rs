@@ -15,6 +15,8 @@ pub struct AppState {
     pub ingest_gate: Arc<Semaphore>,
     /// Lifetime of an issued session token.
     pub session_ttl_days: i64,
+    /// Hours of inactivity after which a dashboard session expires (FR-033).
+    pub session_idle_hours: i64,
     /// Defaults applied when a project is created through the API.
     pub retention_days: u32,
     pub confidence_threshold: f64,

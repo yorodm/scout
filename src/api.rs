@@ -128,9 +128,9 @@ pub(crate) async fn auth_user(
 ) -> Result<(Uuid, String), ApiError> {
     let token =
         bearer(req).ok_or_else(|| ApiError::Unauthorized("missing session token".into()))?;
-    let store = state.store.read().await;
+    let mut store = state.store.write().await;
     let user_id = store
-        .user_for_token(&token)
+        .user_for_token(&token, state.session_idle_hours)
         .ok_or_else(|| ApiError::Unauthorized("invalid or expired session".into()))?;
     let email = store
         .users
@@ -767,7 +767,8 @@ pub async fn accept_invitation(
 
     let email = invitation.email.to_ascii_lowercase();
     let existing = store.user_by_email(&email).map(|user| user.id);
-    let session_user = bearer(&req).and_then(|token| store.user_for_token(&token));
+    let session_user =
+        bearer(&req).and_then(|token| store.user_for_token(&token, state.session_idle_hours));
 
     let (user_id, issued_token, recovery_codes) = match existing {
         Some(existing_id) => {

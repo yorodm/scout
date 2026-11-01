@@ -200,6 +200,8 @@ pub struct User {
 pub struct Session {
     pub user_id: Uuid,
     pub expires_at: DateTime<Utc>,
+    /// Last authenticated request that carried this session (FR-033).
+    pub last_seen_at: DateTime<Utc>,
 }
 
 /// A long-lived API token for the Sentry-compatible surface. Only the SHA-256 of

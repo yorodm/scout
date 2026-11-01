@@ -30,6 +30,9 @@ pub struct Config {
     pub retention_days: u32,
     pub confidence_threshold: f64,
     pub session_ttl_days: i64,
+    /// Hours of inactivity after which a dashboard session expires (FR-033).
+    /// Zero disables the idle limit, leaving only the absolute lifetime.
+    pub session_idle_hours: i64,
     pub operator_email: Option<String>,
     pub operator_password: Option<String>,
     pub database_url: Option<String>,
@@ -63,6 +66,7 @@ impl Config {
             confidence_threshold: env_parse::<f64>("SCOUT_CONFIDENCE_THRESHOLD", 0.5)
                 .clamp(0.0, 1.0),
             session_ttl_days: env_parse("SCOUT_SESSION_TTL_DAYS", 7),
+            session_idle_hours: env_parse("SCOUT_SESSION_IDLE_HOURS", 12).max(0),
             operator_email: non_empty("SCOUT_OPERATOR_EMAIL"),
             operator_password: non_empty("SCOUT_OPERATOR_PASSWORD"),
             database_url: non_empty("DATABASE_URL"),
@@ -163,6 +167,7 @@ mod tests {
             retention_days: 30,
             confidence_threshold: 0.5,
             session_ttl_days: 7,
+            session_idle_hours: 12,
             operator_email: Some("ops@example.com".into()),
             operator_password: Some("secret".into()),
             database_url: database_url.map(str::to_string),
