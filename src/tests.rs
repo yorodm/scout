@@ -4544,3 +4544,55 @@ async fn search_caps_at_two_hundred_newest_matches_and_reports_more() {
     assert_eq!(body["issues"].as_array().unwrap().len(), 0);
     assert_eq!(body["logs"].as_array().unwrap().len(), 0);
 }
+
+// --- disabling and removal end access immediately (FR-014, SC-020) ---------
+
+#[actix_web::test]
+async fn a_disabled_or_removed_account_loses_its_existing_session() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().expect("session").to_string();
+    let user_id: Uuid = auth["user"]["id"]
+        .as_str()
+        .expect("user id")
+        .parse()
+        .expect("uuid");
+
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Disabling the account rejects the very next request.
+    {
+        let mut store = state.store.write().await;
+        let user = store.users.get_mut(&user_id).expect("account");
+        user.disabled_at = Some(chrono::Utc::now());
+    }
+    let (status, body) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a disabled account must lose its session: {body}"
+    );
+
+    // Re-enabling restores it, and removing the account rejects it again.
+    {
+        let mut store = state.store.write().await;
+        let user = store.users.get_mut(&user_id).expect("account");
+        user.disabled_at = None;
+    }
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    {
+        let mut store = state.store.write().await;
+        store.users.remove(&user_id);
+        store.users_by_email.remove("demo@scout.local");
+    }
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "a removed account must lose its session"
+    );
+}

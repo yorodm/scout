@@ -132,11 +132,15 @@ pub(crate) async fn auth_user(
     let user_id = store
         .user_for_token(&token, state.session_idle_hours)
         .ok_or_else(|| ApiError::Unauthorized("invalid or expired session".into()))?;
-    let email = store
-        .users
-        .get(&user_id)
-        .map(|u| u.email.clone())
-        .unwrap_or_default();
+    // FR-014: disabling or removing an account ends its sessions and tokens on
+    // the next request, not at the next expiry.
+    let Some(user) = store.users.get(&user_id) else {
+        return Err(ApiError::Unauthorized("invalid or expired session".into()));
+    };
+    if user.disabled_at.is_some() {
+        return Err(ApiError::Unauthorized("this account is disabled".into()));
+    }
+    let email = user.email.clone();
     Ok((user_id, email))
 }
 
