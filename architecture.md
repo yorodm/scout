@@ -23,7 +23,7 @@ on the ingest path waits for a classifier.
 ```mermaid
 flowchart LR
   SDK[Sentry SDK / log shipper] -->|envelope, project key| Ingest[Ingest API<br/>Actix]
-  Ingest -->|immutable blob| S3[(Object store<br/>S3 / MinIO)]
+  Ingest -->|immutable blob| S3[(Object store<br/>S3-compatible, Garage default)]
   Ingest -->|event row + job, same txn| PG[(Postgres)]
   Worker[Worker<br/>in-process] -->|claim job| PG
   Worker -->|fingerprint, upsert issue| PG
@@ -43,9 +43,13 @@ It does not group, and it never calls the decision model. A rejection (bad key, 
 the only failure that loses input, and it is reported to the SDK.
 
 **Object store adapter** — the only writer of raw payloads. Keys are
-`projects/{project_id}/events/{event_id}`; writes are append-only, and no component rewrites or deletes a
-stored payload except per-project retention. Raw payloads live here in full; Postgres holds only what
-the UI queries.
+`raw/{project_id}/{event_id}` for an event's bytes and
+`attachments/{project_id}/{event_id}/{index}` for its attachments; writes are append-only, and no
+component rewrites or deletes a stored payload except per-project retention. Raw payloads live here in
+full; Postgres holds only what the UI queries. The adapter addresses any S3-compatible store through
+endpoint, bucket, region, and credentials; Garage is the shipped default, and MinIO or another
+provider is configuration rather than code. A dedicated `scout migrate-objects` mode of the same
+binary copies objects between two stores without starting the server, ingest, workers, or retention.
 
 **Grouping worker** — claims queued jobs, computes the fingerprint, upserts the issue, links the event,
 and moves issue counters. Deterministic: the same stored events always produce the same grouping.
@@ -100,8 +104,11 @@ Ingest keys are per project and cannot read.
 
 ## Deployment
 
-`scout` (API + UI + worker) · `postgres` · `s3`/`minio`, from a single compose file. Migrations run on
-startup against an advisory lock, so several replicas can start at once.
+`scout` (API + UI + worker) · `postgres` · `garage`, from a single compose file. Garage is the default
+S3-compatible object store; its cluster layout, bucket, and access key are documented one-time
+operator steps, not automated by compose. Any other S3-compatible provider (MinIO included) works by
+setting the usual endpoint, bucket, region, and credentials. Migrations run on startup against an
+advisory lock, so several replicas can start at once.
 
 ## Sentry compatibility
 

@@ -123,15 +123,17 @@ mod tests {
         assert!(error.contains("SCOUT_S3_BUCKET"));
 
         assert!(
-            config(Some("postgres://x"), Some("http://minio:9000"), None)
+            config(Some("postgres://x"), Some("http://objects:3900"), None)
                 .validate_storage()
                 .is_err()
         );
-        assert!(
-            config(Some("postgres://x"), Some("http://minio:9000"), Some("raw"))
-                .validate_storage()
-                .is_ok()
-        );
+        assert!(config(
+            Some("postgres://x"),
+            Some("http://objects:3900"),
+            Some("raw")
+        )
+        .validate_storage()
+        .is_ok());
         // The in-memory/demo shape needs no object store.
         assert!(config(None, None, None).validate_storage().is_ok());
     }

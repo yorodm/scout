@@ -72,13 +72,14 @@ no longer available. The Garage bucket no longer holds that key.
 
 ## 5. Misconfiguration fails fast
 
-Repeat startup with each of these and confirm the message names the setting:
+Repeat startup with each of these and confirm the process exits before binding `:8080`, within 30
+seconds, prints no secret, and accepts no telemetry. Every message names the endpoint and bucket.
 
-- `SCOUT_S3_BUCKET=missing-bucket`
-- `AWS_SECRET_ACCESS_KEY=wrong`
-- `SCOUT_S3_ENDPOINT=http://127.0.0.1:3999`
-
-Expected: failure within 30 seconds, and no telemetry accepted.
+| Misconfiguration | Expected message shape |
+| --- | --- |
+| `SCOUT_S3_BUCKET=missing-bucket` | `object storage startup check failed: object storage write check failed for bucket missing-bucket at http://127.0.0.1:3900: … Create the bucket and grant the access key read, write, and delete permission.` |
+| `AWS_SECRET_ACCESS_KEY=wrong` | Same prefix, ending `The object store rejected the credentials; check the access key and secret.` |
+| `SCOUT_S3_ENDPOINT=http://127.0.0.1:3999` | Same prefix, ending `Check that the endpoint is reachable, that the object store is running, and that the bucket exists.` |
 
 ## 6. Migration between two buckets (the MinIO rehearsal)
 
@@ -126,11 +127,19 @@ cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 cargo clippy --target wasm32-unknown-unknown --manifest-path ui/Cargo.toml -- -D warnings
-trunk build --release --manifest-path ui/Trunk.toml
+(cd ui && trunk build --release)
 ```
 
 The migration suite runs against two in-memory object stores and covers copy-all, skip-on-rerun,
-overwrite-differing, unreadable-source failure, counts, and key preservation.
+overwrite-differing, unreadable-source failure, counts, and key preservation. Two additional tests
+cover this feature's failure paths without Docker:
+
+- `cargo test probe_failure_names_endpoint` — an unreachable endpoint fails the startup probe within
+  30 seconds, naming the endpoint and bucket and never the secret.
+- `cargo test unreachable_object_store` — ingest returns `503`, stores nothing, and `/api/health`
+  reports `degraded` while the object store is unreachable.
+- `cargo test objects` and `cargo test migrate` cover the settings, list/head/overwrite helpers, and
+  the copy/verify outcomes end to end.
 
 ## 8. Regression against another S3-compatible provider
 
@@ -142,4 +151,6 @@ documentation change, not a Garage-only dependency.
 
 Steps 1–6 require Docker and a running Garage. The workspace used to build this feature has no Docker,
 so those steps are a completion gate rather than an automated check; the in-memory suite and code
-review cover the logic.
+review cover the logic. When the gate is run, also run `docker compose config` and confirm it reports
+no warnings, and record the measured clean-host elapsed time for steps 1–2 (not measured here because
+the workspace has no Docker CLI).

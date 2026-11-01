@@ -65,7 +65,7 @@ async fn state_for_with(
     max_in_flight: usize,
     compat_enabled: bool,
 ) -> web::Data<AppState> {
-    let objects = Arc::new(crate::objects::Objects::memory());
+    let objects = crate::objects::Objects::memory();
     let (seeded, raws) = crate::store::seed(self_url);
     for (key, data) in raws {
         objects
@@ -73,6 +73,18 @@ async fn state_for_with(
             .await
             .expect("seed raw payload");
     }
+    state_with_objects(self_url, max_in_flight, compat_enabled, objects, seeded).await
+}
+
+/// Build state around a caller-provided object store so the storage-failure path
+/// can be exercised against an unreachable endpoint, not just the metadata flag.
+async fn state_with_objects(
+    self_url: &str,
+    max_in_flight: usize,
+    compat_enabled: bool,
+    objects: crate::objects::Objects,
+    seeded: crate::store::Store,
+) -> web::Data<AppState> {
     let store = Arc::new(RwLock::new(seeded));
     let (jobs, rx) = mpsc::unbounded_channel::<Job>();
     let http = reqwest::Client::builder()
@@ -88,7 +100,7 @@ async fn state_for_with(
         session_ttl_days: 7,
         retention_days: 30,
         confidence_threshold: 0.5,
-        objects,
+        objects: Arc::new(objects),
         storage_ready: Arc::new(AtomicBool::new(true)),
         compat_enabled,
     })
@@ -1238,6 +1250,51 @@ async fn unavailable_storage_returns_503_and_acknowledges_nothing() {
     )
     .await;
     assert_eq!(health, StatusCode::OK);
+}
+
+#[actix_web::test]
+async fn unreachable_object_store_returns_503_and_acknowledges_nothing() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let port = listener.local_addr().expect("loopback address").port();
+    drop(listener);
+    let objects = crate::objects::S3Settings::new(
+        format!("http://127.0.0.1:{port}"),
+        "scout-raw".into(),
+        "garage".into(),
+        "probe-key".into(),
+        "probe-secret".into(),
+    )
+    .expect("settings")
+    .build()
+    .expect("build store");
+
+    let (seeded, _) = crate::store::seed("http://127.0.0.1:1");
+    let state = state_with_objects("http://127.0.0.1:1", 256, true, objects, seeded).await;
+    let app = init_app_with_state(state.clone()).await;
+    let before = state.store.read().await.events.len();
+
+    let req = ingest_request(
+        "2",
+        "scout_platform_key",
+        "application/x-sentry-envelope",
+        envelope(&[event(&hex_id(92), "garage unreachable", &["garage-group"])]),
+        "envelope",
+    );
+    let (status, body) = call_json(&app, req).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "body: {body}");
+    assert_eq!(
+        state.store.read().await.events.len(),
+        before,
+        "an unstored event must not be acknowledged"
+    );
+
+    let (health, health_body) = call_json(
+        &app,
+        test::TestRequest::get().uri("/api/health").to_request(),
+    )
+    .await;
+    assert_eq!(health, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(health_body["status"], "degraded");
 }
 
 #[actix_web::test]

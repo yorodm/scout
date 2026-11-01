@@ -7,10 +7,10 @@
 | Aspect | Contract |
 |---|---|
 | Service name | `garage` in `docker-compose.yml` (replaces `minio` and `minio-init`). |
-| Image | A pinned `dxflrs/garage` tag; the exact tag is recorded in the compose file and the README. |
-| Ports | `3900:3900` (S3 API); `3903:3903` (admin API, local only). |
+| Image | Pinned to `dxflrs/garage:v2.5.0` (published multi-arch image; verified on Docker Hub). The tag is recorded in the compose file and the README. |
+| Ports | `3900:3900` (S3 API); `127.0.0.1:3903:3903` (admin API, local only). |
 | Configuration | `deploy/garage.toml` mounted read-only at `/etc/garage.toml`. |
-| Data | Named volume mounted at Garage's `data_dir` (for example `garage-data:/var/lib/garage/data`). |
+| Data | Named volume `garage-data:/var/lib/garage`, persisting both `metadata_dir` and `data_dir`. |
 | Healthcheck | Runs Garage's own status command (`/garage status`); the `scout` service waits for it. |
 | Scout dependency | `scout` depends on `postgres` (healthy) and `garage` (healthy). |
 | Provisioning | The compose file does **not** create layout, buckets, or keys. The README documents those steps. |
