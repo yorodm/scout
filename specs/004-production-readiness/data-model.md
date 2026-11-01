@@ -13,7 +13,7 @@ currently disagree.
 | `OrgRole`, `Role` | `org_members.role`, `project_members.role` | Enum ⇄ `text` with checked values |
 | `Project` (+`ModelConfig`) | `projects` | `model.endpoint` → `model_endpoint`, `model.model` → `model_name`, `model.api_key` → `model_api_key_ref` (replayable secret: never serialized, never logged, never returned; at-rest exposure recorded in the plan's Complexity Tracking), `model.confidence_threshold` → `confidence_threshold` |
 | `IngestKey` | `ingest_keys` | `revoked` ⇄ `revoked_at IS NOT NULL`; `last_used_at` written on successful ingest-key lookup |
-| `User` | `users` | `is_operator` unique partial index already enforces one operator |
+| `User` | `users` | `is_operator` unique partial index already enforces one operator; `locked_at` and `failed_sign_in_count` (added in `0008`) hold the lockout state |
 | `Session` | `sessions` | Keyed by `token_hash`; `sweep_sessions` becomes `DELETE … WHERE expires_at <= now()` |
 | `Invitation` | `invitations` | `token_hash` unique; `expires_at` defaults to `issued_at + 7 days` (FR-013); `is_pending()` = not accepted, not revoked, not expired; expired is reported as `410`, unknown as `404` |
 | `RecoveryCode` | `recovery_codes` | `issue_recovery_codes` revokes unused rows in the same transaction |
@@ -32,6 +32,12 @@ Additive and `IF NOT EXISTS`-idempotent, applied by the startup migration engine
 ```sql
 -- Demo confinement (FR-011, SC-014)
 ALTER TABLE organisations ADD COLUMN IF NOT EXISTS is_demo boolean NOT NULL DEFAULT false;
+
+-- Account lockout (FR-012, FR-032, SC-023): five consecutive failures lock the
+-- account regardless of elapsed time, so only a counter and the lock are stored.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_at timestamptz;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS failed_sign_in_count integer NOT NULL DEFAULT 0
+    CHECK (failed_sign_in_count >= 0);
 
 -- Actor labels so the API can show the human who acted without a join that may
 -- fail after a user is removed.
@@ -136,6 +142,14 @@ Flow rows are never exposed through the API. A callback with an unknown, expired
   history, and never rewrites a stored payload.
 - Soft-deleted projects keep every row and object.
 - `deleted_at IS NULL` is required for a project to resolve from a DSN or an API request.
+- Every project has at least one owner from the moment it is created; the operator names that owner,
+  who must already belong to the owning organisation (FR-034, SC-026).
+- `users.locked_at IS NOT NULL` means every sign-in attempt returns the generic invalid-credentials
+  response, regardless of the password, until the deployment operator clears it. The count is
+  consecutive and resets on any successful sign-in and on unlock; no window is stored. A lock never ends
+  an existing session; disabling an account does (FR-032, SC-023).
+- A dashboard session ends at seven days after issue or after 12 hours without activity; compatibility
+  API tokens follow their own revocation rules and ignore session limits (FR-033, SC-024).
 - The audit trail is stored durably and completely, and this feature exposes no route or screen for
   reading it (FR-007); completeness is verified by tests and direct queries.
 - Operational counters are process-local and readable only by the deployment operator (FR-025); they

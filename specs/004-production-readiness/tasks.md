@@ -379,3 +379,33 @@ original numbering and completion state.
 - [ ] T103 [US2] Reject requests from disabled accounts and removed members on their next request, including sessions and API tokens, in `src/api.rs` and `src/compat/auth.rs`; cover both paths in `src/tests.rs` (FR-014, SC-020)
 
 **Checkpoint**: every clarification in the spec is traceable to an executable task.
+
+---
+
+## Phase 11: Access and Session Hardening (analysis C1–C5)
+
+**Purpose**: Close the coverage gaps found by `/speckit-analyze` after the fourth clarification session.
+No completed task is rewritten; T112 supersedes the project-creation step inside the already-completed
+T082 script.
+
+| Requirement | Criterion | Task |
+|---|---|---|
+| Password minimum on every setting path | FR-011, SC-022 | T104 |
+| Lockout state, generic rejection, operator unlock | FR-032, SC-023 | T105–T107 |
+| Session absolute and idle expiry | FR-033, SC-024 | T108 |
+| Operator-only project creation with a named owner | FR-034, SC-026 | T109 |
+| Operator must not receive ingest keys | FR-012 | T110 |
+| 200-result search cap with `has_more` | FR-021, SC-025 | T111 |
+| Smoke script follows the new creation contract | FR-023, FR-034 | T112 |
+
+- [ ] T104 [US2] Enforce the 12-character minimum with no composition rules on every password-setting path (initial-admin setup, invitation acceptance, recovery, operator password change) in `src/auth.rs` and `src/api.rs`, returning a message that names the minimum; cover all four paths in `src/tests.rs` (FR-011, SC-022)
+- [ ] T105 [US2] Add the lockout state to both adapters in `src/store/memory.rs` and `src/store/postgres.rs` using `users.locked_at` and `users.failed_sign_in_count` (`CHECK >= 0`), with no window column: five **consecutive** failures lock the account regardless of elapsed time, and the count resets on a successful sign-in or an unlock (FR-032, SC-023)
+- [ ] T106 [US2] Return the generic invalid-credentials response for a locked account in `src/api.rs`, even when the password is correct, and leave existing sessions untouched; prove no response reveals existence or lock state in `src/tests.rs` (FR-032, SC-023)
+- [ ] T107 [US2] Add the operator account routes in `src/api.rs` — `GET /api/operator/users?locked=true` and `POST /api/operator/users/{user_id}/unlock` — auditing `user.unlocked` through `src/audit.rs`, and the locked-account list with an unlock action in `ui/src/components/other.rs` (FR-012, FR-032, SC-023)
+- [ ] T108 [US2] Expire dashboard sessions after seven days absolute and 12 hours without activity, where activity is any authenticated request carrying the session, with `SCOUT_SESSION_TTL_DAYS` and a new `SCOUT_SESSION_IDLE_HOURS` in `src/config.rs`; update `last_seen` in `src/store/*` and enforce in `src/api.rs`, leaving compatibility API tokens unaffected; cover both limits in `src/tests.rs` (FR-033, SC-024)
+- [ ] T109 [US2] Restrict `POST /api/orgs/{org_id}/projects` in `src/api.rs` to the deployment operator and require `initial_owner_email`, validating that the account already belongs to the organisation, assigning it the `owner` role, and returning `403` for non-operators and `400` for a non-member owner; cover all three cases in `src/tests.rs` (FR-034, SC-026)
+- [ ] T110 [US2] Stop returning an ingest key **and the DSN that embeds it** from project creation in `src/api.rs`, so the operator never receives a credential; the named owner creates the first key through the existing key endpoint, and `src/tests.rs` asserts the creation response contains project metadata only, with no `key` and no `dsn` (FR-012, SC-026)
+- [ ] T111 [US4] Cap unified search at the 200 newest combined matches with `has_more: true` when truncated in `src/api.rs`, and state the truncation in `ui/src/components/other.rs`; cover ordering, cap, and flag in `src/tests.rs` (FR-021, SC-025)
+- [ ] T112 [US5] Update `scripts/compose-smoke.sh` so project creation is performed by the operator with `initial_owner_email`, the named owner then creates the ingest key and copies its DSN, and the recorded evidence reflects the new contract; re-run it on the clean host, write the new evidence file, and mark the pre-change evidence as superseded in `specs/004-production-readiness/evidence/README.md` (FR-023, FR-034, analysis C3)
+
+**Checkpoint**: every requirement and success criterion introduced by the fourth clarification session has at least one executable task.

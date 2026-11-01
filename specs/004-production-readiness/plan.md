@@ -40,6 +40,14 @@ procedures with no shipped tooling (FR-027, SC-019); disabling an account or rem
 invalidates its sessions and tokens on the next request (FR-014, SC-020); and startup migrations run
 before the service reports ready (FR-003, SC-021).
 
+The fourth session hardens access and query semantics: passwords are at least 12 characters with no
+composition rules (FR-011, SC-022); five consecutive failed sign-ins lock an account until the operator
+unlocks it, with generic rejections throughout (FR-012, FR-032, SC-023); sessions expire after a
+seven-day maximum and 12 hours idle (FR-033, SC-024); unified search returns at most 200 newest
+matches with a `has_more` indicator (FR-021, SC-025); and only the operator creates projects, naming an
+existing organisation member as the initial owner and receiving **no** ingest key or DSN in the
+response (FR-012, FR-034, SC-026).
+
 ## Technical Context
 
 **Language/Version**: Rust 2021 edition on a stable toolchain; UI in Sycamore 0.9 compiled by Trunk
@@ -77,7 +85,12 @@ search cluster, or IdP; Sentry compatibility stays opt-in and adds no endpoints;
 request with no application-level cache; a store failure returns a retryable response immediately with
 no internal retry or buffering; invitations and initial-admin tokens expire seven days after issue;
 operational counters are operator-only; the audit trail has no read surface; retention follows the
-server receipt time.
+server receipt time; passwords require at least 12 characters with no composition rules; five
+consecutive failed sign-ins lock an account until an operator unlocks it, and locked accounts always
+return the generic invalid-credentials response; sessions expire after seven days or 12 idle hours,
+where activity is any authenticated request carrying the session; unified search caps at 200 newest
+matches; and only the deployment operator creates projects, naming an existing organisation member as
+the initial owner.
 
 **Scale/Scope**: a few dozen organisations, 1,000 issues per project, 1,000 tag values per key,
 millions of events and log lines per project under retention, and three instances starting and serving
@@ -91,10 +104,10 @@ against one metadata store.
 |---|---|---|
 | I. Ingest never depends on classification (NON-NEGOTIABLE) | PASS | Classification stays a durable `classify_event` job claimed after ingest commits. Ingest still writes the raw object, commits the event row, enqueues, and acknowledges; the classifier call is bounded with one retry and no result on failure. No classifier work enters the request path. A metadata-store failure returns the retryable response immediately, with no in-process retry or buffer (FR-009). |
 | II. Raw payloads immutable and authoritative | PASS | Object keys and byte layout do not change. PostgreSQL stores only the raw reference, size, attachment metadata, and expiry marker; retention clears the reference and deletes the object, never the event row or triage history. No endpoint writes payload bytes. |
-| III. Project-scoped, server-side authorisation | PASS | Every project route resolves one project and one live role from the store per request (no cached snapshot). Scopes are checked server-side in `src/api.rs` and `src/compat/`. The deployment operator's authority is explicitly limited to deployment-level routes and is denied project data (FR-012, SC-015). Inaccessible resources return `404`/`403` without leaking existence. Because no instance caches metadata, a role change or key revocation is honoured by every instance on its next request (FR-031, SC-016). Operational counters are operator-only (FR-025), and the audit trail has no read endpoint (FR-007). |
+| III. Project-scoped, server-side authorisation | PASS | Every project route resolves one project and one live role from the store per request (no cached snapshot). Scopes are checked server-side in `src/api.rs` and `src/compat/`. The deployment operator's authority is explicitly limited to deployment-level routes and is denied project data (FR-012, SC-015); project creation is such a deployment-level action and must name an existing organisation member as initial owner (FR-034, SC-026). Inaccessible resources return `404`/`403` without leaking existence. Because no instance caches metadata, a role change or key revocation is honoured by every instance on its next request (FR-031, SC-016). Operational counters and account unlocking are operator-only (FR-025, FR-032), and the audit trail has no read endpoint (FR-007). |
 | IV. One deployment unit, minimal moving parts | PASS | No new service: PostgreSQL and Garage are already in `docker-compose.yml`. OIDC is optional and cannot block local sign-in or the core loop. The UI stays Sycamore/Trunk with no Node. |
 | V. Evidence over assumption: test the real paths | PASS | Existing in-crate integration tests keep driving the real Actix app. New behaviour adds the same style of tests against the memory store, plus PostgreSQL-backed tests run through the same repository interface when a test database is available. Startup migrations are exercised by compose smoke (apply-before-ready and restart), while upgrade sequencing stays with the operator. |
-| Security and Privacy constraints | PASS | Passwords, sessions, invitations, recovery codes, ingest keys, and API tokens remain SHA-256/Argon2id hashed and shown once. OIDC client secrets must be replayed to the provider, so they are stored in a column excluded from every response and log, with the exception recorded in Complexity Tracking; verified-email matching never creates accounts. Classifier API keys are replayable in the same way and are stored in `projects.model_api_key_ref`, excluded from serialization and logged output, with the at-rest exposure recorded in Complexity Tracking. |
+| Security and Privacy constraints | PASS | Passwords, sessions, invitations, recovery codes, ingest keys, and API tokens remain SHA-256/Argon2id hashed and shown once. Every password-setting path enforces the 12-character minimum (FR-011, SC-022), five consecutive failed sign-ins lock the account with generic responses and operator-only unlocking (FR-032, SC-023), and sessions expire on a seven-day absolute limit or 12 hours of inactivity (FR-033, SC-024). OIDC client secrets must be replayed to the provider, so they are stored in a column excluded from every response and log, with the exception recorded in Complexity Tracking; verified-email matching never creates accounts. Classifier API keys are replayable in the same way and are stored in `projects.model_api_key_ref`, excluded from serialization and logged output, with the at-rest exposure recorded in Complexity Tracking. |
 | Performance and Reliability constraints | PASS | Ingest keeps its 10 MB limits, `413`/`429`/`503` semantics, and acknowledgement-after-commit ordering. Operational counters are atomics on the hot path, not extra round trips. Health probes the database with a bounded timeout. |
 | Compatibility and Scope constraints (v1.1.0) | PASS | The Sentry surface keeps its 11 documented paths and its opt-in gate. Migration `0007` keeps slug and per-project issue-number uniqueness; nothing under `/api/0/` gains a new endpoint. |
 | Development Workflow & Quality Gates | PASS | Work is sliced so each slice passes `cargo fmt --all`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, UI `cargo check --target wasm32-unknown-unknown`, and `trunk build --release`. |
@@ -139,7 +152,8 @@ src/
 ├── state.rs (modify)         # AppState holds Store; storage readiness from the store
 ├── main.rs (modify)          # connect → schema → bootstrap → object check → serve
 ├── auth.rs (modify)          # repository-based bootstrap, accounts, recovery codes
-├── api.rs (modify)           # all handlers through the store API; + admin/OIDC/metrics routes
+├── api.rs (modify)           # all handlers through the store API; + admin/OIDC/metrics routes,
+│                             #   operator account list/unlock, lockout checks, project creation
 ├── ingest.rs (modify)        # transaction: raw object → event row → job → acknowledge
 ├── worker.rs (modify)        # durable job claim (SKIP LOCKED), SQL grouping + suggestion write
 ├── audit.rs (modify)         # async durable audit writes
@@ -195,6 +209,7 @@ Decisions recorded in [research.md](./research.md):
 | R11 | UI completion approach | Extend existing Sycamore components; no router or new crate; shared loading/empty/error primitives |
 | R12 | Release evidence | Two committed scripts plus dated result files under `specs/004-production-readiness/evidence/` |
 | R13 | Multi-instance reads, outage behaviour, token lifetime, counters, and audit surface | Per-request reads from the shared store (no application-level cache); store failures fail fast with no internal retry; invitations and setup tokens expire in seven days and report expiry distinctly; counters are operator-only; the audit trail has no read surface |
+| R14 | Access and session hardening | 12-character minimum passwords with no composition rules; five consecutive failures lock an account until the operator unlocks it, with no time window; seven-day absolute and 12-hour idle session limits; 200-result search cap with `has_more`; operator-only project creation with a named initial owner and no credential in the response |
 
 ## Phase 1: Design & Contracts
 
@@ -230,6 +245,10 @@ Re-evaluated after `research.md`, `data-model.md`, `contracts/`, and `quickstart
   only replayable secrets, both excluded from serialization, responses, and logs, and both recorded in
   Complexity Tracking. **PASS**
 - **Migrations**: `0008` is additive and `IF NOT EXISTS`-idempotent; startup applies pending migrations before serving and never reverts applied ones. **PASS**
+- **Access hardening**: The lock state, failure counter, session limits, and initial-owner requirement are
+  all store-level data with server-side checks; none depends on the UI. Generic responses keep the lock
+  from becoming an account-enumeration oracle. Project creation returns project metadata only, so the
+  deployment-level account never receives an ingest credential. **PASS**
 
 **Post-design result: PASS.** No new violations.
 

@@ -68,13 +68,19 @@ Start a timer, then:
 1. Open `http://127.0.0.1:8080` and sign in with the operator credentials.
 2. Create an organisation named `Acme` with initial admin `admin@acme.test`.
 3. Copy the one-time initial-admin setup token.
+4. Create a project named `web`, slug `web`, with `initial_owner_email=admin@acme.test`. Confirm the
+   response contains project metadata only — no ingest key and no DSN — and that an account which is not
+   the operator cannot create a project.
+5. Sign in as `admin@acme.test` and create the project's first ingest key there; copy the key and its
+   full DSN. That session, not the operator's, is where the credential is shown.
 
 Expected: under 5 minutes to this point, no `psql` or manual SQL. The token is shown once; reopening the
 organisation list does not reveal it.
 
 ## 4. Initial admin, invitations, roles (US2/AC2–5, SC-006)
 
-1. Open the setup link in a private window, set a password, and record the recovery codes shown once.
+1. Open the setup link in a private window, set a password of at least 12 characters, and record the
+   recovery codes shown once.
 2. As the new admin, invite `triager@acme.test` with role `triager` and copy the invite link.
 3. Accept it in another private window; confirm the account lands on the project with `triager` access.
 4. Change that member's role to `viewer`; the same session loses triage actions within one minute.
@@ -103,7 +109,8 @@ initial-admin issuance, invitation creation/acceptance, and role change.
    model endpoint is configured) are visible.
 3. Confirm or override the suggestion; the decision becomes authoritative and the suggestion stays
    visible.
-4. Search for a term present in both an issue title and a log message; both appear in one result set.
+4. Search for a term present in both an issue title and a log message; both appear in one result set,
+   newest first, and the view says so when only the newest 200 matches are shown (`has_more`).
 5. Apply each filter (state, level, category, text, sort) and confirm ordering and empty states.
 6. Stop Scout (`docker compose stop scout`) and load a view: the UI shows a retryable error, not a blank
    page.
@@ -218,6 +225,8 @@ and organisation slug and per-project issue-number uniqueness hold.
 | `docker compose stop garage` | `/api/health` → `503`, `"object_store":"unavailable"`; ingest returns retryable `503` |
 | Start Scout with `SCOUT_STORE=memory` | Startup logs a durability warning and `/api/health` reports `"durability":"ephemeral"` |
 | A startup migration fails | Startup aborts with an actionable message and binds no port |
+| Five consecutive failed sign-ins for one account | Every later attempt, including the correct password, returns the generic invalid-credentials message; the operator unlocks the account from the console and sign-in then succeeds |
+| A session idles past the configured window, or ages past the absolute maximum | The next request returns `401` and the UI returns to sign-in; a compatibility API token from the same account keeps working |
 
 ## Evidence checklist
 

@@ -10,8 +10,8 @@ their current behaviour. Every screen must render loading, empty, and actionable
 | Caller | Sees |
 |---|---|
 | Unauthenticated | Real sign-in, recovery, invitation acceptance. Demo shortcuts only when demo mode is enabled **and** `GET /api/demo/accounts` succeeds |
-| Deployment operator | Operator console: organisations list, organisation creation with the one-time setup token |
-| Organisation admin | Members/invitations for their organisation, OIDC configuration, project creation |
+| Deployment operator | Operator console: organisations list, organisation creation with the one-time setup token, project creation with a named initial owner, locked-account list and unlock, own password change and one-time recovery codes |
+| Organisation admin | Members/invitations for their organisation, OIDC configuration, keys and settings for projects they own |
 | Project owner | Keys, settings (model, threshold, retention), soft delete |
 | Project admin/triager/viewer | Issues, logs, unified search; triage controls for triager and above |
 
@@ -23,6 +23,10 @@ organisation data.
 ### 1. Sign-in (`components/overlays.rs`)
 
 - Real email/password form → `POST /api/login`; stores the Bearer session as today.
+- Password fields enforce the 12-character minimum before submitting, using the same message the API
+  returns.
+- A locked account must look exactly like a wrong password: the UI shows the API's generic
+  invalid-credentials message and never says "locked" or "contact the operator".
 - Links to recovery and to invitation acceptance via the token in the URL.
 - Demo shortcuts button visible only when the demo-accounts call succeeds; hidden when demo mode is off.
 - Errors: `401` invalid credentials, `429` saturation with `Retry-After`, store-unavailable `503`
@@ -47,6 +51,13 @@ organisation data.
 - Create organisation form (`name`, `initial_admin_email`) → `POST /api/orgs`, then the
   `initial_admin_setup_token` is shown once in a copyable block with a warning that it is not
   retrievable.
+- Create project form (`name`, `slug`, `initial_owner_email`) → `POST /api/orgs/{org_id}/projects`,
+  where the owner must already be a member. The response contains no ingest credential, and the owner
+  creates the first key inside their own session.
+- Locked accounts: `GET /api/operator/users?locked=true` with an unlock action calling
+  `POST /api/operator/users/{user_id}/unlock`; the list updates in place.
+- Own account: change password (same 12-character minimum) and, on first sign-in only, the one-time
+  recovery codes block that must be acknowledged.
 - Never shows issues, events, logs, keys, or other tenant data.
 
 ### 5. Members (`components/other.rs`)
@@ -60,7 +71,8 @@ organisation data.
 ### 6. Keys (`components/other.rs`)
 
 - `GET/POST /api/projects/{id}/keys`, `DELETE …/keys/{key_id}`, `POST …/keys/rotate`.
-- New and rotated keys are shown once with a copy action; afterwards only the prefix is listed.
+- New and rotated keys are shown once with a copy action alongside the full DSN; afterwards only the
+  prefix is listed. This is the only screen that reveals a key or DSN.
 - Revoking a key updates the list without a reload.
 
 ### 7. Settings (`components/other.rs`)
@@ -90,7 +102,8 @@ organisation data.
 
 - Logs: `GET /api/projects/{id}/logs` with level and text filters.
 - Search: `GET /api/projects/{id}/search` renders issues and logs in one ordered result set, with the
-  documented filter and result cap.
+  documented filter and result cap; when `has_more` is true the view states that only the newest 200
+  matches are shown.
 - Empty state distinguishes "no data yet" from "no matches for this filter".
 
 ### 11. API tokens (`components/tokens.rs`)

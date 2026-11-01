@@ -42,6 +42,16 @@
 - Q: When an account is disabled or a member is removed, what should happen to sessions and API tokens it already holds? → A: Every existing session and API token stops working on that account's next request.
 - Q: During an upgrade with several instances running, may an older instance keep serving while a newer one applies schema changes? → A: The product keeps its migration files and runs the migration engine at startup when pending migrations exist; the process around upgrades (planning, sequencing, rollback) is the operator's responsibility, and no concurrency or rollback guarantees are specified here.
 
+### Session 2026-11-01 (security posture)
+
+- Q: What minimum requirements should a password meet when someone sets or changes it? → A: At least 12 characters, no composition rules, rejected with an actionable message.
+- Q: How should Scout respond to repeated failed sign-in attempts against the same account? → A: Five consecutive failures lock the account regardless of elapsed time; it stays locked until the deployment operator unlocks it, while every rejection stays generic. Client-IP protection is left to the operator's reverse proxy.
+- Q: How long should a dashboard session stay valid before the person must sign in again? → A: Seven-day absolute maximum plus a 12-hour idle timeout, both configurable.
+- Q: What should count as activity that keeps a dashboard session alive? → A: Any authenticated request carrying the session; compatibility API tokens do not extend a session.
+- Q: How many results should a unified issues-and-logs search return when far more match? → A: At most 200 combined results, newest first, with a `has_more` indicator and no pagination.
+- Q: Who is allowed to create a new project inside an organisation? → A: Only the deployment operator creates projects and designates an existing organisation member as the project's initial owner; administrators manage the project afterwards.
+- Q: When the operator creates a project, should the response include that project's ingest key and DSN? → A: No. Creation returns project metadata only; the named owner creates the first ingest key afterwards and receives the full DSN then.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Keep every record across restarts (Priority: P1)
@@ -62,7 +72,7 @@ An operator runs Scout from the shipped stack, creates organisations, projects, 
 
 ### User Story 2 - Administer the deployment from the dashboard (Priority: P2)
 
-The deployment operator signs in with the bootstrap credentials, creates an organisation and its first administrator, and receives a one-time setup token. Administrators then invite members by link, grant or revoke project roles, create and rotate ingest keys, and change model and retention settings — all without direct database access or a redeploy.
+The deployment operator signs in with the bootstrap credentials, creates an organisation and its first administrator, and receives a one-time setup token. The operator also creates the organisation's projects, naming an existing member as each project's initial owner. Administrators then invite members by link, grant or revoke project roles, create and rotate ingest keys, and change model and retention settings — all without direct database access or a redeploy.
 
 **Why this priority**: The backend administration exists, but the production path is incomplete while the dashboard only offers demo sign-in and cannot perform these workflows.
 
@@ -79,7 +89,9 @@ The deployment operator signs in with the bootstrap credentials, creates an orga
 7. **Given an authenticated account, **When** they request new recovery codes, **Then** the new set is shown once, prior unused codes stop working, and no plaintext is stored.
 8. **Given** demo mode is disabled, **When** an unauthenticated person opens the dashboard, **Then** only the real email-and-password sign-in is offered.
 9. **Given** demo mode is enabled on a deployment with real organisations, **When** a person uses a demo shortcut, **Then** every request is scoped to the demo organisation and no real organisation or project is reachable.
-10. **Given** the operator signs in for the first time, **When** the console loads, **Then** a single set of recovery codes is shown once and must be acknowledged; subsequent sign-ins do not re-show them.
+10. **Given** the operator, **When** they create a project and name an existing organisation member as its initial owner, **Then** that member owns the project and administrators manage its members, keys, settings, and soft deletion; a non-operator attempt to create a project is refused.
+11. **Given** the operator signs in for the first time, **When** the console loads, **Then** a single set of recovery codes is shown once and must be acknowledged; subsequent sign-ins do not re-show them.
+12. **Given** an account locked by repeated failed sign-ins, **When** the operator unlocks it, **Then** the person signs in with the correct password, the failure count is reset, and until that unlock every attempt returns the generic invalid-credentials response.
 
 ---
 
@@ -146,14 +158,19 @@ An operator from a clean host starts the shipped stack, runs one documented smok
 - The operator loses the bootstrap password before its first sign-in, so no recovery codes have been issued yet; the documented offline procedure is the only path and startup must never reset an existing operator password.
 - An invitation or initial-admin token is expired, already used, or redeemed by the wrong account; an expired token (seven days after issue) is reported distinctly from an unknown one, and a token redeemed by the wrong account is refused without consuming it.
 - A recovery code is reused or a new set is issued; only the newest set works.
+- A password shorter than 12 characters is submitted through any path that sets one; it is rejected with a message naming the minimum, and no partial account or session is created.
+- An account receives repeated failed sign-ins from an automated client; after five consecutive failures it locks, every later attempt receives the generic invalid-credentials response even with the correct password, and it stays locked until the operator unlocks it; any successful sign-in resets the count.
+- A dashboard session sits idle past the configured window or ages past the absolute maximum; its next request is rejected and the person signs in again, while a compatibility API token held by the same account keeps working.
 - A member's role is revoked while their browser session or compatibility token is active; the same session and token lose the revoked capability immediately.
 - An account is disabled or removed while it holds a session and several compatibility tokens; the next request from any of them is rejected, including for routes the account could reach a moment earlier.
 - An OIDC provider returns an unverified email, an unknown member, or an unavailable endpoint.
 - An issue's raw payload expires while its detail view is open.
-- A search query matches nothing, exceeds the result cap, or uses an unsupported filter.
+- A search query matches nothing, exceeds the result cap, or uses an unsupported filter; exceeding the cap returns the 200 newest matches with an indication that more exist.
 - Retention runs while a member reads data.
 - A client sends log lines or events with a timestamp far in the past or future; retention must still follow the server receipt time, and display must not misrepresent the age of the data.
 - A compatibility request arrives while the compatibility surface is disabled.
+- A non-operator account attempts to create a project, or the operator names an initial owner who is not a member of the owning organisation; the request is refused and no project is created.
+- The operator creates a project and inspects the response; it contains no ingest key and no DSN, so the credential reaches only the owner who creates the first key.
 - The demo mode is enabled on a deployment that also has real accounts; demo sessions must stay confined to the demo organisation and must never resolve a real project, issue, log, or key.
 
 ## Requirements *(mandatory)*
@@ -172,11 +189,14 @@ An operator from a clean host starts the shipped stack, runs one documented smok
 - **FR-009**: The existing durability rule MUST hold on the durable store: an event is acknowledged only after its raw payload and metadata are stored, and a storage failure returns a retryable response. A store failure MUST be returned immediately with a retryable status and a retry hint; the application MUST NOT retry internally, buffer in memory, or acknowledge anything it did not store.
 - **FR-010**: Retention, soft deletion, and the raw-payload immutability guarantee MUST behave identically on the durable store. Retention age MUST be measured from the server's receipt time for both events and log lines; a client-supplied timestamp MUST NOT cause data to be deleted early or kept beyond the project window.
 - **FR-031**: Every running instance MUST resolve organisations, projects, memberships, roles, sessions, ingest keys, and API tokens from the shared durable store on each request. No instance may serve from an instance-local copy of that metadata, so a change made through one instance is visible through every other without a restart.
+- **FR-032**: Five consecutive failed sign-in attempts for the same account MUST lock that account, regardless of the time between attempts. A successful sign-in resets the count. A locked account MUST reject every sign-in attempt with the same generic response used for invalid credentials, regardless of whether the password is correct, so the lock never reveals that the account exists. Only the deployment operator can unlock an account, and unlocking resets the count. The operator MUST be able to list locked accounts in order to find them. Existing sessions are not ended by a lock, and per-client-IP protection is explicitly the operator's reverse proxy responsibility.
+- **FR-033**: A dashboard session MUST expire after an absolute maximum of seven days and after 12 hours without activity, both configurable, and MUST be rejected on its next request once expired. Activity means any authenticated request carrying the session. Long-lived API tokens issued for the compatibility surface are unaffected by session timeouts and do not extend a session; they follow their own revocation rules.
+- **FR-034**: Only the deployment operator MUST be able to create a project. Creation MUST name the owning organisation and designate an existing member of that organisation as the project's initial owner, and MUST return project metadata only. Organisation administrators and members MUST NOT create projects, and administrators manage membership, keys, settings, and soft deletion through the roles they already hold.
 
 **Administration and identity**
 
-- **FR-011**: The dashboard MUST provide real password sign-in, recovery-code reset, and invitation acceptance, with demo shortcuts available only when demo mode is explicitly enabled, and a demo session MUST be confined to a seeded demo organisation with no access to real organisations or projects.
-- **FR-012**: The deployment operator MUST be able to create an organisation and its initial administrator from the dashboard and receive a one-time setup token for out-of-band delivery. The operator's authority MUST remain deployment-level: it MUST NOT read project-scoped telemetry such as issues, events, logs, attachments, or ingest keys. The operator MUST also be able to change its own password and MUST receive one set of recovery codes the first time it signs in, so a lost password is recoverable without database access.
+- **FR-011**: The dashboard MUST provide real password sign-in, recovery-code reset, and invitation acceptance, with demo shortcuts available only when demo mode is explicitly enabled, and a demo session MUST be confined to a seeded demo organisation with no access to real organisations or projects. Every path that sets a password (initial-admin setup, invitation acceptance, recovery, operator change) MUST require at least 12 characters, apply no composition rules, and reject a shorter value with an actionable message.
+- **FR-012**: The deployment operator MUST be able to create an organisation and its initial administrator from the dashboard and receive a one-time setup token for out-of-band delivery. The operator's authority MUST remain deployment-level: it MUST NOT read project-scoped telemetry such as issues, events, logs, attachments, or ingest keys. Creating a project is a deployment-level action allowed to the operator; reading that project's telemetry is not, and the creation response MUST contain project metadata only — no ingest key and no DSN. The operator MUST also be able to change its own password, MUST receive one set of recovery codes the first time it signs in so a lost password is recoverable without database access, and MUST be able to unlock an account locked by repeated failed sign-ins.
 - **FR-013**: An initial-admin token MUST work for both a new account (set password, receive recovery codes) and an existing account (sign in first, accept with a session, keep the password, receive the role). Every invitation and initial-admin token MUST expire seven days after issue and MUST report an expired token explicitly rather than failing as if it were unknown.
 - **FR-014**: Administrators MUST be able to invite members, grant or revoke project roles, and see the effect immediately without a restart. Disabling an account or removing a member MUST invalidate every session and API token that account holds, effective on its next request.
 - **FR-015**: Project owners MUST be able to create, rotate, and revoke ingest keys from the dashboard.
@@ -188,7 +208,7 @@ An operator from a clean host starts the shipped stack, runs one documented smok
 
 - **FR-019**: An issue detail MUST show the occurrence timeline, stack trace, breadcrumbs, release, raw payload, and an explicit expired state when retention removed it.
 - **FR-020**: Issue views MUST show actionable loading, empty, and error states, and MUST offer the documented filters, sorting, and search.
-- **FR-021**: Logs and issues MUST be searchable together with the documented filters, ordering, and result cap, scoped to accessible projects.
+- **FR-021**: Logs and issues MUST be searchable together with the documented filters, ordering, and result cap, scoped to accessible projects. The cap MUST be 200 combined results, newest first, and a response that truncates MUST indicate that more matches exist rather than silently dropping them.
 - **FR-022**: A suggestion MUST be visible next to the human decision, and confirming or overriding it MUST update the authoritative label without moving the stored event or issue.
 
 **Release verification and operations**
@@ -233,6 +253,11 @@ An operator from a clean host starts the shipped stack, runs one documented smok
 - **SC-019**: The documented backup and restore procedure names every artifact, the restore order, and its verification steps, and following it restores all organisations, projects, issues, logs, and raw payloads on a clean host.
 - **SC-020**: 0 requests succeed with a session or API token belonging to a disabled account or removed member on the first request after the change.
 - **SC-021**: A deployment with pending migrations applies them during startup and only then reports ready; 0 requests are served before the migration engine completes, and 0 applied migrations are reverted automatically.
+- **SC-022**: 100% of password-setting paths reject values shorter than 12 characters with a message stating the minimum, and every stored password remains an Argon2id hash.
+- **SC-023**: 5 consecutive failed sign-ins for one account lock it; 100% of subsequent sign-in attempts return the generic invalid-credentials response, with 0 responses revealing that the account exists or that it is locked, and the account resumes only after the deployment operator unlocks it.
+- **SC-024**: 100% of sessions idle beyond the configured window, where activity is any authenticated request carrying the session, or older than the absolute maximum are rejected on their next request, and 0 compatibility API tokens are invalidated by, or extend, a session timeout.
+- **SC-025**: A search matching more than 200 items returns exactly the 200 newest with `has_more` set, and 0 results come from projects the caller cannot access.
+- **SC-026**: 100% of project-creation requests succeed only for the deployment operator, every created project has an initial owner who already belongs to the owning organisation, and 0 creation responses contain an ingest key or DSN.
 
 ## Assumptions
 

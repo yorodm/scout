@@ -341,3 +341,50 @@ whether one or three instances are running; rules 3–5 bound the surface area t
 **Alternatives considered**: a bounded-staleness cache (fails SC-016); an internal retry with backoff
 (converts a fast retryable failure into hidden latency during an incident); an audit browser (useful,
 but new product scope that the feature's assumptions exclude).
+
+---
+
+## R14 — Access and session hardening
+
+**Decision**: five rules, all enforced server-side and all observable through the API:
+
+1. **Password minimum.** Every path that sets a password (initial-admin setup, invitation acceptance,
+   recovery, operator change) requires at least 12 characters, applies no composition rules, and rejects
+   shorter values with a message naming the minimum (FR-011, SC-022). No breached-password list is
+   shipped; the minimum keeps the rule dependency-free and testable.
+2. **Account lockout.** Five **consecutive** failed sign-ins for one account lock it; there is no time
+   window, and a successful sign-in resets the count. A locked account returns the same generic
+   invalid-credentials response as a wrong password, even when the password is correct, so the lock
+   never becomes an enumeration oracle. Only the deployment operator can unlock, and unlocking resets
+   the count. The operator can list locked accounts to find them. A lock does **not** end existing
+   sessions — that stays the effect of disabling an account (FR-032, SC-023).
+3. **Session lifetime.** A dashboard session expires after seven days absolute and after 12 hours
+   without activity, both configurable. Long-lived compatibility API tokens are unaffected (FR-033,
+   SC-024).
+4. **Search cap.** Unified search returns at most the 200 newest matches with a `has_more` indicator and
+   no pagination (FR-021, SC-025).
+5. **Project creation.** Only the deployment operator creates projects, and creation must name an
+   existing member of the owning organisation as the project's initial owner. The creation response
+   carries project metadata only — no ingest key and no DSN — so the credential is created by the owner
+   through the existing key endpoint. Administrators manage the project through the roles they already
+   hold (FR-012, FR-034, SC-026).
+6. **Activity definition.** Session activity means any authenticated request carrying the session, which
+   is what refreshes `last_seen`; compatibility tokens neither extend nor are expired by a session.
+
+**Rationale**: The first three close the highest-value attack surface for a self-hosted deployment
+exposed to the internet without adding a service or a trust-proxy dependency. Rule 4 keeps search
+latency bounded so the release measurement means something. Rule 5 keeps project lifecycle
+administration at the deployment level, which is where the operator already sits, while ensuring a human
+owner exists from the first moment so no project is orphaned.
+
+**Storage**: `users` gains `locked_at` and `failed_sign_in_count` in migration `0008`; the lock is a
+state, not a derived value, so an operator unlock is a single update and the generic response never
+needs to branch on a computed window. No window timestamp is stored, because the counter is consecutive
+and resets on any successful sign-in.
+
+**Alternatives considered**: automatic time-based recovery (rejected: the clarification requires
+operator action); a rolling or fixed 15-minute window (rejected: the clarification counts consecutive
+failures regardless of elapsed time); per-IP throttling in the application (needs proxy-aware client-IP
+trust, left to the operator); pagination for search (new surface the feature does not need); allowing
+organisation admins to create projects (rejected: the clarification puts project creation at deployment
+level).
