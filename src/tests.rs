@@ -2432,6 +2432,108 @@ async fn retention_is_per_project_and_covers_logs() {
     }
 }
 
+/// FR-010: retention is measured from the server's receipt time. A client clock
+/// that is wildly wrong can neither keep an old record alive nor expire a new one.
+#[actix_web::test]
+async fn retention_follows_server_receipt_time_not_client_clocks() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let now = chrono::Utc::now();
+    let project = {
+        let store = state.store.read().await;
+        store
+            .projects
+            .values()
+            .find(|project| project.name == "scout-web")
+            .cloned()
+            .expect("seeded project")
+    };
+
+    let (past_client, future_client, fresh_client) =
+        (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (past_event, future_event) = (Uuid::new_v4(), Uuid::new_v4());
+    {
+        let mut store = state.store.write().await;
+        for (id, message, timestamp, received_at) in [
+            // Claimed to be old, but received now: it stays.
+            (
+                past_client,
+                "slow client clock",
+                now - chrono::Duration::days(400),
+                now,
+            ),
+            // Claimed to be in the future, but received long ago: it goes.
+            (
+                future_client,
+                "fast client clock",
+                now + chrono::Duration::days(400),
+                now - chrono::Duration::days(40),
+            ),
+            (fresh_client, "honest clock", now, now),
+        ] {
+            store.logs.push(crate::models::LogLine {
+                id,
+                project_id: project.id,
+                timestamp,
+                level: "info".into(),
+                message: message.into(),
+                source: "clock-test".into(),
+                attributes: json!({}),
+                received_at,
+            });
+        }
+        for (id, sentry_event_id, received_at) in [
+            (past_event, "past-client-event", now),
+            (
+                future_event,
+                "future-client-event",
+                now - chrono::Duration::days(40),
+            ),
+        ] {
+            store.events.insert(
+                id,
+                crate::models::Event {
+                    id,
+                    sentry_event_id: sentry_event_id.into(),
+                    project_id: project.id,
+                    issue_id: None,
+                    received_at,
+                    raw_object_key: Some(format!("raw/{sentry_event_id}")),
+                    raw_size: 1,
+                    raw_expired_at: None,
+                    attachment_count: 0,
+                    event: json!({ "timestamp": now + chrono::Duration::days(400) }),
+                    attachments: Vec::new(),
+                },
+            );
+        }
+    }
+
+    {
+        let mut store = state.store.write().await;
+        let project = store.projects.get(&project.id).cloned().unwrap();
+        store.apply_retention(&project);
+    }
+
+    let store = state.store.read().await;
+    assert!(
+        store.logs.iter().any(|log| log.id == past_client),
+        "a client timestamp in the past must not expire a newly received log"
+    );
+    assert!(
+        !store.logs.iter().any(|log| log.id == future_client),
+        "a client timestamp in the future must not keep an old log alive"
+    );
+    assert!(store.logs.iter().any(|log| log.id == fresh_client));
+    assert!(
+        store.events[&past_event].raw_object_key.is_some(),
+        "a newly received event survives regardless of its client timestamp"
+    );
+    assert!(
+        store.events[&future_event].raw_object_key.is_none(),
+        "an old event expires even when its client timestamp is in the future"
+    );
+}
+
 // --- project soft-delete ----------------------------------------------------
 
 #[actix_web::test]

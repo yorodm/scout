@@ -237,8 +237,10 @@ impl Store {
                 event.raw_expired_at = Some(now);
             }
         }
+        // FR-010: retention is measured from the server's receipt time, so a
+        // client clock that runs fast or slow cannot extend or shorten it.
         self.logs
-            .retain(|l| !(l.project_id == project.id && l.timestamp < cutoff));
+            .retain(|l| !(l.project_id == project.id && l.received_at < cutoff));
         keys
     }
 

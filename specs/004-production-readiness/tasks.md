@@ -374,7 +374,7 @@ original numbering and completion state.
 | Startup runs pending migrations before the service is ready | FR-003, SC-021 | T013–T015 |
 
 - [ ] T100 [US2] Implement and test operator credential self-service in `src/api.rs`, `src/store/postgres.rs`, and `ui/src/components/other.rs`: the operator changes its own password, one set of recovery codes is issued once on first sign-in and shown once, reissuing invalidates prior unused codes, and no plaintext is stored or re-shown (FR-012, SC-017)
-- [ ] T101 [US1] Make retention use the server receipt time for both events and log lines in `src/store/memory.rs` and `src/store/postgres.rs`, leaving client timestamps as display/order attributes only; cover past and future client clocks in `src/tests.rs` (FR-010, SC-018)
+- [x] T101 [US1] Make retention use the server receipt time for both events and log lines in `src/store/memory.rs` and `src/store/postgres.rs`, leaving client timestamps as display/order attributes only; cover past and future client clocks in `src/tests.rs` (FR-010, SC-018)
 - [ ] T102 [US5] Document the operator-run backup and restore procedure in `README.md` and `specs/004-production-readiness/quickstart.md`: every artifact to preserve, the restore order, and the checks that confirm success, with no shipped tooling (FR-027, SC-019)
 - [x] T103 [US2] Reject requests from disabled accounts and removed members on their next request, including sessions and API tokens, in `src/api.rs` and `src/compat/auth.rs`; cover both paths in `src/tests.rs` (FR-014, SC-020)
 
