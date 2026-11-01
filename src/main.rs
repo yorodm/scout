@@ -7,6 +7,7 @@ mod config;
 mod error;
 mod grouping;
 mod ingest;
+mod metrics;
 mod middleware;
 mod migrate;
 mod models;
@@ -125,8 +126,14 @@ async fn main() -> std::io::Result<()> {
         .timeout(Duration::from_secs(3))
         .build()
         .expect("build http client");
-    worker::spawn(store.clone(), rx, http.clone());
-    worker::spawn_retention(store.clone(), objects.clone(), Duration::from_secs(3600));
+    let metrics = Arc::new(crate::metrics::Metrics::new());
+    worker::spawn(store.clone(), rx, http.clone(), metrics.clone());
+    worker::spawn_retention(
+        store.clone(),
+        objects.clone(),
+        Duration::from_secs(config.retention_interval_secs),
+        metrics.clone(),
+    );
 
     let state = web::Data::new(AppState {
         store,
@@ -139,7 +146,21 @@ async fn main() -> std::io::Result<()> {
         objects,
         storage_ready: Arc::new(AtomicBool::new(true)),
         compat_enabled: config.sentry_compat_enabled,
+        metrics,
+        store_kind: "memory",
     });
+
+    // Log the counters periodically so a log-only deployment still sees them.
+    {
+        let metrics = state.metrics.clone();
+        actix_web::rt::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            loop {
+                ticker.tick().await;
+                tracing::info!("{}", metrics.log_line("memory"));
+            }
+        });
+    }
 
     tracing::info!("Scout listening on http://127.0.0.1:{port}");
     if demo_mode {

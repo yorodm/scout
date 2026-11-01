@@ -275,7 +275,7 @@ pub struct Breadcrumb {
     pub data: Option<Value>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Suggestion {
     pub category: String,
     pub confidence: f64,

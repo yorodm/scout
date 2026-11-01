@@ -28,17 +28,20 @@ pub async fn ingest_envelope(
     body: web::Bytes,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    let _permit = acquire_ingest_permit(&state)?;
-    state.ensure_storage()?;
-    let project = authenticate(&req, path.as_str(), &query, &state).await?;
-    let bytes = decode_body(body)?;
+    let _permit = tracked(&state, acquire_ingest_permit(&state))?;
+    tracked(&state, state.ensure_storage())?;
+    let project = tracked(
+        &state,
+        authenticate(&req, path.as_str(), &query, &state).await,
+    )?;
+    let bytes = tracked(&state, decode_body(body))?;
     let ParsedEnvelope {
         header,
         mut events,
         attachments,
         logs,
         ignored,
-    } = parse_envelope(&bytes).map_err(ApiError::BadRequest)?;
+    } = tracked(&state, parse_envelope(&bytes).map_err(ApiError::BadRequest))?;
 
     // Sentry puts the event id in the envelope header as well as the event item;
     // fall back to the header when a single event omits it.
@@ -61,8 +64,11 @@ pub async fn ingest_envelope(
         "envelope accepted"
     );
 
-    let event_ids = persist_events(&state, &project, events, &attachments, bytes).await?;
-    let log_count = persist_logs(&state, &project, logs).await?;
+    let event_ids = tracked(
+        &state,
+        persist_events(&state, &project, events, &attachments, bytes).await,
+    )?;
+    let log_count = tracked(&state, persist_logs(&state, &project, logs).await)?;
     tracing::debug!(
         project_id = %project.id,
         event_ids = ?event_ids,
@@ -85,16 +91,32 @@ pub async fn ingest_store(
     body: web::Bytes,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    let _permit = acquire_ingest_permit(&state)?;
-    state.ensure_storage()?;
-    let project = authenticate(&req, path.as_str(), &query, &state).await?;
-    let bytes = decode_body(body)?;
-    let event: Value = serde_json::from_slice(&bytes)
-        .map_err(|e| ApiError::BadRequest(format!("invalid event JSON: {e}")))?;
+    let _permit = tracked(&state, acquire_ingest_permit(&state))?;
+    tracked(&state, state.ensure_storage())?;
+    let project = tracked(
+        &state,
+        authenticate(&req, path.as_str(), &query, &state).await,
+    )?;
+    let bytes = tracked(&state, decode_body(body))?;
+    let event: Value = match serde_json::from_slice(&bytes) {
+        Ok(event) => event,
+        Err(error) => {
+            return tracked(
+                &state,
+                Err(ApiError::BadRequest(format!("invalid event JSON: {error}"))),
+            )
+        }
+    };
     if !event.is_object() {
-        return Err(ApiError::BadRequest("event must be a JSON object".into()));
+        return tracked(
+            &state,
+            Err(ApiError::BadRequest("event must be a JSON object".into())),
+        );
     }
-    let ids = persist_events(&state, &project, vec![event], &[], bytes).await?;
+    let ids = tracked(
+        &state,
+        persist_events(&state, &project, vec![event], &[], bytes).await,
+    )?;
     tracing::debug!(project_id = %project.id, event_id = ?ids.first(), "event stored");
     Ok(HttpResponse::Ok().json(json!({ "id": ids.first() })))
 }
@@ -106,11 +128,14 @@ pub async fn ingest_logs(
     body: web::Bytes,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, ApiError> {
-    let _permit = acquire_ingest_permit(&state)?;
-    state.ensure_storage()?;
-    let project = authenticate(&req, path.as_str(), &query, &state).await?;
-    let bytes = decode_body(body)?;
-    let value = parse_log_document(&bytes)?;
+    let _permit = tracked(&state, acquire_ingest_permit(&state))?;
+    tracked(&state, state.ensure_storage())?;
+    let project = tracked(
+        &state,
+        authenticate(&req, path.as_str(), &query, &state).await,
+    )?;
+    let bytes = tracked(&state, decode_body(body))?;
+    let value = tracked(&state, parse_log_document(&bytes))?;
     let logs = match &value {
         Value::Array(items) => items.clone(),
         Value::Object(obj) => obj
@@ -121,7 +146,7 @@ pub async fn ingest_logs(
             .unwrap_or_else(|| vec![value.clone()]),
         _ => vec![value.clone()],
     };
-    let count = persist_logs(&state, &project, logs).await?;
+    let count = tracked(&state, persist_logs(&state, &project, logs).await)?;
     tracing::debug!(project_id = %project.id, accepted = count, "logs stored");
     Ok(HttpResponse::Ok().json(json!({ "accepted": count })))
 }
@@ -135,6 +160,14 @@ fn acquire_ingest_permit(state: &AppState) -> Result<tokio::sync::OwnedSemaphore
             message: "ingest concurrency limit reached; retry shortly".into(),
             retry_after_secs: 1,
         })
+}
+
+/// Count an ingest rejection by the response class it produces (FR-025).
+fn tracked<T>(state: &AppState, result: Result<T, ApiError>) -> Result<T, ApiError> {
+    result.map_err(|error| {
+        state.metrics.rejected(&error);
+        error
+    })
 }
 
 async fn authenticate(
@@ -343,6 +376,7 @@ async fn persist_events(
     for job in jobs {
         let _ = state.jobs.send(job);
     }
+    state.metrics.accepted(ids.len() as u64);
     Ok(ids)
 }
 
@@ -376,6 +410,7 @@ async fn persist_logs(
     for key in expired {
         let _ = state.objects.delete(&key).await;
     }
+    state.metrics.accepted(count as u64);
     Ok(count)
 }
 

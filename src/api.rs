@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.route("/api/health", web::get().to(health))
+        .route("/api/metrics", web::get().to(metrics))
         .route("/api/login", web::post().to(login))
         .route("/api/logout", web::post().to(logout))
         .route("/api/me", web::get().to(me))
@@ -319,6 +320,18 @@ pub async fn health(state: web::Data<AppState>) -> HttpResponse {
     } else {
         HttpResponse::ServiceUnavailable().json(body)
     }
+}
+
+// --- operational counters --------------------------------------------------
+
+/// Operational counters for the deployment operator (FR-025). Scoped to the
+/// operator because the numbers describe deployment-wide traffic.
+pub async fn metrics(
+    req: HttpRequest,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, ApiError> {
+    auth_operator(&req, &state).await?;
+    Ok(HttpResponse::Ok().json(state.metrics.snapshot(state.store_kind)))
 }
 
 // --- projects --------------------------------------------------------------

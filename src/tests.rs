@@ -91,7 +91,12 @@ async fn state_with_objects(
         .timeout(Duration::from_secs(3))
         .build()
         .expect("build test http client");
-    crate::worker::spawn(store.clone(), rx, http);
+    crate::worker::spawn(
+        store.clone(),
+        rx,
+        http,
+        Arc::new(crate::metrics::Metrics::new()),
+    );
     web::Data::new(AppState {
         store,
         jobs,
@@ -103,6 +108,8 @@ async fn state_with_objects(
         objects: Arc::new(objects),
         storage_ready: Arc::new(AtomicBool::new(true)),
         compat_enabled,
+        metrics: Arc::new(crate::metrics::Metrics::new()),
+        store_kind: "memory",
     })
 }
 
@@ -3105,7 +3112,7 @@ async fn retention_sweep_also_removes_expired_sessions() {
         },
     );
 
-    let (sessions_removed, _objects_removed) =
+    let (sessions_removed, _objects_removed, _logs_removed) =
         crate::worker::sweep_once(&state.store, &state.objects).await;
 
     assert_eq!(sessions_removed, 1);
@@ -4266,4 +4273,75 @@ async fn migrate_module_has_no_service_wiring() {
             "FR-016: src/migrate.rs must not reference {forbidden}"
         );
     }
+}
+
+// --- operational counters --------------------------------------------------
+
+#[actix_web::test]
+async fn metrics_endpoint_is_operator_only() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+
+    let (status, _) = call_json(&app, get_public("/api/metrics")).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "anonymous callers are rejected"
+    );
+
+    let member = login(&app, "demo@scout.local").await;
+    let member_token = member["token"].as_str().expect("member session");
+    let (status, _) = call_json(&app, get("/api/metrics", member_token)).await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "members cannot read deployment counters"
+    );
+
+    let (status, auth) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    assert_eq!(status, StatusCode::OK, "operator login failed: {auth}");
+    let operator_token = auth["token"].as_str().expect("operator session");
+    let (status, body) = call_json(&app, get("/api/metrics", operator_token)).await;
+    assert_eq!(status, StatusCode::OK, "metrics failed: {body}");
+    assert_eq!(body["store"], "memory");
+    assert!(body["counters"]["ingest_accepted"].is_u64());
+    assert!(body["counters"]["retention_objects_deleted"].is_u64());
+}
+
+#[actix_web::test]
+async fn accepted_ingest_and_rejections_are_counted() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    bootstrap_operator(&state).await;
+
+    let accepted = ingest_request(
+        "1",
+        "scout_demo_key",
+        "application/x-sentry-envelope",
+        envelope(&[event(&hex_id(9001), "metrics check", &["metrics-group"])]),
+        "envelope",
+    );
+    let (status, body) = call_json(&app, accepted).await;
+    assert_eq!(status, StatusCode::OK, "ingest failed: {body}");
+
+    let rejected = ingest_request(
+        "1",
+        "not-a-real-key",
+        "application/x-sentry-envelope",
+        envelope(&[event(&hex_id(9002), "rejected", &["metrics-group"])]),
+        "envelope",
+    );
+    let (status, _) = call_json(&app, rejected).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (_, auth) = login_with(&app, "ops@test.local", OPERATOR_PASSWORD).await;
+    let token = auth["token"].as_str().expect("operator session");
+    let (status, metrics) = call_json(&app, get("/api/metrics", token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        metrics["counters"]["ingest_accepted"].as_u64().unwrap_or(0) >= 1,
+        "accepted ingest must be counted: {metrics}"
+    );
+    assert_eq!(metrics["counters"]["ingest_rejected"]["auth"], 1);
 }

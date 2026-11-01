@@ -225,16 +225,16 @@ compatibility paths answer, and the quality gates pass.
 
 ### Tests for User Story 5 ⚠️
 
-- [ ] T078 [P] [US5] Add counter tests in `src/tests.rs`: accepted/rejected ingest, grouping outcomes, classifier outcomes, and retention deletions increment exactly once per event and surface through `GET /api/metrics`
-- [ ] T079 [P] [US5] Add an operator-only access test for `GET /api/metrics` in `src/tests.rs`: `401` anonymous, `403` non-operator, `200` operator
+- [x] T078 [P] [US5] Add counter tests in `src/tests.rs`: accepted/rejected ingest, grouping outcomes, classifier outcomes, and retention deletions increment exactly once per event and surface through `GET /api/metrics`
+- [x] T079 [P] [US5] Add an operator-only access test for `GET /api/metrics` in `src/tests.rs`: `401` anonymous, `403` non-operator, `200` operator
 
 ### Implementation for User Story 5
 
-- [ ] T080 [US5] Implement `src/metrics.rs` (atomics plus snapshot) and increment the counters in `src/ingest.rs`, `src/worker.rs`, and the retention sweep without adding round trips to the hot path
-- [ ] T081 [US5] Expose `GET /api/metrics` in `src/api.rs` per [contracts/native-api.md](./contracts/native-api.md), operator-only, and emit the same numbers as periodic `INFO` lines
-- [ ] T082 [US5] Write `scripts/compose-smoke.sh`: `docker compose up -d --build --force-recreate`, wait for health, operator sign-in, organisation + initial admin + token redemption, project creation, event and log ingest, raw retrieval, retention via the documented backdating step, restart, re-read, compatibility path check (`--compat-only`), and demo-confinement check; write a dated evidence file
-- [ ] T083 [US5] Write `scripts/load-ingest.sh`: 10 KB envelopes at a target rate, accepted rate, p95 acknowledgement latency, and 95% time-to-visibility, compared against SC-010 and written to a dated evidence file
-- [ ] T084 [US5] Verify feature 002's outstanding migration proof inside `scripts/compose-smoke.sh`: apply `migrations/0007_sentry_compat.sql` on the shipped database, re-apply it, assert organisation slug and per-project issue-number uniqueness with seeded duplicates, and assert it is a no-op the second time (closes 002 T047/T050)
+- [x] T080 [US5] Implement `src/metrics.rs` (atomics plus snapshot) and increment the counters in `src/ingest.rs`, `src/worker.rs`, and the retention sweep without adding round trips to the hot path
+- [x] T081 [US5] Expose `GET /api/metrics` in `src/api.rs` per [contracts/native-api.md](./contracts/native-api.md), operator-only, and emit the same numbers as periodic `INFO` lines
+- [x] T082 [US5] Write `scripts/compose-smoke.sh`: `docker compose up -d --build --force-recreate`, wait for health, operator sign-in, organisation + initial admin + token redemption, project creation, event and log ingest, raw retrieval, retention via the documented backdating step, restart, re-read, compatibility path check (`--compat-only`), and demo-confinement check; write a dated evidence file
+- [x] T083 [US5] Write `scripts/load-ingest.sh`: 10 KB envelopes at a target rate, accepted rate, p95 acknowledgement latency, and 95% time-to-visibility, compared against SC-010 and written to a dated evidence file
+- [x] T084 [US5] Verify feature 002's outstanding migration proof inside `scripts/compose-smoke.sh`: apply `migrations/0007_sentry_compat.sql` on the shipped database, re-apply it, assert organisation slug and per-project issue-number uniqueness with seeded duplicates, and assert it is a no-op the second time (closes 002 T047/T050)
 - [ ] T085 [US5] Run `scripts/compose-smoke.sh` on the clean host and commit the result under `specs/004-production-readiness/evidence/`
 - [ ] T086 [US5] Run `scripts/load-ingest.sh` on the documented 4 vCPU reference deployment and commit the result, recording any accepted shortfall with its justification
 - [ ] T087 [US5] Update `README.md`, `architecture.md`, and `docker-compose.yml` to describe PostgreSQL as the metadata store, the in-memory mode, the bootstrap variables, the new routes, and every verification step in `quickstart.md`

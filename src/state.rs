@@ -1,3 +1,4 @@
+use crate::metrics::Metrics;
 use crate::objects::Objects;
 use crate::store::Store;
 use crate::worker::Job;
@@ -25,6 +26,11 @@ pub struct AppState {
     pub storage_ready: Arc<AtomicBool>,
     /// Whether the Sentry-compatible `/api/0/` surface is enabled.
     pub compat_enabled: bool,
+    /// Operational counters (FR-025).
+    pub metrics: Arc<Metrics>,
+    /// Which metadata adapter is actually serving requests: `memory` until the
+    /// PostgreSQL adapter is wired in, `postgres` after that.
+    pub store_kind: &'static str,
 }
 
 impl AppState {

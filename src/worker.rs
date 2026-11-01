@@ -1,3 +1,4 @@
+use crate::metrics::{Metrics, SuggestionOutcome};
 use crate::models::{Issue, IssueState, Project, StateChange};
 use crate::objects::Objects;
 use crate::store::Store;
@@ -16,7 +17,12 @@ pub enum Job {
 
 /// One in-process worker, mirroring the "claim a job, group, then classify"
 /// pipeline from architecture.md. Ingest never waits for it.
-pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: reqwest::Client) {
+pub fn spawn(
+    store: Arc<RwLock<Store>>,
+    mut rx: UnboundedReceiver<Job>,
+    http: reqwest::Client,
+    metrics: Arc<Metrics>,
+) {
     actix_web::rt::spawn(async move {
         while let Some(job) = rx.recv().await {
             match job {
@@ -24,7 +30,7 @@ pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: re
                     job_id,
                     project_id,
                     event_id,
-                } => process_event(&store, &http, job_id, project_id, event_id).await,
+                } => process_event(&store, &http, &metrics, job_id, project_id, event_id).await,
             }
         }
     });
@@ -33,16 +39,25 @@ pub fn spawn(store: Arc<RwLock<Store>>, mut rx: UnboundedReceiver<Job>, http: re
 /// Periodically expire raw payloads and log lines for every project and delete
 /// the objects they referenced, and remove expired sessions. Issue rows and
 /// counters are never removed here.
-pub fn spawn_retention(store: Arc<RwLock<Store>>, objects: Arc<Objects>, period: Duration) {
+pub fn spawn_retention(
+    store: Arc<RwLock<Store>>,
+    objects: Arc<Objects>,
+    period: Duration,
+    metrics: Arc<Metrics>,
+) {
     actix_web::rt::spawn(async move {
         let mut ticker = tokio::time::interval(period);
         loop {
             ticker.tick().await;
-            let (sessions, objects_deleted) = sweep_once(&store, &objects).await;
-            if sessions > 0 || objects_deleted > 0 {
+            let (sessions, objects_deleted, logs_deleted) = sweep_once(&store, &objects).await;
+            if objects_deleted > 0 || logs_deleted > 0 {
+                metrics.retention(objects_deleted as u64, logs_deleted as u64);
+            }
+            if sessions > 0 || objects_deleted > 0 || logs_deleted > 0 {
                 tracing::debug!(
                     expired_sessions = sessions,
                     expired_objects = objects_deleted,
+                    expired_logs = logs_deleted,
                     "retention sweep completed"
                 );
             }
@@ -50,29 +65,34 @@ pub fn spawn_retention(store: Arc<RwLock<Store>>, objects: Arc<Objects>, period:
     });
 }
 
-/// One retention pass. Returns `(expired_sessions, expired_objects)`.
-pub async fn sweep_once(store: &Arc<RwLock<Store>>, objects: &Arc<Objects>) -> (usize, usize) {
-    let (sessions, keys) = {
+/// One retention pass. Returns `(expired_sessions, expired_objects, expired_logs)`.
+pub async fn sweep_once(
+    store: &Arc<RwLock<Store>>,
+    objects: &Arc<Objects>,
+) -> (usize, usize, usize) {
+    let (sessions, keys, logs_removed) = {
         let mut store = store.write().await;
         let sessions = store.sweep_sessions();
         let projects: Vec<Project> = store.projects.values().cloned().collect();
+        let logs_before = store.logs.len();
         let keys: Vec<String> = projects
             .iter()
             .flat_map(|project| store.apply_retention(project))
             .collect();
-        (sessions, keys)
+        (sessions, keys, logs_before - store.logs.len())
     };
     for key in &keys {
         if let Err(error) = objects.delete(key).await {
             tracing::warn!(%key, %error, "retention could not delete an object");
         }
     }
-    (sessions, keys.len())
+    (sessions, keys.len(), logs_removed)
 }
 
 async fn process_event(
     store: &Arc<RwLock<Store>>,
     http: &reqwest::Client,
+    metrics: &Metrics,
     job_id: Uuid,
     project_id: Uuid,
     event_id: Uuid,
@@ -81,9 +101,11 @@ async fn process_event(
     let Some((issue_id, derived, project, event, needs_suggestion)) =
         group(store, project_id, event_id).await
     else {
+        metrics.grouped(false);
         tracing::warn!(job_id = %job_id, project_id = %project_id, event_id = %event_id, "grouping skipped: event not found");
         return;
     };
+    metrics.grouped(true);
     tracing::debug!(
         job_id = %job_id,
         project_id = %project_id,
@@ -100,19 +122,28 @@ async fn process_event(
     }
 
     let received_by = format!("/api/{}/envelope/", project.dsn_id);
-    let suggestion =
-        crate::classifier::suggest(http, &project, &derived, &event, &received_by).await;
+    let outcome = crate::classifier::classify(http, &project, &derived, &event, &received_by).await;
+    let suggestion = match outcome {
+        crate::classifier::ClassifierOutcome::Suggested(suggestion) => {
+            metrics.suggested(SuggestionOutcome::Suggested);
+            suggestion
+        }
+        crate::classifier::ClassifierOutcome::NoSuggestion => {
+            metrics.suggested(SuggestionOutcome::NoSuggestion);
+            return;
+        }
+        crate::classifier::ClassifierOutcome::Failed => {
+            metrics.suggested(SuggestionOutcome::Failed);
+            return;
+        }
+    };
     tracing::debug!(
         job_id = %job_id,
         project_id = %project_id,
         issue_id = %issue_id,
-        outcome = if suggestion.is_some() { "suggested" } else { "no_suggestion" },
         elapsed_ms = started.elapsed().as_millis() as u64,
         "classifier finished"
     );
-    let Some(suggestion) = suggestion else {
-        return;
-    };
 
     let mut store = store.write().await;
     if let Some(issue) = store.issues.get_mut(&issue_id) {

@@ -9,6 +9,17 @@ use std::time::Duration;
 /// Lets the demo UI simulate a classifier outage without touching config.
 static OUTAGE: AtomicBool = AtomicBool::new(false);
 
+/// How a classifier attempt ended. Failure is never fatal (constitution I);
+/// the variant only exists so operational counters can distinguish the cases.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClassifierOutcome {
+    Suggested(Suggestion),
+    /// No model configured, low confidence, unknown category, or a client error.
+    NoSuggestion,
+    /// Transport failure, timeout, 5xx after the single retry, or malformed body.
+    Failed,
+}
+
 /// Ask a project's Jev-compatible endpoint to suggest a category.
 ///
 /// This is best-effort by design: a bounded timeout, at most one retry, and any
@@ -21,7 +32,23 @@ pub async fn suggest(
     event: &Value,
     received_by: &str,
 ) -> Option<Suggestion> {
-    let config = project.model.as_ref()?;
+    match classify(http, project, derived, event, received_by).await {
+        ClassifierOutcome::Suggested(suggestion) => Some(suggestion),
+        ClassifierOutcome::NoSuggestion | ClassifierOutcome::Failed => None,
+    }
+}
+
+/// Classify with an outcome the caller can count (FR-025).
+pub async fn classify(
+    http: &reqwest::Client,
+    project: &Project,
+    derived: &Derived,
+    event: &Value,
+    received_by: &str,
+) -> ClassifierOutcome {
+    let Some(config) = project.model.as_ref() else {
+        return ClassifierOutcome::NoSuggestion;
+    };
     let url = format!("{}/v1/systemone", config.endpoint.trim_end_matches('/'));
     let summary = crate::grouping::summary(derived, event, received_by);
     let request = json!({
@@ -54,20 +81,25 @@ pub async fn suggest(
             // A rejected request is not worth retrying; only 5xx and transport
             // failures get the single retry.
             if response.status().is_client_error() {
-                return None;
+                return ClassifierOutcome::NoSuggestion;
             }
             continue;
         }
         let body = match response.json::<Value>().await {
             Ok(body) => body,
-            Err(_) => return None,
+            Err(_) => return ClassifierOutcome::Failed,
         };
-        let raw = body
+        let Some(raw) = body
             .get("choice")
             .or_else(|| body.get("answer"))
             .or_else(|| body.get("category"))
-            .and_then(Value::as_str)?;
-        let category = normalize_category(raw)?;
+            .and_then(Value::as_str)
+        else {
+            return ClassifierOutcome::NoSuggestion;
+        };
+        let Some(category) = normalize_category(raw) else {
+            return ClassifierOutcome::NoSuggestion;
+        };
         let confidence = body
             .get("confidence")
             .and_then(Value::as_f64)
@@ -75,16 +107,16 @@ pub async fn suggest(
             .clamp(0.0, 1.0);
         // Below the project's threshold is treated exactly like no answer.
         if confidence < project.confidence_threshold {
-            return None;
+            return ClassifierOutcome::NoSuggestion;
         }
-        return Some(Suggestion {
+        return ClassifierOutcome::Suggested(Suggestion {
             category,
             confidence,
             source: config.model.clone(),
             at: Utc::now(),
         });
     }
-    None
+    ClassifierOutcome::Failed
 }
 
 fn normalize_category(raw: &str) -> Option<String> {
