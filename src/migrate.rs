@@ -265,6 +265,11 @@ mod tests {
         objects
     }
 
+    fn sorted(mut entries: Vec<(String, u64)>) -> Vec<(String, u64)> {
+        entries.sort();
+        entries
+    }
+
     #[actix_web::test]
     async fn copies_every_object_and_reports_counts() {
         let source = store(&[("raw/p-a/e1", b"one"), ("attachments/p-a/e1/0", b"two")]).await;
@@ -326,6 +331,57 @@ mod tests {
         assert_eq!(
             destination.get("raw/p-a/e1").await.unwrap(),
             b"authoritative"
+        );
+    }
+
+    #[actix_web::test]
+    async fn migration_leaves_the_source_unchanged_and_preserves_the_key_set() {
+        let source = store(&[
+            ("raw/p-a/e1", b"source-one"),
+            ("attachments/p-a/e1/0", b"source-two"),
+        ])
+        .await;
+        let destination = store(&[("raw/p-a/e1", b"corrupted")]).await;
+
+        let before = sorted(source.list_objects().await.unwrap());
+        let summary = run(&source, &destination).await;
+        assert_eq!(summary.copied, 2, "one overwrite plus one new object");
+        assert_eq!(summary.failed, 0);
+
+        assert_eq!(
+            sorted(source.list_objects().await.unwrap()),
+            before,
+            "the migration must not add or remove source keys"
+        );
+        assert_eq!(
+            source.get("raw/p-a/e1").await.unwrap(),
+            b"source-one",
+            "source bytes are authoritative and untouched"
+        );
+        assert_eq!(
+            source.get("attachments/p-a/e1/0").await.unwrap(),
+            b"source-two"
+        );
+
+        let source_keys: Vec<String> = before.iter().map(|(key, _)| key.clone()).collect();
+        let destination_keys: Vec<String> = sorted(destination.list_objects().await.unwrap())
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        assert_eq!(
+            destination_keys, source_keys,
+            "the destination must hold exactly the source key set"
+        );
+
+        // An unreadable source key is reported without changing the store.
+        assert_eq!(
+            copy_one(&source, &destination, "raw/missing").await,
+            Outcome::Unreadable
+        );
+        assert_eq!(
+            sorted(source.list_objects().await.unwrap()),
+            before,
+            "a failed object must leave the source untouched"
         );
     }
 

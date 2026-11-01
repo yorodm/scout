@@ -217,3 +217,11 @@ Task: "503 storage-failure regression test in src/tests.rs"
 - Migration and ingestion never coordinate; the operator schedules downtime.
 - The Garage compose path needs Docker, which this workspace lacks; that gate is recorded in
   `quickstart.md` and must not be reported as verified here.
+
+---
+
+## Phase 8: Convergence
+
+- [ ] T033 Run the documented Garage smoke path (quickstart steps 1–6) on a Docker host, record the measured clean-host elapsed time in `quickstart.md`, and close T030; this workspace has no Docker CLI, so this task remains blocked here and must not be reported as verified, per SC-001, SC-007 (missing)
+- [X] T034 Add tests in `src/objects.rs` for the missing-bucket and rejected-credentials probe messages: an `ObjectError::NotFound` must produce the bucket remedy, and a 403/forbidden `Unavailable` must produce the credentials remedy, each naming the endpoint and bucket without exposing the secret, per FR-005, SC-005 (partial)
+- [X] T035 Add assertions in `src/migrate.rs` tests that a run leaves the source key set and bytes unchanged (including after an overwrite and an unreadable object) and that the destination key set equals the source key set, per FR-004, FR-008, FR-014 (partial)

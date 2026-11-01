@@ -533,6 +533,49 @@ mod tests {
     }
 
     #[test]
+    fn probe_messages_distinguish_missing_bucket_and_rejected_credentials() {
+        let endpoint = "https://s3.example.test";
+        let objects = S3Settings::new(
+            endpoint.into(),
+            "scout-raw".into(),
+            "garage".into(),
+            "probe-key".into(),
+            "super-secret-value".into(),
+        )
+        .expect("settings")
+        .build()
+        .expect("build store");
+
+        // A provider answers NoSuchBucket with 404, which object_store maps to
+        // NotFound; the remedy must name the bucket, not the endpoint's health.
+        let missing = objects
+            .probe_error("write", ObjectError::NotFound("object not found".into()))
+            .to_string();
+        assert!(missing.contains(endpoint), "{missing}");
+        assert!(missing.contains("scout-raw"), "{missing}");
+        assert!(missing.contains("Create the bucket"), "{missing}");
+        assert!(!missing.contains("super-secret-value"), "{missing}");
+
+        // object_store surfaces a 403 as PermissionDenied whose text carries the
+        // status line, so the credentials marker still classifies correctly.
+        let rejected = objects
+            .probe_error(
+                "write",
+                ObjectError::Unavailable(
+                    "object store unavailable: The operation lacked the necessary privileges \
+                     for path __scout/health: Server returned non-2xx status code: 403 Forbidden: \
+                     AccessDenied"
+                        .into(),
+                ),
+            )
+            .to_string();
+        assert!(rejected.contains(endpoint), "{rejected}");
+        assert!(rejected.contains("scout-raw"), "{rejected}");
+        assert!(rejected.contains("rejected the credentials"), "{rejected}");
+        assert!(!rejected.contains("super-secret-value"), "{rejected}");
+    }
+
+    #[test]
     fn non_garage_endpoint_builds_from_configuration_alone() {
         // Provider neutrality: only endpoint, region, bucket, and credentials
         // decide how the store is built; no code path inspects the provider name.
