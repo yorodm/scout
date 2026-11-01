@@ -547,25 +547,27 @@ pub async fn user_feedback_create(
     ))
 }
 
-pub async fn spike_protection(
+pub async fn spike_protections(
     req: HttpRequest,
-    path: web::Path<(String, String)>,
+    path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, CompatError> {
     ensure_enabled(&state)?;
-    let (org_ref, project_ref) = path.into_inner();
-    authorize_project_read(&req, &state, &org_ref, &project_ref).await?;
+    let org_ref = path.into_inner();
+    let auth = authenticate(&req, &state).await?;
+    authorize_org(&state, &auth, &org_ref, Scope::OrgRead).await?;
     Err(CompatError::NotFound("spike protection not found".into()))
 }
 
-pub async fn spike_protection_mutate(
+pub async fn spike_protections_mutate(
     req: HttpRequest,
-    path: web::Path<(String, String)>,
+    path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, CompatError> {
     ensure_enabled(&state)?;
-    let (org_ref, project_ref) = path.into_inner();
-    authorize_project_read(&req, &state, &org_ref, &project_ref).await?;
+    let org_ref = path.into_inner();
+    let auth = authenticate(&req, &state).await?;
+    authorize_org(&state, &auth, &org_ref, Scope::OrgRead).await?;
     Err(CompatError::Unsupported(
         "Spike protection is not supported by Scout.".into(),
     ))
@@ -599,13 +601,12 @@ pub async fn app_installations_mutate(
 
 pub async fn external_issues_mutate(
     req: HttpRequest,
-    path: web::Path<(String, String)>,
+    path: web::Path<String>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, CompatError> {
     ensure_enabled(&state)?;
-    let (org_ref, _installation) = path.into_inner();
-    let auth = authenticate(&req, &state).await?;
-    authorize_org(&state, &auth, &org_ref, Scope::OrgRead).await?;
+    let _installation = path.into_inner();
+    authenticate(&req, &state).await?;
     Err(CompatError::Unsupported(
         "External issues are not supported by Scout.".into(),
     ))
@@ -613,13 +614,12 @@ pub async fn external_issues_mutate(
 
 pub async fn external_issue_delete(
     req: HttpRequest,
-    path: web::Path<(String, String, String)>,
+    path: web::Path<(String, String)>,
     state: web::Data<AppState>,
 ) -> Result<HttpResponse, CompatError> {
     ensure_enabled(&state)?;
-    let (org_ref, _installation, _external) = path.into_inner();
-    let auth = authenticate(&req, &state).await?;
-    authorize_org(&state, &auth, &org_ref, Scope::OrgRead).await?;
+    let (_installation, _external) = path.into_inner();
+    authenticate(&req, &state).await?;
     Err(CompatError::Unsupported(
         "External issues are not supported by Scout.".into(),
     ))

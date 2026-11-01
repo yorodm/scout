@@ -3177,7 +3177,7 @@ async fn compat_issue_list_is_sentry_shaped_and_defaults_to_unresolved() {
         assert!(issue["shortId"]
             .as_str()
             .unwrap_or_default()
-            .starts_with("SCOUTWEB-"));
+            .starts_with("SCOUT-WEB-"));
         assert!(issue["permalink"]
             .as_str()
             .unwrap_or_default()
@@ -3646,33 +3646,43 @@ async fn compat_unsupported_subsystems_answer_honestly() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    for path in ["servicehooks/", "users/"] {
+    for path in ["hooks/", "user-feedback/"] {
         let (status, body, _) = compat_call(&app, get(&format!("{base}/{path}"), &token)).await;
         assert_eq!(status, StatusCode::OK, "{path}");
         assert_eq!(body, json!([]), "{path}");
     }
-    let (status, _, _) =
-        compat_call(&app, get(&format!("{base}/servicehooks/hook-1/"), &token)).await;
+    let (status, _, _) = compat_call(&app, get(&format!("{base}/hooks/hook-1/"), &token)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _, _) = compat_call(&app, get(&format!("{base}/spike-protection/"), &token)).await;
+    let (status, _, _) = compat_call(
+        &app,
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &token,
+        ),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
     for (req, label) in [
         (
-            post_json(&format!("{base}/servicehooks/"), &token, json!({})),
+            post_json(&format!("{base}/hooks/"), &token, json!({})),
             "service hooks",
         ),
         (
-            post_json(&format!("{base}/users/"), &token, json!({})),
+            post_json(&format!("{base}/user-feedback/"), &token, json!({})),
             "user reports",
         ),
         (
-            put_json(&format!("{base}/spike-protection/"), &token, json!({})),
+            put_json(
+                &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+                &token,
+                json!({}),
+            ),
             "spike protection",
         ),
         (
             post_json(
-                &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/inst-1/external-issues/"),
+                "/api/0/sentry-app-installations/inst-1/external-issues/",
                 &token,
                 json!({}),
             ),
@@ -3680,7 +3690,7 @@ async fn compat_unsupported_subsystems_answer_honestly() {
         ),
         (
             delete(
-                &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/inst-1/external-issues/ext-1/"),
+                "/api/0/sentry-app-installations/inst-1/external-issues/ext-1/",
                 &token,
             ),
             "external issues",
@@ -3689,7 +3699,11 @@ async fn compat_unsupported_subsystems_answer_honestly() {
         let (status, body, _) = compat_call(&app, req).await;
         assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{label}");
         assert!(
-            body["detail"].as_str().unwrap_or_default().to_lowercase().contains("not supported"),
+            body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("not supported"),
             "{label}: {body}"
         );
     }
@@ -3733,25 +3747,24 @@ async fn compat_surface_is_off_by_default() {
             &format!("/api/0/organizations/{COMPAT_ORG}/releases/web@1.0.0/commitfiles/"),
             &token,
         ),
-        get(&format!("{base}/servicehooks/"), &token),
-        get(&format!("{base}/servicehooks/hook-1/"), &token),
-        get(&format!("{base}/users/"), &token),
-        get(&format!("{base}/spike-protection/"), &token),
+        get(&format!("{base}/hooks/"), &token),
+        get(&format!("{base}/hooks/hook-1/"), &token),
+        get(&format!("{base}/user-feedback/"), &token),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &token,
+        ),
         get(
             &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/"),
             &token,
         ),
         post_json(
-            &format!(
-                "/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/inst-1/external-issues/"
-            ),
+            "/api/0/sentry-app-installations/inst-1/external-issues/",
             &token,
             json!({}),
         ),
         delete(
-            &format!(
-                "/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/inst-1/external-issues/ext-1/"
-            ),
+            "/api/0/sentry-app-installations/inst-1/external-issues/ext-1/",
             &token,
         ),
     ];
@@ -3800,29 +3813,28 @@ async fn compat_every_documented_path_answers_with_json() {
             &format!("/api/0/organizations/{COMPAT_ORG}/issues/{issue_id}/tags/release/values/"),
             &viewer,
         ),
-        get(&format!("{base}/servicehooks/"), &viewer),
-        get(&format!("{base}/servicehooks/hook-1/"), &viewer),
-        get(&format!("{base}/users/"), &viewer),
+        get(&format!("{base}/hooks/"), &viewer),
+        get(&format!("{base}/hooks/hook-1/"), &viewer),
+        get(&format!("{base}/user-feedback/"), &viewer),
         get(
             &format!("/api/0/organizations/{COMPAT_ORG}/releases/{release}/commitfiles/"),
             &demo,
         ),
-        get(&format!("{base}/spike-protection/"), &viewer),
+        get(
+            &format!("/api/0/organizations/{COMPAT_ORG}/spike-protections/"),
+            &viewer,
+        ),
         get(
             &format!("/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/"),
             &demo,
         ),
         post_json(
-            &format!(
-                "/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/inst-1/external-issues/"
-            ),
+            "/api/0/sentry-app-installations/inst-1/external-issues/",
             &demo,
             json!({}),
         ),
         delete(
-            &format!(
-                "/api/0/organizations/{COMPAT_ORG}/sentry-app-installations/inst-1/external-issues/ext-1/"
-            ),
+            "/api/0/sentry-app-installations/inst-1/external-issues/ext-1/",
             &demo,
         ),
     ];

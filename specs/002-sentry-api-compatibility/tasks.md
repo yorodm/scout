@@ -290,3 +290,10 @@ specification, plan, contracts, and constitution. Ordered by severity.
 - [X] T052 Run the quickstart dashboard token flow and the SC-006/SC-009 timings end to end against a live `cargo run` server, and record the outcome in `specs/002-sentry-api-compatibility/quickstart.md` per T044, SC-009 (partial)
 - [X] T053 Guarantee the `{"detail": …}` envelope for query-string decoding failures on `/api/0` (for example a scope-level query error handler) so no extractor error escapes as non-JSON per FR-021 (partial)
 - [X] T054 Extend `src/tests.rs` with the missing coverage: sort values `new`/`user`/`trends`/`recommended`, the `hashes` filter, the 1,000-value tag cap, `statsPeriod`/`shortIdLookup` tolerance, a disabled owner's token, and the disabled toggle across every documented request per plan R14 (partial)
+
+---
+
+## Phase 9: Convergence
+
+- [X] T055 Re-point the unsupported-subsystem routes in `src/compat/mod.rs` to the documented spellings — `/projects/{org}/{project}/hooks/` and `/hooks/{hook_id}/`, `/projects/{org}/{project}/user-feedback/`, `/organizations/{org}/spike-protections/`, and top-level `/sentry-app-installations/{uuid}/external-issues[/{external_issue_id}]/` — remove the `/servicehooks/`, `/users/`, project `/spike-protection/`, and org-nested external-issue aliases, and update `contracts/sentry-compat-api.md` §7–11 plus the README matrix and the affected tests per FR-023, SC-002 (partial, unrequested)
+- [X] T056 Keep hyphens in `shortId` by using `project.slug.to_ascii_uppercase()` without stripping `-` in `src/compat/projection.rs`, and update the projection and issue-list assertions to expect `SCOUT-WEB-<n>` per research R5, data-model (contradicts)

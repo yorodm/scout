@@ -33,8 +33,9 @@ reach → `404` (never `403`, to avoid revealing existence).
 | Issue status mutation | `event:write` |
 | Tag values (project and issue) | `event:read` |
 | Release commit files | `project:releases` |
-| Service hooks, feedback, spike protection (read) | `project:read` |
-| App installations / external issues | `org:integrations` |
+| Service hooks, feedback (read) | `project:read` |
+| Spike protection (read) | `org:read` |
+| App installations / external issues | `org:integrations` / authenticated |
 
 ### Error envelope
 
@@ -167,21 +168,29 @@ entries.
 
 ## 7. Project service hooks
 
+The document spells this path `/hooks/`, not `/servicehooks/`.
+
 | Request | Response |
 |---|---|
-| `GET /api/0/projects/{org}/{project}/servicehooks/` | `[]` |
-| `GET /api/0/projects/{org}/{project}/servicehooks/{hook}/` | `404` (no hook exists) |
-| `POST /api/0/projects/{org}/{project}/servicehooks/` | `501` naming service hooks |
-| `DELETE` on a hook | `501` naming service hooks |
+| `GET /api/0/projects/{org}/{project}/hooks/` | `[]` |
+| `GET /api/0/projects/{org}/{project}/hooks/{hook}/` | `404` (no hook exists) |
+| `POST /api/0/projects/{org}/{project}/hooks/` | `501` naming service hooks |
+| `DELETE /api/0/projects/{org}/{project}/hooks/{hook}/` | `501` naming service hooks |
 
 ## 8. Project user feedback
 
-`GET /api/0/projects/{org}/{project}/users/` → `[]`. `POST` (legacy user report submission) → `501`
-naming legacy user reports.
+The document spells this path `/user-feedback/`, not `/users/`.
+
+`GET /api/0/projects/{org}/{project}/user-feedback/` → `[]`. `POST` (legacy user report submission)
+→ `501` naming legacy user reports.
 
 ## 9. Spike protection
 
-`GET` → `404` (no spike-protection state exists). `PUT`/`POST` → `501` naming spike protection.
+The document defines an organisation-scoped collection at `/spike-protections/` (plural, no project
+segment).
+
+`GET /api/0/organizations/{org}/spike-protections/` → `404` (no spike-protection state exists).
+`PUT`/`POST` → `501` naming spike protection.
 
 ## 10. Organisation app installations
 
@@ -190,8 +199,11 @@ app installations.
 
 ## 11. External issues
 
-`POST /api/0/organizations/{org}/sentry-app-installations/{installation}/external-issues/` and
-`DELETE .../external-issues/{external_issue}/` → `501` naming external issues. No state changes.
+The document places these under the installation id at the API root, not under an organisation.
+
+`POST /api/0/sentry-app-installations/{uuid}/external-issues/` and
+`DELETE /api/0/sentry-app-installations/{uuid}/external-issues/{external_issue}/` → `501` naming
+external issues. No state changes.
 
 ## Compatibility matrix
 

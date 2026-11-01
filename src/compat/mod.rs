@@ -82,81 +82,80 @@ pub fn config(cfg: &mut web::ServiceConfig) {
                 "/organizations/{org}/releases/{version}/commitfiles/",
                 web::get().to(handlers::release_commit_files),
             )
-            // Service hooks (list + collection mutations)
+            // Service hooks (the document spells this `/hooks/`)
             .route(
-                "/projects/{org}/{project}/servicehooks",
+                "/projects/{org}/{project}/hooks",
                 web::get().to(handlers::service_hooks),
             )
             .route(
-                "/projects/{org}/{project}/servicehooks/",
+                "/projects/{org}/{project}/hooks/",
                 web::get().to(handlers::service_hooks),
             )
             .route(
-                "/projects/{org}/{project}/servicehooks",
+                "/projects/{org}/{project}/hooks",
                 web::post().to(handlers::service_hook_mutate),
             )
             .route(
-                "/projects/{org}/{project}/servicehooks/",
+                "/projects/{org}/{project}/hooks/",
                 web::post().to(handlers::service_hook_mutate),
             )
-            // Service hook detail
             .route(
-                "/projects/{org}/{project}/servicehooks/{hook}",
+                "/projects/{org}/{project}/hooks/{hook}",
                 web::get().to(handlers::service_hook_detail),
             )
             .route(
-                "/projects/{org}/{project}/servicehooks/{hook}/",
+                "/projects/{org}/{project}/hooks/{hook}/",
                 web::get().to(handlers::service_hook_detail),
             )
             .route(
-                "/projects/{org}/{project}/servicehooks/{hook}",
+                "/projects/{org}/{project}/hooks/{hook}",
                 web::delete().to(handlers::service_hook_detail_mutate),
             )
             .route(
-                "/projects/{org}/{project}/servicehooks/{hook}/",
+                "/projects/{org}/{project}/hooks/{hook}/",
                 web::delete().to(handlers::service_hook_detail_mutate),
             )
-            // Legacy user feedback
+            // Legacy user feedback (the document spells this `/user-feedback/`)
             .route(
-                "/projects/{org}/{project}/users",
+                "/projects/{org}/{project}/user-feedback",
                 web::get().to(handlers::user_feedback),
             )
             .route(
-                "/projects/{org}/{project}/users/",
+                "/projects/{org}/{project}/user-feedback/",
                 web::get().to(handlers::user_feedback),
             )
             .route(
-                "/projects/{org}/{project}/users",
+                "/projects/{org}/{project}/user-feedback",
                 web::post().to(handlers::user_feedback_create),
             )
             .route(
-                "/projects/{org}/{project}/users/",
+                "/projects/{org}/{project}/user-feedback/",
                 web::post().to(handlers::user_feedback_create),
             )
-            // Spike protection
+            // Spike protection (organisation-scoped, `/spike-protections/`)
             .route(
-                "/projects/{org}/{project}/spike-protection",
-                web::get().to(handlers::spike_protection),
+                "/organizations/{org}/spike-protections",
+                web::get().to(handlers::spike_protections),
             )
             .route(
-                "/projects/{org}/{project}/spike-protection/",
-                web::get().to(handlers::spike_protection),
+                "/organizations/{org}/spike-protections/",
+                web::get().to(handlers::spike_protections),
             )
             .route(
-                "/projects/{org}/{project}/spike-protection",
-                web::put().to(handlers::spike_protection_mutate),
+                "/organizations/{org}/spike-protections",
+                web::put().to(handlers::spike_protections_mutate),
             )
             .route(
-                "/projects/{org}/{project}/spike-protection/",
-                web::put().to(handlers::spike_protection_mutate),
+                "/organizations/{org}/spike-protections/",
+                web::put().to(handlers::spike_protections_mutate),
             )
             .route(
-                "/projects/{org}/{project}/spike-protection",
-                web::post().to(handlers::spike_protection_mutate),
+                "/organizations/{org}/spike-protections",
+                web::post().to(handlers::spike_protections_mutate),
             )
             .route(
-                "/projects/{org}/{project}/spike-protection/",
-                web::post().to(handlers::spike_protection_mutate),
+                "/organizations/{org}/spike-protections/",
+                web::post().to(handlers::spike_protections_mutate),
             )
             // Sentry apps
             .route(
@@ -175,20 +174,21 @@ pub fn config(cfg: &mut web::ServiceConfig) {
                 "/organizations/{org}/sentry-app-installations/",
                 web::post().to(handlers::app_installations_mutate),
             )
+            // External issues (top-level installation path, not org-nested)
             .route(
-                "/organizations/{org}/sentry-app-installations/{installation}/external-issues",
+                "/sentry-app-installations/{installation}/external-issues",
                 web::post().to(handlers::external_issues_mutate),
             )
             .route(
-                "/organizations/{org}/sentry-app-installations/{installation}/external-issues/",
+                "/sentry-app-installations/{installation}/external-issues/",
                 web::post().to(handlers::external_issues_mutate),
             )
             .route(
-                "/organizations/{org}/sentry-app-installations/{installation}/external-issues/{external_issue}",
+                "/sentry-app-installations/{installation}/external-issues/{external_issue}",
                 web::delete().to(handlers::external_issue_delete),
             )
             .route(
-                "/organizations/{org}/sentry-app-installations/{installation}/external-issues/{external_issue}/",
+                "/sentry-app-installations/{installation}/external-issues/{external_issue}/",
                 web::delete().to(handlers::external_issue_delete),
             ),
     );

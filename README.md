@@ -258,11 +258,11 @@ when off. Scopes come from the token owner's live project and organisation roles
 | `GET /api/0/projects/{org}/{project}/tags/{key}/values/` | Distinct project tag values |
 | `GET /api/0/organizations/{org}/issues/{issue}/tags/{key}/values/` | Distinct values for one issue |
 | `GET /api/0/organizations/{org}/releases/{version}/commitfiles/` | `[]` for a known release, `404` otherwise |
-| `GET /api/0/projects/{org}/{project}/servicehooks[/{hook}]/` | Empty list / `404` detail; mutations `501` |
-| `GET /api/0/projects/{org}/{project}/users/` | Empty list; feedback submission `501` |
-| `GET /api/0/projects/{org}/{project}/spike-protection/` | `404`; mutations `501` |
+| `GET /api/0/projects/{org}/{project}/hooks[/{hook}]/` | Empty list / `404` detail; mutations `501` |
+| `GET /api/0/projects/{org}/{project}/user-feedback/` | Empty list; feedback submission `501` |
+| `GET /api/0/organizations/{org}/spike-protections/` | `404`; mutations `501` |
 | `GET /api/0/organizations/{org}/sentry-app-installations/` | Empty list; mutations `501` |
-| `POST/DELETE .../external-issues/...` | `501` |
+| `POST/DELETE /api/0/sentry-app-installations/{uuid}/external-issues/...` | `501` |
 
 Errors use Sentry's `{"detail": …}` envelope. Sentry metrics, tracing, SCIM, Teams, and any path
 outside this table remain out of scope and are not implied by the compatibility surface. There is no

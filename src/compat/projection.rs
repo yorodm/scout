@@ -61,11 +61,7 @@ pub fn status_from_str(value: &str) -> Option<IssueState> {
 
 /// Stable, readable Sentry short id: `PROJECT-<number>`.
 pub fn short_id(project: &Project, issue: &Issue) -> String {
-    format!(
-        "{}-{}",
-        project.slug.to_ascii_uppercase().replace('-', ""),
-        issue.number
-    )
+    format!("{}-{}", project.slug.to_ascii_uppercase(), issue.number)
 }
 
 fn timestamp(at: chrono::DateTime<chrono::Utc>) -> String {
@@ -227,7 +223,7 @@ mod tests {
         let project = project();
         let issue = issue(&project);
         let projected = project_issue(&issue, &project, "https://scout.example/");
-        assert_eq!(projected.short_id, "SCOUTWEB-17");
+        assert_eq!(projected.short_id, "SCOUT-WEB-17");
         assert_eq!(projected.status, "unresolved");
         assert_eq!(projected.user_count, 0);
         assert!(projected.annotations.is_empty());
