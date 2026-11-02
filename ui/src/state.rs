@@ -1,4 +1,4 @@
-use crate::api::{self, Account, AccountMembership, Issue, LogLine, Member, ProjectSummary};
+use crate::api::{self, Account, Issue, LogLine, Member, ProjectSummary};
 use crate::util;
 use gloo_timers::future::TimeoutFuture;
 use serde_json::{json, Value};
@@ -15,6 +15,7 @@ pub enum ViewKind {
     Settings,
     Tokens,
     Account,
+    Orgs,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +49,8 @@ pub enum ModalKind {
     SendLog,
     /// The operator's one-time recovery codes, shown on the first sign-in.
     FirstSignInCodes,
+    /// A freshly created or rotated ingest key, shown once.
+    NewKey,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -86,6 +89,14 @@ pub struct AppState {
     pub oidc: Option<api::OidcConfig>,
     /// Distinguishes "loaded and not configured" from "not loaded yet".
     pub oidc_loaded: bool,
+    /// Deployment-level organisation list for the operator console.
+    pub orgs: Vec<api::OrgSummary>,
+    /// The setup token returned by the last organisation creation, shown once.
+    pub last_setup_token: Option<(String, String)>,
+    /// The invite token returned by the last invitation creation, shown once.
+    pub last_invitation: Option<(String, String, String)>,
+    /// A freshly created or rotated ingest key: (label, plaintext).
+    pub new_key: Option<(String, String)>,
     pub filters: Filters,
     pub log_filters: LogFilters,
     pub search_query: String,
@@ -118,6 +129,10 @@ impl Default for AppState {
             locked_users: Vec::new(),
             oidc: None,
             oidc_loaded: false,
+            orgs: Vec::new(),
+            last_setup_token: None,
+            last_invitation: None,
+            new_key: None,
             filters: Filters::default(),
             log_filters: LogFilters::default(),
             search_query: String::new(),
@@ -190,45 +205,12 @@ pub fn close_modal(store: Signal<AppState>) {
 
 // ------------------------------------------------------------------ loading
 
-pub fn fallback_accounts() -> Vec<Account> {
-    vec![
-        Account {
-            name: "Dana Demo".into(),
-            email: "demo@scout.local".into(),
-            memberships: vec![
-                AccountMembership {
-                    role: "owner".into(),
-                    project_name: "scout-web".into(),
-                },
-                AccountMembership {
-                    role: "admin".into(),
-                    project_name: "platform-api".into(),
-                },
-            ],
-        },
-        Account {
-            name: "Toni Triager".into(),
-            email: "triager@scout.local".into(),
-            memberships: vec![AccountMembership {
-                role: "triager".into(),
-                project_name: "scout-web".into(),
-            }],
-        },
-        Account {
-            name: "Vic Viewer".into(),
-            email: "viewer@scout.local".into(),
-            memberships: vec![AccountMembership {
-                role: "viewer".into(),
-                project_name: "scout-web".into(),
-            }],
-        },
-    ]
-}
-
 pub async fn load_accounts(store: Signal<AppState>) {
+    // Demo shortcuts exist only when the demo endpoint is registered. In a
+    // production deployment the request fails and no accounts are offered.
     match api::demo_accounts().await {
         Ok(data) => store.update(|state| state.accounts = data.accounts),
-        Err(_) => store.update(|state| state.accounts = fallback_accounts()),
+        Err(_) => store.update(|state| state.accounts.clear()),
     }
 }
 
@@ -253,6 +235,58 @@ pub async fn login(store: Signal<AppState>, email: String, password: String) {
             }
             sync_from_hash(store).await;
             toast(store, format!("Signed in as {}", data.user.name), "success");
+            claim_pending_invitation(store).await;
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+/// Accept an invitation the visitor held while they signed in. The token is
+/// remembered across the sign-in so an existing account can claim it.
+async fn claim_pending_invitation(store: Signal<AppState>) {
+    let Some(invitation) = util::storage_get("scout_pending_invite") else {
+        return;
+    };
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::accept_invitation(&invitation, Some(&token), None, None).await {
+        Ok(_) => {
+            util::storage_remove("scout_pending_invite");
+            load_projects(store).await;
+            toast(store, "Invitation accepted", "success");
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+/// Redeem an invitation as a new account, then enter the dashboard exactly as a
+/// password sign-in would.
+pub async fn accept_invitation_as_new(
+    store: Signal<AppState>,
+    invitation: String,
+    name: String,
+    password: String,
+) {
+    match api::accept_invitation(&invitation, None, Some(&name), Some(&password)).await {
+        Ok(data) => {
+            util::storage_set("scout_token", &data.token);
+            util::storage_remove("scout_pending_invite");
+            let codes = data.recovery_codes.clone();
+            store.update(|state| {
+                state.token = Some(data.token.clone());
+                state.me = Some(data.user.clone());
+                state.pending_recovery_codes = codes.clone();
+                state.modal = if codes.is_empty() {
+                    None
+                } else {
+                    Some(ModalKind::FirstSignInCodes)
+                };
+            });
+            util::set_hash("#/issues");
+            load_projects(store).await;
+            sync_from_hash(store).await;
+            toast(store, format!("Welcome, {}", data.user.name), "success");
         }
         Err(error) => toast(store, error, "error"),
     }
@@ -261,6 +295,13 @@ pub async fn login(store: Signal<AppState>, email: String, password: String) {
 pub fn acknowledge_recovery_codes(store: Signal<AppState>) {
     store.update(|state| {
         state.pending_recovery_codes.clear();
+        state.modal = None;
+    });
+}
+
+pub fn dismiss_new_key(store: Signal<AppState>) {
+    store.update(|state| {
+        state.new_key = None;
         state.modal = None;
     });
 }
@@ -569,6 +610,84 @@ pub async fn remove_oidc(store: Signal<AppState>) {
     }
 }
 
+// ------------------------------------------------------------------ organisations
+
+pub async fn load_orgs(store: Signal<AppState>) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::orgs(&token).await {
+        Ok(data) => store.update(|state| state.orgs = data.organisations),
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn create_org(store: Signal<AppState>, name: String, initial_admin_email: String) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    match api::create_org(&token, &name, &initial_admin_email).await {
+        Ok(created) => {
+            let org_name = created.organisation.name.clone();
+            store.update(|state| {
+                state.last_setup_token =
+                    Some((org_name.clone(), created.initial_admin_setup_token));
+            });
+            load_orgs(store).await;
+            toast(store, format!("Organisation {org_name} created"), "success");
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn create_invitation(store: Signal<AppState>, email: String, role: String) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    let Some(org_id) = store.with(settings_org_id) else {
+        return;
+    };
+    let project_id = store.with(|state| state.project_id.clone());
+    if project_id.is_empty() {
+        toast(store, "Select a project before inviting", "error");
+        return;
+    }
+    match api::create_invitation(&token, &org_id, &email, &project_id, &role).await {
+        Ok(created) => {
+            let id = created
+                .invitation
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            store.update(|state| {
+                state.last_invitation = Some((email.clone(), created.token, id));
+            });
+            toast(store, format!("Invitation created for {email}"), "success");
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn revoke_invitation(store: Signal<AppState>) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    let Some(org_id) = store.with(settings_org_id) else {
+        return;
+    };
+    let Some((_, _, invitation_id)) = store.with(|state| state.last_invitation.clone()) else {
+        return;
+    };
+    match api::revoke_invitation(&token, &org_id, &invitation_id).await {
+        Ok(_) => {
+            store.update(|state| state.last_invitation = None);
+            toast(store, "Invitation revoked", "success");
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
 // ------------------------------------------------------------------ api tokens
 
 pub async fn load_tokens(store: Signal<AppState>) {
@@ -658,6 +777,7 @@ pub async fn sync_from_hash(store: Signal<AppState>) {
         ["settings", ..] => (ViewKind::Settings, None),
         ["tokens", ..] => (ViewKind::Tokens, None),
         ["account", ..] => (ViewKind::Account, None),
+        ["orgs", ..] => (ViewKind::Orgs, None),
         _ => (ViewKind::Issues, None),
     };
 
@@ -685,6 +805,7 @@ pub async fn sync_from_hash(store: Signal<AppState>) {
         ViewKind::Settings => load_settings(store).await,
         ViewKind::Tokens => load_tokens(store).await,
         ViewKind::Account => load_account(store).await,
+        ViewKind::Orgs => load_orgs(store).await,
     }
 }
 
@@ -855,12 +976,34 @@ pub async fn create_key(store: Signal<AppState>) {
                         project.key = Some(plaintext.clone());
                     }
                 }
+                state.new_key = Some((prefix.clone(), plaintext.clone()));
+                state.modal = Some(ModalKind::NewKey);
             });
-            toast(
-                store,
-                format!("Created key {prefix} — copy it now, it is shown once"),
-                "success",
-            );
+            load_settings(store).await;
+            load_projects(store).await;
+        }
+        Err(error) => toast(store, error, "error"),
+    }
+}
+
+pub async fn rotate_key(store: Signal<AppState>) {
+    let Some(token) = store.with(|state| state.token.clone()) else {
+        return;
+    };
+    let project_id = store.with(|state| state.project_id.clone());
+    match api::rotate_key(&token, &project_id, "Rotated").await {
+        Ok(data) => {
+            let plaintext = data.key.clone();
+            let prefix: String = plaintext.chars().take(12).collect();
+            store.update(|state| {
+                for project in state.projects.iter_mut() {
+                    if project.id == project_id {
+                        project.key = Some(plaintext.clone());
+                    }
+                }
+                state.new_key = Some((prefix, plaintext.clone()));
+                state.modal = Some(ModalKind::NewKey);
+            });
             load_settings(store).await;
             load_projects(store).await;
         }

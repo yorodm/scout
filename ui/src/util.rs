@@ -236,5 +236,6 @@ pub fn active_nav(view: &crate::state::ViewKind) -> &'static str {
         ViewKind::Settings => "settings",
         ViewKind::Tokens => "tokens",
         ViewKind::Account => "account",
+        ViewKind::Orgs => "orgs",
     }
 }

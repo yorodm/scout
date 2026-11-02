@@ -69,6 +69,32 @@ fn Login() -> View {
     let store = use_store();
     let email_input = create_signal(String::new());
     let password_input = create_signal(String::new());
+    let show_recovery = create_signal(false);
+    let recovery_code = create_signal(String::new());
+    let recovery_password = create_signal(String::new());
+
+    let invite_token = util::current_hash()
+        .strip_prefix("#/invite/")
+        .map(str::to_string);
+    let invite_preview = create_signal(None::<api::InvitationPreview>);
+    let invite_error = create_signal(None::<String>);
+    let invite_name = create_signal(String::new());
+    let invite_password = create_signal(String::new());
+
+    let token_for_load = invite_token.clone();
+    on_mount(move || {
+        if let Some(token) = token_for_load.clone() {
+            // Remember the invitation so an existing account can claim it right
+            // after signing in.
+            util::storage_set("scout_pending_invite", &token);
+            spawn_local(async move {
+                match api::invitation_preview(&token).await {
+                    Ok(preview) => invite_preview.set(Some(preview)),
+                    Err(error) => invite_error.set(Some(error)),
+                }
+            });
+        }
+    });
 
     let demo_section = View::from_dynamic(move || -> View {
         let accounts = store.with(|state| state.accounts.clone());
@@ -127,19 +153,188 @@ fn Login() -> View {
         }
     });
 
-    view! {
-        div(class="login") {
-            div(class="login-card") {
-                div(class="login-brand") {
-                    (brand())
-                    div {
-                        h1 { "Scout" }
-                        p(class="muted") { "Self-hosted, Sentry-compatible error tracking & logs" }
+    let invitation_card = View::from_dynamic(move || -> View {
+        if invite_token.is_none() {
+            return View::new();
+        }
+        match invite_preview.get_clone() {
+            Some(preview) => {
+                let target = preview
+                    .project
+                    .clone()
+                    .unwrap_or_else(|| preview.organisation.clone());
+                let role = preview.role.clone().unwrap_or_else(|| "member".into());
+                let summary = format!(
+                    "{} invited {} to {} as {}.",
+                    preview.organisation, preview.email, target, role
+                );
+                let token = invite_token.clone().unwrap_or_default();
+                view! {
+                    div(class="panel panel-pad", style="margin-bottom:20px") {
+                        h2(style="font-size:14px;margin-bottom:8px") { "You are invited" }
+                        p(class="muted small") { (summary) }
+                        div(class="form-grid", style="margin-top:12px") {
+                            label(class="field") {
+                                "Your name"
+                                input(
+                                    class="input",
+                                    value=move || invite_name.get_clone(),
+                                    on:input=move |event: web_sys::Event| {
+                                        if let Some(target) = event.target() {
+                                            let input = target.unchecked_into::<web_sys::HtmlInputElement>();
+                                            invite_name.set(input.value());
+                                        }
+                                    },
+                                )
+                            }
+                            label(class="field") {
+                                "Choose a password"
+                                input(
+                                    class="input",
+                                    r#type="password",
+                                    autocomplete="new-password",
+                                    value=move || invite_password.get_clone(),
+                                    on:input=move |event: web_sys::Event| {
+                                        if let Some(target) = event.target() {
+                                            let input = target.unchecked_into::<web_sys::HtmlInputElement>();
+                                            invite_password.set(input.value());
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                        div(class="form-actions", style="justify-content:flex-start") {
+                            button(
+                                class="btn btn-primary",
+                                r#type="button",
+                                on:click=move |_| {
+                                    let name = invite_name.get_clone();
+                                    let password = invite_password.get_clone();
+                                    if password.chars().count() < 12 {
+                                        state::toast(
+                                            store,
+                                            "Choose a password of at least 12 characters",
+                                            "error",
+                                        );
+                                        return;
+                                    }
+                                    spawn_local(state::accept_invitation_as_new(
+                                        store,
+                                        token.clone(),
+                                        name,
+                                        password,
+                                    ));
+                                },
+                            ) {
+                                "Accept invitation"
+                            }
+                        }
+                        p(class="muted small", style="margin-top:10px") {
+                            "Already have an account? Sign in below and the invitation is accepted automatically."
+                        }
                     }
                 }
-                p(class="lede") {
-                    "Point an existing Sentry SDK at Scout — change only the DSN. Errors group into issues, logs sit beside them, and the decision model only ever suggests; a human confirms."
+            }
+            None => match invite_error.get_clone() {
+                Some(error) => view! { div(class="login-note") { (error) } },
+                None => view! { div(class="login-note") { "Loading your invitation…" } },
+            },
+        }
+    });
+
+    let auth_form = View::from_dynamic(move || -> View {
+        if show_recovery.get() {
+            view! {
+                h2(style="font-size:14px;margin-bottom:12px") { "Reset with a recovery code" }
+                form(
+                    class="form-grid",
+                    on:submit=move |event: web_sys::SubmitEvent| {
+                        event.prevent_default();
+                        let email = email_input.get_clone();
+                        let code = recovery_code.get_clone();
+                        let password = recovery_password.get_clone();
+                        if email.is_empty() || code.is_empty() || password.is_empty() {
+                            state::toast(
+                                store,
+                                "Email, recovery code, and new password are required",
+                                "error",
+                            );
+                            return;
+                        }
+                        spawn_local(async move {
+                            match api::recover(&email, &code, &password).await {
+                                Ok(_) => {
+                                    state::toast(
+                                        store,
+                                        "Password reset. Sign in with the new password.",
+                                        "success",
+                                    );
+                                    email_input.set(email);
+                                    show_recovery.set(false);
+                                }
+                                Err(error) => state::toast(store, error, "error"),
+                            }
+                        });
+                    },
+                ) {
+                    label(class="field full") {
+                        "Email"
+                        input(
+                            class="input",
+                            r#type="email",
+                            autocomplete="username",
+                            value=move || email_input.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<web_sys::HtmlInputElement>();
+                                    email_input.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    label(class="field full") {
+                        "Recovery code"
+                        input(
+                            class="input mono",
+                            placeholder="XXXXX-XXXXX",
+                            value=move || recovery_code.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<web_sys::HtmlInputElement>();
+                                    recovery_code.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    label(class="field full") {
+                        "New password"
+                        input(
+                            class="input",
+                            r#type="password",
+                            autocomplete="new-password",
+                            value=move || recovery_password.get_clone(),
+                            on:input=move |event: web_sys::Event| {
+                                if let Some(target) = event.target() {
+                                    let input = target.unchecked_into::<web_sys::HtmlInputElement>();
+                                    recovery_password.set(input.value());
+                                }
+                            },
+                        )
+                    }
+                    div(class="form-actions full") {
+                        button(
+                            class="btn btn-ghost",
+                            r#type="button",
+                            on:click=move |_| show_recovery.set(false),
+                        ) {
+                            "Back"
+                        }
+                        button(class="btn btn-primary", r#type="submit") { "Reset password" }
+                    }
                 }
+            }
+        } else {
+            view! {
                 h2(style="font-size:14px;margin-bottom:12px") { "Sign in" }
                 form(
                     class="form-grid",
@@ -189,6 +384,34 @@ fn Login() -> View {
                         button(class="btn btn-primary", r#type="submit") { "Sign in" }
                     }
                 }
+                div(class="form-actions", style="justify-content:flex-start;margin-top:8px") {
+                    button(
+                        class="btn btn-ghost btn-sm",
+                        r#type="button",
+                        on:click=move |_| show_recovery.set(true),
+                    ) {
+                        "Use a recovery code"
+                    }
+                }
+            }
+        }
+    });
+
+    view! {
+        div(class="login") {
+            div(class="login-card") {
+                div(class="login-brand") {
+                    (brand())
+                    div {
+                        h1 { "Scout" }
+                        p(class="muted") { "Self-hosted, Sentry-compatible error tracking & logs" }
+                    }
+                }
+                p(class="lede") {
+                    "Point an existing Sentry SDK at Scout — change only the DSN. Errors group into issues, logs sit beside them, and the decision model only ever suggests; a human confirms."
+                }
+                (invitation_card)
+                (auth_form)
                 (demo_section)
             }
         }
@@ -292,6 +515,23 @@ fn Shell() -> View {
         class
     };
 
+    let orgs_class = move || {
+        let (active, operator) = store.with(|state| {
+            (
+                util::active_nav(&state.view) == "orgs",
+                state::is_operator(state),
+            )
+        });
+        let mut class = String::from("nav-link");
+        if active {
+            class.push_str(" active");
+        }
+        if !operator {
+            class.push_str(" hidden");
+        }
+        class
+    };
+
     let title = View::from_dynamic(move || {
         let (heading, subtitle) = store.with(|state| (title_for(state), subtitle_for(state)));
         view! {
@@ -358,6 +598,7 @@ fn Shell() -> View {
             ViewKind::Settings => view! { other::SettingsView() },
             ViewKind::Tokens => view! { tokens::TokensView() },
             ViewKind::Account => view! { other::AccountView() },
+            ViewKind::Orgs => view! { other::OrgsView() },
         }
     });
 
@@ -405,6 +646,10 @@ fn Shell() -> View {
                         span(class="dot") {}
                         "Account"
                     }
+                    a(href="#/orgs", class=orgs_class) {
+                        span(class="dot") {}
+                        "Organisations"
+                    }
                 }
                 div(class="sidebar-foot") {
                     (user_pill)
@@ -446,6 +691,7 @@ fn title_for(state: &AppState) -> String {
         ViewKind::Settings => "Settings".into(),
         ViewKind::Tokens => "API tokens".into(),
         ViewKind::Account => "Account".into(),
+        ViewKind::Orgs => "Organisations".into(),
     }
 }
 
@@ -480,5 +726,6 @@ fn subtitle_for(state: &AppState) -> String {
         ViewKind::Settings => format!("{name} · ingest, retention, decision model"),
         ViewKind::Tokens => "Long-lived bearer tokens for /api/0/".into(),
         ViewKind::Account => "Password, recovery codes, and locked accounts".into(),
+        ViewKind::Orgs => "Deployment-level provisioning".into(),
     }
 }

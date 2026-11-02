@@ -141,13 +141,13 @@ a demo session cannot reach the real project while a demo reset preserves it.
 - [x] T046 [US2] Enforce operator scope in `src/api.rs`: `auth_project`/`auth_org_admin` deny the operator on project routes while the operator keeps deployment-level routes; reuse the existing not-found/forbidden split
 - [x] T047 [US2] Scope the demo endpoints in `src/api.rs` and the store methods they use: accounts list only demo members; reset replaces demo-organisation rows only and never the operator or real organisations
 - [x] T048 [US2] Include `slug` and `is_demo` in `GET /api/orgs` in `src/api.rs` per the native API contract
-- [ ] T049 [P] [US2] Complete real sign-in, recovery, invitation acceptance, and one-time recovery-code display in `ui/src/components/overlays.rs`, hiding demo shortcuts when `GET /api/demo/accounts` is unavailable
-- [ ] T050 [US2] Add the operator console to `ui/src/components/other.rs` (organisation list with slug and demo badge, creation form, one-time setup-token block with copy) and its navigation entry in `ui/src/components/app.rs`
-- [ ] T051 [US2] Add member and invitation screens to `ui/src/components/other.rs` (list, add, role change, removal with last-owner message, invite link shown once, revoke)
-- [ ] T052 [US2] Add ingest-key screens to `ui/src/components/other.rs` (list with prefixes, create, rotate, revoke, plaintext shown once)
-- [ ] T053 [US2] Add the auth/org/invite/member/key calls and state to `ui/src/api.rs` and `ui/src/state.rs`
-- [ ] T054 [US2] Make navigation role-aware in `ui/src/components/app.rs` (operator console only for the operator, organisation admin entry only for org admins, project settings only for owners/admins)
-- [ ] T055 [US2] Apply the shared loading/empty/permission/error primitives from `ui/src/components/common.rs` to every admin screen added in this phase
+- [x] T049 [P] [US2] Complete real sign-in, recovery, invitation acceptance, and one-time recovery-code display in `ui/src/components/overlays.rs`, hiding demo shortcuts when `GET /api/demo/accounts` is unavailable
+- [x] T050 [US2] Add the operator console to `ui/src/components/other.rs` (organisation list with slug and demo badge, creation form, one-time setup-token block with copy) and its navigation entry in `ui/src/components/app.rs`
+- [x] T051 [US2] Add member and invitation screens to `ui/src/components/other.rs` (list, add, role change, removal with last-owner message, invite link shown once, revoke)
+- [x] T052 [US2] Add ingest-key screens to `ui/src/components/other.rs` (list with prefixes, create, rotate, revoke, plaintext shown once)
+- [x] T053 [US2] Add the auth/org/invite/member/key calls and state to `ui/src/api.rs` and `ui/src/state.rs`
+- [x] T054 [US2] Make navigation role-aware in `ui/src/components/app.rs` (operator console only for the operator, organisation admin entry only for org admins, project settings only for owners/admins)
+- [x] T055 [US2] Apply the shared loading/empty/permission/error primitives from `ui/src/components/common.rs` to every admin screen added in this phase
 
 **Checkpoint**: US1 and US2 both work independently; the dashboard has no demo-only production path.
 

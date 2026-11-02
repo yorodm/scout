@@ -263,6 +263,11 @@ pub struct KeyResponse {
     pub revoked: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct RotatedKey {
+    pub key: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelConfig {
     pub endpoint: String,
@@ -298,6 +303,53 @@ pub struct SettingsResponse {
 pub struct OkResponse {
     #[serde(default)]
     pub ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct OrgSummary {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub slug: String,
+    #[serde(default)]
+    pub is_demo: bool,
+    pub created_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct OrgsResponse {
+    pub organisations: Vec<OrgSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CreatedOrg {
+    pub organisation: OrgSummary,
+    pub initial_admin_setup_token: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct InvitationPreview {
+    pub email: String,
+    pub organisation: String,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub role: Option<String>,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct CreatedInvitation {
+    pub invitation: Value,
+    pub token: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct AcceptResponse {
+    pub token: String,
+    pub user: User,
+    #[serde(default)]
+    pub recovery_codes: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -408,6 +460,99 @@ pub async fn login(email: &str, password: &str) -> Result<LoginResponse, String>
         "/api/login",
         None,
         &serde_json::json!({ "email": email, "password": password }),
+    )
+    .await
+}
+
+pub async fn recover(
+    email: &str,
+    recovery_code: &str,
+    new_password: &str,
+) -> Result<OkResponse, String> {
+    post(
+        "/api/recover",
+        None,
+        &serde_json::json!({
+            "email": email,
+            "recovery_code": recovery_code,
+            "new_password": new_password,
+        }),
+    )
+    .await
+}
+
+pub async fn invitation_preview(token: &str) -> Result<InvitationPreview, String> {
+    get(&format!("/api/invitations/{token}"), None).await
+}
+
+pub async fn accept_invitation(
+    token: &str,
+    session: Option<&str>,
+    name: Option<&str>,
+    password: Option<&str>,
+) -> Result<AcceptResponse, String> {
+    let mut body = serde_json::Map::new();
+    if let Some(name) = name {
+        body.insert("name".into(), Value::String(name.to_string()));
+    }
+    if let Some(password) = password {
+        body.insert("password".into(), Value::String(password.to_string()));
+    }
+    post(
+        &format!("/api/invitations/{token}/accept"),
+        session,
+        &Value::Object(body),
+    )
+    .await
+}
+
+pub async fn orgs(token: &str) -> Result<OrgsResponse, String> {
+    get("/api/orgs", Some(token)).await
+}
+
+pub async fn create_org(
+    token: &str,
+    name: &str,
+    initial_admin_email: &str,
+) -> Result<CreatedOrg, String> {
+    post(
+        "/api/orgs",
+        Some(token),
+        &serde_json::json!({
+            "name": name,
+            "initial_admin_email": initial_admin_email,
+        }),
+    )
+    .await
+}
+
+pub async fn create_invitation(
+    token: &str,
+    org_id: &str,
+    email: &str,
+    project_id: &str,
+    role: &str,
+) -> Result<CreatedInvitation, String> {
+    post(
+        &format!("/api/orgs/{org_id}/invitations"),
+        Some(token),
+        &serde_json::json!({
+            "email": email,
+            "project_id": project_id,
+            "role": role,
+        }),
+    )
+    .await
+}
+
+pub async fn revoke_invitation(
+    token: &str,
+    org_id: &str,
+    invitation_id: &str,
+) -> Result<OkResponse, String> {
+    delete(
+        &format!("/api/orgs/{org_id}/invitations/{invitation_id}"),
+        Some(token),
     )
     .await
 }
@@ -623,6 +768,15 @@ pub async fn remove_member(token: &str, project_id: &str, user_id: &str) -> Resu
 pub async fn create_key(token: &str, project_id: &str, label: &str) -> Result<KeyResponse, String> {
     post(
         &format!("/api/projects/{project_id}/keys"),
+        Some(token),
+        &serde_json::json!({ "label": label }),
+    )
+    .await
+}
+
+pub async fn rotate_key(token: &str, project_id: &str, label: &str) -> Result<RotatedKey, String> {
+    post(
+        &format!("/api/projects/{project_id}/keys/rotate"),
         Some(token),
         &serde_json::json!({ "label": label }),
     )

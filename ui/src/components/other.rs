@@ -609,12 +609,30 @@ fn settings_view(
                 (section_title(
                     "Ingest keys",
                     view! {
-                        button(
-                            class="btn btn-sm",
-                            r#type="button",
-                            on:click=move |_| spawn_local(state::create_key(store)),
-                        ) {
-                            "Create key"
+                        div(style="display:flex;gap:8px") {
+                            button(
+                                class="btn btn-sm",
+                                r#type="button",
+                                on:click=move |_| {
+                                    if util::window()
+                                        .confirm_with_message(
+                                            "Rotate the ingest key? The current key stops working immediately.",
+                                        )
+                                        .unwrap_or(false)
+                                    {
+                                        spawn_local(state::rotate_key(store));
+                                    }
+                                },
+                            ) {
+                                "Rotate"
+                            }
+                            button(
+                                class="btn btn-sm",
+                                r#type="button",
+                                on:click=move |_| spawn_local(state::create_key(store)),
+                            ) {
+                                "Create key"
+                            }
                         }
                     },
                 ))
@@ -738,13 +756,15 @@ fn settings_view(
 
             (oidc_panel(store))
 
+            (invitation_panel(store))
+
             section(class="panel panel-pad") {
                 (section_title(
                     "Demo data",
                     view! { span(class="muted small") { "in-memory" } },
                 ))
                 p(class="muted small") {
-                    "Reset the store to its seeded state. This signs you out and discards everything sent during this session."
+                    "Reset the demo organisation to its seeded state. Real organisations, their projects, and the operator are untouched. Demo accounts are signed out."
                 }
                 div(class="form-actions", style="justify-content:flex-start;margin-top:18px") {
                     button(
@@ -752,7 +772,7 @@ fn settings_view(
                         r#type="button",
                         on:click=move |_| {
                             if util::window()
-                                .confirm_with_message("Reset all demo data and sign out?")
+                                .confirm_with_message("Reset the demo organisation's data?")
                                 .unwrap_or(false)
                             {
                                 spawn_local(state::reset_demo(store));
@@ -1152,4 +1172,304 @@ pub fn AccountView() -> View {
         }
         (operator_panel)
     }
+}
+
+/// Invite an email to the current project. The link is shown once, like an
+/// ingest key, and can be revoked until it is accepted.
+fn invitation_panel(store: Signal<AppState>) -> View {
+    let email = create_signal(String::new());
+    let role = create_signal("viewer".to_string());
+    let last = create_selector(move || store.with(|state| state.last_invitation.clone()));
+
+    let last_block = View::from_dynamic(move || -> View {
+        let Some((invited, token, _)) = last.get_clone() else {
+            return View::new();
+        };
+        let origin = util::window()
+            .location()
+            .origin()
+            .unwrap_or_else(|_| "http://localhost:8080".into());
+        let link = format!("{origin}/#/invite/{token}");
+        let link_for_copy = link.clone();
+        view! {
+            div(class="panel panel-pad", style="margin-top:12px") {
+                (section_title(
+                    "Invitation link",
+                    view! { span(class="badge warning") { "shown once" } },
+                ))
+                p(class="muted small") {
+                    (format!("For {invited}. Deliver it out of band; it expires in seven days."))
+                }
+                div(class="dsn-box") {
+                    input(class="input", readonly=true, value=link)
+                    button(
+                        class="btn",
+                        r#type="button",
+                        on:click=move |_| {
+                            let text = link_for_copy.clone();
+                            spawn_local(async move {
+                                let clipboard = util::window().navigator().clipboard();
+                                match JsFuture::from(clipboard.write_text(&text)).await {
+                                    Ok(_) => state::toast(store, "Invitation link copied", "success"),
+                                    Err(_) => state::toast(
+                                        store,
+                                        "Copy failed — select the field manually",
+                                        "error",
+                                    ),
+                                }
+                            });
+                        },
+                    ) {
+                        "Copy"
+                    }
+                }
+                div(class="form-actions", style="justify-content:flex-start") {
+                    button(
+                        class="btn btn-danger btn-sm",
+                        r#type="button",
+                        on:click=move |_| {
+                            if util::window()
+                                .confirm_with_message("Revoke this invitation?")
+                                .unwrap_or(false)
+                            {
+                                spawn_local(state::revoke_invitation(store));
+                            }
+                        },
+                    ) {
+                        "Revoke"
+                    }
+                }
+            }
+        }
+    });
+
+    view! {
+        section(class="panel panel-pad") {
+            (section_title(
+                "Invitations",
+                view! { span(class="muted small") { "organisation admin" } },
+            ))
+            p(class="muted small") {
+                "An invitation grants the role below on this project. It expires seven days after issue, is shown once, and can be revoked until it is redeemed."
+            }
+            div(class="form-grid", style="margin-top:12px") {
+                label(class="field full") {
+                    "Email"
+                    input(
+                        class="input",
+                        r#type="email",
+                        placeholder="teammate@example.com",
+                        value=move || email.get_clone(),
+                        on:input=move |event: web_sys::Event| {
+                            if let Some(target) = event.target() {
+                                let input = target.unchecked_into::<HtmlInputElement>();
+                                email.set(input.value());
+                            }
+                        },
+                    )
+                }
+                label(class="field") {
+                    "Role"
+                    select(
+                        class="select",
+                        value=move || role.get_clone(),
+                        on:change=move |event: web_sys::Event| {
+                            if let Some(target) = event.target() {
+                                let select = target.unchecked_into::<HtmlSelectElement>();
+                                role.set(select.value());
+                            }
+                        },
+                    ) {
+                        option(value="viewer") { "viewer" }
+                        option(value="triager") { "triager" }
+                        option(value="admin") { "admin" }
+                        option(value="owner") { "owner" }
+                    }
+                }
+            }
+            div(class="form-actions", style="justify-content:flex-start") {
+                button(
+                    class="btn",
+                    r#type="button",
+                    on:click=move |_| {
+                        let target = email.get_clone().trim().to_string();
+                        if target.is_empty() {
+                            state::toast(store, "Enter an email address to invite", "error");
+                            return;
+                        }
+                        spawn_local(state::create_invitation(
+                            store,
+                            target,
+                            role.get_clone(),
+                        ));
+                    },
+                ) {
+                    "Create invitation"
+                }
+            }
+            (last_block)
+        }
+    }
+}
+
+/// The deployment operator's organisation console (FR-012).
+#[component]
+pub fn OrgsView() -> View {
+    let store = use_store();
+    let operator = create_selector(move || store.with(state::is_operator));
+    let orgs = create_selector(move || store.with(|state| state.orgs.clone()));
+    let last = create_selector(move || store.with(|state| state.last_setup_token.clone()));
+    let name = create_signal(String::new());
+    let admin_email = create_signal(String::new());
+
+    let body = View::from_dynamic(move || -> View {
+        if !operator.get() {
+            return empty_state(
+                "Operator access required",
+                "Organisations and their initial administrators are created by the deployment operator.",
+                View::new(),
+            );
+        }
+        let rows: Vec<View> = orgs
+            .get_clone()
+            .into_iter()
+            .map(|org| {
+                let demo = if org.is_demo {
+                    view! { span(class="badge warning") { "demo" } }
+                } else {
+                    View::new()
+                };
+                view! {
+                    div(class="member-row") {
+                        div(class="member-id") {
+                            div(class="who") {
+                                strong { (org.name.clone()) }
+                                small { (format!("{} · {}", org.slug, util::relative(&org.created_at))) }
+                            }
+                        }
+                        (demo)
+                    }
+                }
+            })
+            .collect();
+        let list = if rows.is_empty() {
+            empty_state(
+                "No organisations",
+                "Create the first organisation and name its initial administrator.",
+                View::new(),
+            )
+        } else {
+            view! { div { (rows) } }
+        };
+
+        view! {
+            div(class="settings-grid") {
+                section(class="panel panel-pad") {
+                    (section_title(
+                        "Organisations",
+                        view! { span(class="muted small") { "operator only" } },
+                    ))
+                    div(style="margin-top:12px") { (list) }
+                }
+                section(class="panel panel-pad") {
+                    (section_title(
+                        "Create an organisation",
+                        view! { span(class="badge") { "one-time token" } },
+                    ))
+                    p(class="muted small") {
+                        "The initial administrator redeems a single-use token, sets their own password, and receives recovery codes once. Deliver the token out of band."
+                    }
+                    div(class="form-grid", style="margin-top:12px") {
+                        label(class="field full") {
+                            "Name"
+                            input(
+                                class="input",
+                                placeholder="Acme",
+                                value=move || name.get_clone(),
+                                on:input=move |event: web_sys::Event| {
+                                    if let Some(target) = event.target() {
+                                        let input = target.unchecked_into::<HtmlInputElement>();
+                                        name.set(input.value());
+                                    }
+                                },
+                            )
+                        }
+                        label(class="field full") {
+                            "Initial administrator email"
+                            input(
+                                class="input",
+                                r#type="email",
+                                placeholder="admin@acme.test",
+                                value=move || admin_email.get_clone(),
+                                on:input=move |event: web_sys::Event| {
+                                    if let Some(target) = event.target() {
+                                        let input = target.unchecked_into::<HtmlInputElement>();
+                                        admin_email.set(input.value());
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    div(class="form-actions", style="justify-content:flex-start") {
+                        button(
+                            class="btn btn-primary",
+                            r#type="button",
+                            on:click=move |_| {
+                                let org_name = name.get_clone().trim().to_string();
+                                let email = admin_email.get_clone().trim().to_string();
+                                if org_name.is_empty() || email.is_empty() {
+                                    state::toast(store, "Name and administrator email are required", "error");
+                                    return;
+                                }
+                                spawn_local(state::create_org(store, org_name, email));
+                            },
+                        ) {
+                            "Create organisation"
+                        }
+                    }
+                    (if let Some((org, setup_token)) = last.get_clone() {
+                        let token_for_copy = setup_token.clone();
+                        view! {
+                            div(class="panel panel-pad", style="margin-top:14px") {
+                                (section_title(
+                                    "Setup token",
+                                    view! { span(class="badge warning") { "shown once" } },
+                                ))
+                                p(class="muted small") {
+                                    (format!("For the initial administrator of {org}. It expires in seven days."))
+                                }
+                                div(class="dsn-box") {
+                                    input(class="input mono", readonly=true, value=setup_token)
+                                    button(
+                                        class="btn",
+                                        r#type="button",
+                                        on:click=move |_| {
+                                            let text = token_for_copy.clone();
+                                            spawn_local(async move {
+                                                let clipboard = util::window().navigator().clipboard();
+                                                match JsFuture::from(clipboard.write_text(&text)).await {
+                                                    Ok(_) => state::toast(store, "Setup token copied", "success"),
+                                                    Err(_) => state::toast(
+                                                        store,
+                                                        "Copy failed — select the field manually",
+                                                        "error",
+                                                    ),
+                                                }
+                                            });
+                                        },
+                                    ) {
+                                        "Copy"
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        View::new()
+                    })
+                }
+            }
+        }
+    });
+
+    view! { (body) }
 }

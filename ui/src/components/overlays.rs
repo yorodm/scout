@@ -2,7 +2,7 @@ use crate::state::{self, use_store, ModalKind, TestEventForm};
 use crate::util;
 use sycamore::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::{spawn_local, JsFuture};
 use web_sys::HtmlInputElement;
 
 #[component]
@@ -14,6 +14,7 @@ pub fn ModalHost() -> View {
             Some(ModalKind::SendEvent) => view! { SendEventModal() },
             Some(ModalKind::SendLog) => view! { SendLogModal() },
             Some(ModalKind::FirstSignInCodes) => view! { FirstSignInCodesModal() },
+            Some(ModalKind::NewKey) => view! { NewKeyModal() },
             None => View::new(),
         }
     });
@@ -43,6 +44,106 @@ pub fn ToastHost() -> View {
         }
     });
     view! { div(class="toasts") { (body) } }
+}
+
+#[component]
+fn NewKeyModal() -> View {
+    let store = use_store();
+    let details = store.with(|state| state.new_key.clone());
+    let Some((prefix, key)) = details else {
+        return View::new();
+    };
+    let dsn_id = store.with(|state| {
+        state::project(state)
+            .map(|project| project.dsn_id.clone())
+            .unwrap_or_default()
+    });
+    let host = util::window()
+        .location()
+        .host()
+        .unwrap_or_else(|_| "localhost:8080".into());
+    let dsn = format!("http://{key}@{host}/{dsn_id}");
+    let key_for_copy = key.clone();
+    let dsn_for_copy = dsn.clone();
+
+    view! {
+        div(class="modal-backdrop", on:click=move |_| state::dismiss_new_key(store)) {
+            div(
+                class="modal",
+                on:click=move |event: web_sys::MouseEvent| event.stop_propagation(),
+            ) {
+                div(class="modal-head") {
+                    div {
+                        h2 { "Copy your ingest key" }
+                        p {
+                            (format!("Key {prefix}… is shown once. Only its hash is stored, so it cannot be shown again."))
+                        }
+                    }
+                }
+                label(class="field full") {
+                    "Key"
+                    div(class="dsn-box") {
+                        input(class="input mono", readonly=true, value=key)
+                        button(
+                            class="btn",
+                            r#type="button",
+                            on:click=move |_| {
+                                let text = key_for_copy.clone();
+                                spawn_local(async move {
+                                    let clipboard = util::window().navigator().clipboard();
+                                    match JsFuture::from(clipboard.write_text(&text)).await {
+                                        Ok(_) => state::toast(store, "Key copied", "success"),
+                                        Err(_) => state::toast(
+                                            store,
+                                            "Copy failed — select the field manually",
+                                            "error",
+                                        ),
+                                    }
+                                });
+                            },
+                        ) {
+                            "Copy"
+                        }
+                    }
+                }
+                label(class="field full", style="margin-top:12px") {
+                    "DSN"
+                    div(class="dsn-box") {
+                        input(class="input mono", readonly=true, value=dsn)
+                        button(
+                            class="btn",
+                            r#type="button",
+                            on:click=move |_| {
+                                let text = dsn_for_copy.clone();
+                                spawn_local(async move {
+                                    let clipboard = util::window().navigator().clipboard();
+                                    match JsFuture::from(clipboard.write_text(&text)).await {
+                                        Ok(_) => state::toast(store, "DSN copied", "success"),
+                                        Err(_) => state::toast(
+                                            store,
+                                            "Copy failed — select the field manually",
+                                            "error",
+                                        ),
+                                    }
+                                });
+                            },
+                        ) {
+                            "Copy"
+                        }
+                    }
+                }
+                div(class="form-actions") {
+                    button(
+                        class="btn btn-primary",
+                        r#type="button",
+                        on:click=move |_| state::dismiss_new_key(store),
+                    ) {
+                        "Done"
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[component]
