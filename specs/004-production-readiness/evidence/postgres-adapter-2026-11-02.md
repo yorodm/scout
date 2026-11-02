@@ -24,6 +24,13 @@ The ignored suite now includes the durable identity surface:
     `acme-identity-2`); membership is upserted
   - invitations are stored by hash, report pending, and become non-pending after
     acceptance with the accepting account recorded
+  - projects round-trip with the numeric DSN allocation, model config (including
+    the server-only replayable key), retention, threshold, soft delete, and slug
+    lookup
+  - project members list with roles and the owner count
+  - ingest keys resolve by hash while recording use, and revocation ends the
+    active key
+  - API tokens resolve by hash, list per user and per organisation, and revoke
 - `store::postgres::tests::postgres_health_is_bounded_and_reports_durable`
   - `SELECT 1` health check reports reachable, `kind()` is `postgres`, and the
     adapter is durable
@@ -32,7 +39,7 @@ The ignored suite now includes the durable identity surface:
 
 ## Scope note
 
-This validates the identity half of the storage seam (T022, T023). Project,
-telemetry, operations SQL (T024–T026), the `Store` enum seam (T018/T019), and
+This validates the identity and project halves of the storage seam (T022–T024).
+Telemetry and operations SQL (T025–T026), the `Store` enum seam (T018/T019), and
 handler conversion (T027–T032) remain; the full clean-host evidence run (T041,
 T085, T088) still requires the compose stack.
