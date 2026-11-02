@@ -11,5 +11,6 @@
 //! test path and the durable path from drifting apart.
 
 pub mod memory;
+pub mod postgres;
 
 pub use memory::*;
