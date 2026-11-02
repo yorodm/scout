@@ -248,10 +248,10 @@ compatibility paths answer, and the quality gates pass.
 
 **Purpose**: Consistency, security review, and the final gate.
 
-- [ ] T089 [P] Review `src/error.rs` and every handler for actionable `400/401/403/404/410/413/429/503` messages that never leak project existence, driver internals, or secrets (FR-026)
-- [ ] T090 [P] Security review against the constitution: hashing of every credential, OIDC client-secret redaction, operator scope, demo confinement, no raw payload or bootstrap password in logs; record findings in `specs/004-production-readiness/evidence/security-review.md`
+- [x] T089 [P] Review `src/error.rs` and every handler for actionable `400/401/403/404/410/413/429/503` messages that never leak project existence, driver internals, or secrets (FR-026)
+- [x] T090 [P] Security review against the constitution: hashing of every credential, OIDC client-secret redaction, operator scope, demo confinement, no raw payload or bootstrap password in logs; record findings in `specs/004-production-readiness/evidence/security-review.md`
 - [ ] T091 [P] Normalise terminology across `README.md`, `architecture.md`, `specs/004-production-readiness/*`, and the contracts: "raw payload", "durable metadata store", "in-memory store", "operator"
-- [ ] T092 [P] Verify no response exposes a password hash, token hash, recovery-code hash, ingest-key hash, OIDC client secret, or model API key, by scanning router output fixtures in `src/tests.rs`
+- [x] T092 [P] Verify no response exposes a password hash, token hash, recovery-code hash, ingest-key hash, OIDC client secret, or model API key, by scanning router output fixtures in `src/tests.rs`
 - [ ] T093 Run the full gate from the repository root (`Cargo.toml`, `src/`, `ui/`): `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `(cd ui && cargo check --target wasm32-unknown-unknown)`, and `(cd ui && trunk build --release)`, fixing every failure (SC-013)
 - [ ] T094 Confirm every behaviour and automated check from features 001 and 002 still passes unchanged in `src/tests.rs` and that the ignored PostgreSQL suite runs green with `SCOUT_TEST_DATABASE_URL` (FR-029, SC-012)
 - [ ] T095 Re-run `/speckit-converge` to verify the implementation against `spec.md` and append any remaining work to `specs/004-production-readiness/tasks.md`
@@ -354,7 +354,7 @@ rewriting any completed task. These tasks augment Phases 3–5; they do not repl
 - [ ] T096 [US1] Add a three-instance sharing test in `src/tests.rs` (marked `#[ignore]`): start three `AppState` values against one `SCOUT_TEST_DATABASE_URL` database, create a project and member through instance A, revoke that role through instance B, and assert instance C denies access on its next request; after each mutation, read through all three instances and assert none serves instance-local metadata (FR-031, SC-016)
 - [ ] T097 [US1] Assert fail-fast ingest behaviour in `src/tests.rs`: with the store marked unavailable, `POST /api/{dsn}/envelope` returns `503` with `Retry-After` on the first attempt, no retry or in-memory buffering occurs, no event row or raw object is created, and the ingest permit is released so the next request is admitted (FR-009, SC-004)
 - [ ] T098 [US1] Assert the audit trail has no read surface and records complete entries in `src/tests.rs`: no route registered in `src/api.rs` or `src/compat/mod.rs` exposes audit entries, and an administrative action persists actor, target, action, and time in `audit_log` (FR-007)
-- [ ] T099 [US2] Enforce the seven-day lifetime for invitations and initial-admin tokens in `src/store/postgres.rs` (default `expires_at = issued_at + interval '7 days'`) and `src/api.rs`: an expired token returns `410 Gone` with an expiry message, an unknown token returns `404`, and redemption by the wrong account is refused without consuming the token; cover all three paths in `src/tests.rs` (FR-013)
+- [x] T099 [US2] Enforce the seven-day lifetime for invitations and initial-admin tokens in `src/store/postgres.rs` (default `expires_at = issued_at + interval '7 days'`) and `src/api.rs`: an expired token returns `410 Gone` with an expiry message, an unknown token returns `404`, and redemption by the wrong account is refused without consuming the token; cover all three paths in `src/tests.rs` (FR-013)
 
 **Checkpoint**: the clarification decisions are executable and traceable; Phases 3–7 keep their
 original numbering and completion state.

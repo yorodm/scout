@@ -5154,6 +5154,29 @@ async fn an_idle_session_expires_and_a_recent_request_keeps_it_alive() {
     );
 }
 
+#[actix_web::test]
+async fn a_session_expires_at_the_absolute_limit_despite_activity() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().expect("session token").to_string();
+    let hash = crate::auth::hash_token(&token);
+
+    // Recent activity does not extend the absolute limit.
+    {
+        let mut store = state.store.write().await;
+        let session = store.sessions.get_mut(&hash).expect("stored session");
+        session.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        session.last_seen_at = chrono::Utc::now();
+    }
+    let (status, _) = call_json(&app, get("/api/me", &token)).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the seven-day absolute limit wins over activity"
+    );
+}
+
 // --- unified search cap (FR-021, SC-025) -----------------------------------
 
 #[actix_web::test]
@@ -5799,4 +5822,82 @@ async fn oidc_configuration_is_admin_only_and_fails_fast() {
             "missing audit row {action}"
         );
     }
+}
+
+// --- credential exposure (FR-026, T092) ------------------------------------
+
+fn assert_no_secret_fields(value: &Value, path: &str) {
+    const FORBIDDEN: [&str; 5] = [
+        "password_hash",
+        "token_hash",
+        "code_hash",
+        "key_hash",
+        "client_secret",
+    ];
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map {
+                assert!(
+                    !FORBIDDEN.contains(&key.as_str()),
+                    "response at {path} exposes `{key}`"
+                );
+                if key == "api_key" {
+                    assert!(
+                        child.is_null() || child.as_str().is_some_and(str::is_empty),
+                        "response at {path} exposes a model API key"
+                    );
+                }
+                assert_no_secret_fields(child, &format!("{path}.{key}"));
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                assert_no_secret_fields(child, &format!("{path}[{index}]"));
+            }
+        }
+        _ => {}
+    }
+}
+
+#[actix_web::test]
+async fn no_response_exposes_credential_material() {
+    let app = init_app("http://127.0.0.1:1").await;
+    let auth = login(&app, "demo@scout.local").await;
+    assert_no_secret_fields(&auth, "login");
+    let token = auth["token"].as_str().expect("session token");
+
+    let (_, me) = call_json(&app, get("/api/me", token)).await;
+    assert_no_secret_fields(&me, "me");
+
+    let (_, projects) = call_json(&app, get("/api/projects", token)).await;
+    assert_no_secret_fields(&projects, "projects");
+
+    let web = project_id(&app, token, "scout-web").await;
+    let (_, settings) = call_json(&app, get(&format!("/api/projects/{web}/settings"), token)).await;
+    assert_no_secret_fields(&settings, "settings");
+
+    let (_, keys) = call_json(&app, get(&format!("/api/projects/{web}/keys"), token)).await;
+    assert_no_secret_fields(&keys, "keys");
+
+    // The plaintext is expected exactly once on creation; its hash never appears.
+    let (status, created) = call_json(
+        &app,
+        post_json(
+            &format!("/api/projects/{web}/keys"),
+            token,
+            json!({ "label": "scan" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert!(created["key"].as_str().is_some(), "the key is shown once");
+    assert_no_secret_fields(&created, "created-key");
+
+    let (status, codes) =
+        call_json(&app, post_json("/api/me/recovery-codes", token, json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{codes}");
+    assert_no_secret_fields(&codes, "recovery-codes");
+
+    let (_, issues) = call_json(&app, get(&format!("/api/projects/{web}/issues"), token)).await;
+    assert_no_secret_fields(&issues, "issues");
 }
