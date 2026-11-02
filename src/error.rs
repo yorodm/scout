@@ -50,11 +50,18 @@ impl ResponseError for ApiError {
 
     fn error_response(&self) -> HttpResponse {
         let mut builder = HttpResponse::build(self.status_code());
-        if let ApiError::TooManyRequests {
-            retry_after_secs, ..
-        } = self
-        {
-            builder.insert_header(("Retry-After", retry_after_secs.to_string()));
+        match self {
+            ApiError::TooManyRequests {
+                retry_after_secs, ..
+            } => {
+                builder.insert_header(("Retry-After", retry_after_secs.to_string()));
+            }
+            // Every `503` is retryable: storage or an optional dependency is
+            // temporarily unavailable, and the contract requires a retry hint.
+            ApiError::ServiceUnavailable(_) => {
+                builder.insert_header(("Retry-After", "1"));
+            }
+            _ => {}
         }
         builder.json(serde_json::json!({ "error": self.to_string() }))
     }

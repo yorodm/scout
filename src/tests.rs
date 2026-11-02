@@ -5901,3 +5901,136 @@ async fn no_response_exposes_credential_material() {
     let (_, issues) = call_json(&app, get(&format!("/api/projects/{web}/issues"), token)).await;
     assert_no_secret_fields(&issues, "issues");
 }
+
+// --- fail-fast ingest and storage-only audit (FR-007, FR-009) --------------
+
+#[actix_web::test]
+async fn ingest_fails_fast_with_a_retry_hint_and_leaves_nothing_behind() {
+    use std::sync::atomic::Ordering;
+
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    state.storage_ready.store(false, Ordering::Relaxed);
+
+    let objects_before = state.objects.list_objects().await.expect("object list");
+    let events_before = state.store.read().await.events.len();
+    let permits_before = state.ingest_gate.available_permits();
+
+    let res = call(
+        &app,
+        ingest_request(
+            "2",
+            "scout_platform_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(93), "fail fast", &["fail-fast-group"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        res.headers().get("retry-after").is_some(),
+        "a retry hint is mandatory"
+    );
+    let body = test::read_body(res).await;
+    let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    assert!(
+        body.get("error").and_then(Value::as_str).is_some(),
+        "an actionable error body: {body}"
+    );
+
+    // Nothing was buffered or acknowledged: no row, no raw object.
+    assert_eq!(
+        state.store.read().await.events.len(),
+        events_before,
+        "a rejected ingest must not create an event row"
+    );
+    assert_eq!(
+        state
+            .objects
+            .list_objects()
+            .await
+            .expect("object list")
+            .len(),
+        objects_before.len(),
+        "a rejected ingest must not store a raw object"
+    );
+
+    // The in-flight permit is released, so the next request is admitted.
+    state.storage_ready.store(true, Ordering::Relaxed);
+    let (status, body) = call_json(
+        &app,
+        ingest_request(
+            "2",
+            "scout_platform_key",
+            "application/x-sentry-envelope",
+            envelope(&[event(&hex_id(94), "after recovery", &["recovery-group"])]),
+            "envelope",
+        ),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the next request is admitted: {body}"
+    );
+    assert_eq!(
+        state.ingest_gate.available_permits(),
+        permits_before,
+        "the permit is released after failure"
+    );
+}
+
+#[actix_web::test]
+async fn the_audit_trail_is_storage_only_and_entries_are_complete() {
+    let state = state_for("http://127.0.0.1:1", 256).await;
+    let app = init_app_with_state(state.clone()).await;
+    let auth = login(&app, "demo@scout.local").await;
+    let token = auth["token"].as_str().expect("session token");
+    let web = project_id(&app, token, "scout-web").await;
+
+    // An administrative action the constitution requires to be audited.
+    let (status, body) = call_json(
+        &app,
+        post_json(
+            &format!("/api/projects/{web}/keys"),
+            token,
+            json!({ "label": "audit-check" }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    {
+        let store = state.store.read().await;
+        let entry = store
+            .audit
+            .iter()
+            .find(|entry| entry.action == "key.created" && entry.project_id == Some(web))
+            .expect("the key creation is audited");
+        assert_eq!(entry.actor, "demo@scout.local", "actor is recorded");
+        assert_eq!(
+            entry.target.as_deref(),
+            Some("audit-check"),
+            "target is recorded"
+        );
+        assert!(entry.at <= chrono::Utc::now(), "time is recorded");
+    }
+
+    // The trail has no read surface: nothing under /api or /api/0 returns it.
+    for path in [
+        "/api/audit".to_string(),
+        "/api/audit-log".to_string(),
+        "/api/audit-entries".to_string(),
+        format!("/api/projects/{web}/audit"),
+        format!("/api/projects/{web}/audit-log"),
+        format!("/api/0/projects/{web}/audit/"),
+    ] {
+        let (status, _) = call_json(&app, get(&path, token)).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{path} must not expose the audit trail"
+        );
+    }
+}
