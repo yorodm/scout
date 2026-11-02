@@ -21,6 +21,16 @@ pub fn LogsView() -> View {
     let list = View::from_dynamic(move || -> View {
         let logs = logs.get_clone();
         if logs.is_empty() {
+            let filtered = store.with(|state| {
+                !state.log_filters.q.is_empty() || !state.log_filters.level.is_empty()
+            });
+            if filtered {
+                return empty_state(
+                    "No log lines match",
+                    "Try a different level or search term; ingest is unaffected.",
+                    View::new(),
+                );
+            }
             let action = if can_send.get() {
                 view! {
                     button(
@@ -35,7 +45,7 @@ pub fn LogsView() -> View {
                 View::new()
             };
             empty_state(
-                "No log lines match",
+                "No log lines yet",
                 "Ingest structured logs through /api/{project}/logs/ with the project key, or send a test log.",
                 action,
             )
@@ -489,6 +499,25 @@ fn settings_view(
         .clone()
         .map(|prefix| format!("{prefix}… (active key)"))
         .unwrap_or_else(|| "No active key — create one below and copy it once.".to_string());
+    let settings_error = create_signal(None::<String>);
+    let validate = move |days: Option<u32>, endpoint: &str| -> Result<(), String> {
+        match days {
+            Some(days) if (1..=3650).contains(&days) => {}
+            _ => return Err("Retention must be between 1 and 3650 days.".into()),
+        }
+        if !endpoint.is_empty()
+            && !(endpoint.starts_with("http://") || endpoint.starts_with("https://"))
+        {
+            return Err("The model endpoint must be an http(s) URL.".into());
+        }
+        Ok(())
+    };
+    let settings_error_view = View::from_dynamic(move || match settings_error.get_clone() {
+        Some(message) => view! {
+            div(class="hint", style="color:var(--color-warn);margin-top:10px") { (message) }
+        },
+        None => View::new(),
+    });
     let dsn_for_copy = format!("/api/{}/envelope/", settings.project.dsn_id);
     let mock_endpoint = settings.mock_model_endpoint.clone();
     let retention_value = retention;
@@ -699,13 +728,28 @@ fn settings_view(
                         )
                     }
                 }
+                (settings_error_view)
                 div(class="form-actions") {
                     button(
                         class="btn btn-ghost",
                         r#type="button",
                         on:click=move |_| {
-                            let retention_days = retention_value.get_clone().parse::<u32>().unwrap_or(30);
-                            spawn_local(state::save_settings(store, retention_days, None));
+                            let retention_days = retention_value
+                                .get_clone()
+                                .trim()
+                                .parse::<u32>()
+                                .ok();
+                            match validate(retention_days, "") {
+                                Ok(()) => {
+                                    settings_error.set(None);
+                                    spawn_local(state::save_settings(
+                                        store,
+                                        retention_days.unwrap_or(30),
+                                        None,
+                                    ));
+                                }
+                                Err(message) => settings_error.set(Some(message)),
+                            }
                         },
                     ) {
                         "Disable model"
@@ -714,7 +758,11 @@ fn settings_view(
                         class="btn btn-ghost",
                         r#type="button",
                         on:click=move |_| {
-                            let retention_days = retention_value.get_clone().parse::<u32>().unwrap_or(30);
+                            let retention_days = retention_value
+                                .get_clone()
+                                .trim()
+                                .parse::<u32>()
+                                .unwrap_or(30);
                             let model = api::ModelConfig {
                                 endpoint: mock_endpoint.clone(),
                                 api_key: None,
@@ -729,19 +777,37 @@ fn settings_view(
                         class="btn btn-primary",
                         r#type="button",
                         on:click=move |_| {
-                            let retention_days = retention_value.get_clone().parse::<u32>().unwrap_or(30);
+                            let retention_days = retention_value
+                                .get_clone()
+                                .trim()
+                                .parse::<u32>()
+                                .ok();
                             let endpoint = endpoint_value.get_clone().trim().to_string();
-                            let model = if endpoint.is_empty() {
-                                None
-                            } else {
-                                let api_key = model_key_value.get_clone().trim().to_string();
-                                Some(api::ModelConfig {
-                                    endpoint,
-                                    api_key: if api_key.is_empty() { None } else { Some(api_key) },
-                                    model: model_id_value.get_clone().trim().to_string(),
-                                })
-                            };
-                            spawn_local(state::save_settings(store, retention_days, model));
+                            match validate(retention_days, &endpoint) {
+                                Ok(()) => {
+                                    settings_error.set(None);
+                                    let model = if endpoint.is_empty() {
+                                        None
+                                    } else {
+                                        let api_key = model_key_value.get_clone().trim().to_string();
+                                        Some(api::ModelConfig {
+                                            endpoint,
+                                            api_key: if api_key.is_empty() {
+                                                None
+                                            } else {
+                                                Some(api_key)
+                                            },
+                                            model: model_id_value.get_clone().trim().to_string(),
+                                        })
+                                    };
+                                    spawn_local(state::save_settings(
+                                        store,
+                                        retention_days.unwrap_or(30),
+                                        model,
+                                    ));
+                                }
+                                Err(message) => settings_error.set(Some(message)),
+                            }
                         },
                     ) {
                         "Save settings"

@@ -200,15 +200,15 @@ the model/retention form all work in the UI with loading, empty, and error state
 
 ### Implementation for User Story 4
 
-- [ ] T069 [US4] Complete the issue list view in `ui/src/components/issues.rs`: state, level, category, text, and sort controls with an active-filter summary
-- [ ] T070 [US4] Complete the issue detail header and timeline in `ui/src/components/issues.rs`: title, culprit, level, state, counts, release, environment, and the occurrence timeline
-- [ ] T071 [US4] Add stack frames (in-app highlighted), breadcrumbs, and the read-only raw payload panel with the explicit expired state to `ui/src/components/issues.rs`
-- [ ] T072 [US4] Add the suggestion-vs-decision card with confirm and override actions to `ui/src/components/issues.rs`, refreshing without moving the issue
-- [ ] T073 [US4] Add resolve, reopen, and ignore controls to `ui/src/components/issues.rs`
-- [ ] T074 [US4] Complete the logs view and the unified search view in `ui/src/components/other.rs`, distinguishing "no data yet" from "no matches"
-- [ ] T075 [US4] Complete the model endpoint, confidence threshold, and retention form in `ui/src/components/other.rs` with inline validation errors
-- [ ] T076 [US4] Extend `ui/src/api.rs` and `ui/src/state.rs` with the issue, occurrence, raw, search, log, and settings calls used by these views
-- [ ] T077 [US4] Apply the shared loading, empty, and actionable error primitives from `ui/src/components/common.rs` to every view in this phase
+- [x] T069 [US4] Complete the issue list view in `ui/src/components/issues.rs`: state, level, category, text, and sort controls with an active-filter summary
+- [x] T070 [US4] Complete the issue detail header and timeline in `ui/src/components/issues.rs`: title, culprit, level, state, counts, release, environment, and the occurrence timeline
+- [x] T071 [US4] Add stack frames (in-app highlighted), breadcrumbs, and the read-only raw payload panel with the explicit expired state to `ui/src/components/issues.rs`
+- [x] T072 [US4] Add the suggestion-vs-decision card with confirm and override actions to `ui/src/components/issues.rs`, refreshing without moving the issue
+- [x] T073 [US4] Add resolve, reopen, and ignore controls to `ui/src/components/issues.rs`
+- [x] T074 [US4] Complete the logs view and the unified search view in `ui/src/components/other.rs`, distinguishing "no data yet" from "no matches"
+- [x] T075 [US4] Complete the model endpoint, confidence threshold, and retention form in `ui/src/components/other.rs` with inline validation errors
+- [x] T076 [US4] Extend `ui/src/api.rs` and `ui/src/state.rs` with the issue, occurrence, raw, search, log, and settings calls used by these views
+- [x] T077 [US4] Apply the shared loading, empty, and actionable error primitives from `ui/src/components/common.rs` to every view in this phase
 
 **Checkpoint**: The triage loop is usable end to end without the API documentation open.
 

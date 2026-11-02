@@ -40,6 +40,45 @@ pub fn IssuesView() -> View {
         }
     });
 
+    let filter_summary = View::from_dynamic(move || -> View {
+        let filters = store.with(|state| state.filters.clone());
+        let mut parts: Vec<String> = Vec::new();
+        if !filters.q.is_empty() {
+            parts.push(format!("text {}", filters.q));
+        }
+        if !filters.state.is_empty() {
+            parts.push(format!("state {}", filters.state));
+        }
+        if !filters.level.is_empty() {
+            parts.push(format!("level {}", filters.level));
+        }
+        if !filters.category.is_empty() {
+            parts.push(format!("category {}", filters.category));
+        }
+        if parts.is_empty() {
+            return View::new();
+        }
+        let summary = format!("Filtered by {}", parts.join(" · "));
+        view! {
+            div(
+                class="muted small",
+                style="display:flex;gap:10px;align-items:center;margin-bottom:10px",
+            ) {
+                span { (summary) }
+                button(
+                    class="btn btn-ghost btn-sm",
+                    r#type="button",
+                    on:click=move |_| {
+                        store.update(|state| state.filters = state::Filters::default());
+                        spawn_local(state::load_issues(store));
+                    },
+                ) {
+                    "Clear"
+                }
+            }
+        }
+    });
+
     view! {
         div {
             div(class="toolbar") {
@@ -93,6 +132,23 @@ pub fn IssuesView() -> View {
                 }
                 select(
                     class="select",
+                    value=move || store.with(|state| state.filters.category.clone()),
+                    on:change=move |event: web_sys::Event| {
+                        if let Some(target) = event.target() {
+                            let select = target.unchecked_into::<web_sys::HtmlSelectElement>();
+                            let value = select.value();
+                            store.update(|state| state.filters.category = value);
+                            spawn_local(state::load_issues(store));
+                        }
+                    },
+                ) {
+                    option(value="") { "All categories" }
+                    option(value="issue") { "Issue" }
+                    option(value="log") { "Log" }
+                    option(value="raw_event") { "Raw event" }
+                }
+                select(
+                    class="select",
                     value=move || store.with(|state| state.filters.sort.clone()),
                     on:change=move |event: web_sys::Event| {
                         if let Some(target) = event.target() {
@@ -115,6 +171,7 @@ pub fn IssuesView() -> View {
                     })
                 }
             }
+            (filter_summary)
             (list)
         }
     }
@@ -312,6 +369,24 @@ fn detail_view(
         View::new()
     };
 
+    let ignore_button = if actionable && issue.state != "ignored" {
+        let issue_id = issue.id.clone();
+        view! {
+            button(
+                class="btn btn-ghost btn-sm",
+                r#type="button",
+                on:click=move |_| {
+                    let issue_id = issue_id.clone();
+                    spawn_local(state::change_issue_state(store, issue_id, "ignored"));
+                },
+            ) {
+                "Ignore"
+            }
+        }
+    } else {
+        View::new()
+    };
+
     let tabs = {
         let attachments_text = attachments_text.clone();
         view! {
@@ -412,6 +487,7 @@ fn detail_view(
         "Raw event",
         view! { span(class="muted small") { (raw_meta_text.clone()) } },
     );
+    let timeline = timeline_view(store);
 
     view! {
         section(class="panel issue-hero") {
@@ -419,7 +495,7 @@ fn detail_view(
                 (level_view)
                 h1 { (issue.title.clone()) }
                 (state_view)
-                div(class="hero-actions") { (state_button) }
+                div(class="hero-actions") { (state_button) (ignore_button) }
             }
             div(class="subline") { (subline) }
             div(class="stat-row") {
@@ -454,6 +530,11 @@ fn detail_view(
 
         (suggestion)
 
+        section(class="panel panel-pad") {
+            (section_title("Occurrence timeline", View::new()))
+            (timeline)
+        }
+
         div(class="detail-grid split") {
             section(class="panel panel-pad") {
                 (stack_header)
@@ -487,6 +568,47 @@ fn detail_view(
             })
         }
     }
+}
+
+/// Newest-first occurrence timeline for the open issue.
+fn timeline_view(store: Signal<AppState>) -> View {
+    View::from_dynamic(move || -> View {
+        let occurrences = store.with(|state| state.occurrences.clone());
+        if occurrences.is_empty() {
+            return view! {
+                div(class="muted small") { "No occurrences recorded for this issue yet." }
+            };
+        }
+        let rows: Vec<View> = occurrences
+            .into_iter()
+            .map(|occurrence| {
+                let when = util::relative(&occurrence.received_at);
+                let exact = util::full_time(&occurrence.received_at);
+                let event: String = occurrence.sentry_event_id.chars().take(12).collect();
+                let attachments = if occurrence.attachment_count > 0 {
+                    format!(" · {} attachment(s)", occurrence.attachment_count)
+                } else {
+                    String::new()
+                };
+                let detail = format!("{} B{attachments} · event {event}", occurrence.size);
+                let raw = if occurrence.raw_available {
+                    view! { span(class="badge resolved") { "raw" } }
+                } else {
+                    view! { span(class="badge ignored") { "expired" } }
+                };
+                view! {
+                    div(class="kv") {
+                        div {
+                            span(class="mono", title=exact) { (when) }
+                            div(class="muted small") { (detail) }
+                        }
+                        (raw)
+                    }
+                }
+            })
+            .collect();
+        view! { div { (rows) } }
+    })
 }
 
 fn frame_view(frame: StackFrame) -> View {

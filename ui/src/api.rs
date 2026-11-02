@@ -194,6 +194,23 @@ pub struct IssueDetailResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Occurrence {
+    pub id: String,
+    pub sentry_event_id: String,
+    pub received_at: String,
+    pub size: u64,
+    #[serde(default)]
+    pub attachment_count: u64,
+    #[serde(default)]
+    pub raw_available: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct OccurrencesResponse {
+    pub occurrences: Vec<Occurrence>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct IssuesResponse {
     pub issues: Vec<Issue>,
 }
@@ -650,6 +667,7 @@ pub struct IssueQuery<'a> {
     pub q: &'a str,
     pub state: &'a str,
     pub level: &'a str,
+    pub category: &'a str,
     pub sort: &'a str,
 }
 
@@ -663,13 +681,18 @@ pub async fn issues(
     query: &IssueQuery<'_>,
 ) -> Result<IssuesResponse, String> {
     let path = format!(
-        "/api/projects/{project_id}/issues?q={}&state={}&level={}&sort={}",
+        "/api/projects/{project_id}/issues?q={}&state={}&level={}&category={}&sort={}",
         crate::util::encode(query.q),
         crate::util::encode(query.state),
         crate::util::encode(query.level),
+        crate::util::encode(query.category),
         crate::util::encode(query.sort)
     );
     get(&path, Some(token)).await
+}
+
+pub async fn occurrences(token: &str, issue_id: &str) -> Result<OccurrencesResponse, String> {
+    get(&format!("/api/issues/{issue_id}/occurrences"), Some(token)).await
 }
 
 pub async fn issue(token: &str, issue_id: &str) -> Result<IssueDetailResponse, String> {

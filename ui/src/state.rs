@@ -23,6 +23,7 @@ pub struct Filters {
     pub q: String,
     pub state: String,
     pub level: String,
+    pub category: String,
     pub sort: String,
 }
 
@@ -32,6 +33,7 @@ impl Default for Filters {
             q: String::new(),
             state: "open".into(),
             level: String::new(),
+            category: String::new(),
             sort: "last_seen".into(),
         }
     }
@@ -75,6 +77,8 @@ pub struct AppState {
     pub search_logs: Vec<LogLine>,
     pub search_has_more: bool,
     pub issue: Option<api::IssueDetailResponse>,
+    /// The occurrence timeline for the open issue, newest first.
+    pub occurrences: Vec<api::Occurrence>,
     pub members: Vec<Member>,
     pub settings: Option<api::SettingsResponse>,
     pub tokens: Vec<api::ApiToken>,
@@ -121,6 +125,7 @@ impl Default for AppState {
             search_logs: Vec::new(),
             search_has_more: false,
             issue: None,
+            occurrences: Vec::new(),
             members: Vec::new(),
             settings: None,
             tokens: Vec::new(),
@@ -464,6 +469,7 @@ pub async fn load_issues(store: Signal<AppState>) {
         q: &filters.q,
         state: &filters.state,
         level: &filters.level,
+        category: &filters.category,
         sort: &filters.sort,
     };
     match api::issues(&token, &project_id, &query).await {
@@ -482,6 +488,10 @@ pub async fn load_issue(store: Signal<AppState>, issue_id: String) {
             store.update(|state| state.issue = None);
             toast(store, error, "error");
         }
+    }
+    match api::occurrences(&token, &issue_id).await {
+        Ok(data) => store.update(|state| state.occurrences = data.occurrences),
+        Err(_) => store.update(|state| state.occurrences.clear()),
     }
 }
 
@@ -785,6 +795,7 @@ pub async fn sync_from_hash(store: Signal<AppState>) {
         state.view = view;
         state.issue_id = issue_id.clone();
         state.issue = None;
+        state.occurrences.clear();
     });
 
     match view {
