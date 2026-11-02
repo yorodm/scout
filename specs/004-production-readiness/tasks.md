@@ -250,7 +250,7 @@ compatibility paths answer, and the quality gates pass.
 
 - [x] T089 [P] Review `src/error.rs` and every handler for actionable `400/401/403/404/410/413/429/503` messages that never leak project existence, driver internals, or secrets (FR-026)
 - [x] T090 [P] Security review against the constitution: hashing of every credential, OIDC client-secret redaction, operator scope, demo confinement, no raw payload or bootstrap password in logs; record findings in `specs/004-production-readiness/evidence/security-review.md`
-- [ ] T091 [P] Normalise terminology across `README.md`, `architecture.md`, `specs/004-production-readiness/*`, and the contracts: "raw payload", "durable metadata store", "in-memory store", "operator"
+- [x] T091 [P] Normalise terminology across `README.md`, `architecture.md`, `specs/004-production-readiness/*`, and the contracts: "raw payload", "durable metadata store", "in-memory store", "operator"
 - [x] T092 [P] Verify no response exposes a password hash, token hash, recovery-code hash, ingest-key hash, OIDC client secret, or model API key, by scanning router output fixtures in `src/tests.rs`
 - [ ] T093 Run the full gate from the repository root (`Cargo.toml`, `src/`, `ui/`): `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, `(cd ui && cargo check --target wasm32-unknown-unknown)`, and `(cd ui && trunk build --release)`, fixing every failure (SC-013)
 - [ ] T094 Confirm every behaviour and automated check from features 001 and 002 still passes unchanged in `src/tests.rs` and that the ignored PostgreSQL suite runs green with `SCOUT_TEST_DATABASE_URL` (FR-029, SC-012)

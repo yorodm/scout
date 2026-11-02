@@ -1,6 +1,6 @@
 # Security review — 2026-11-02
 
-- Commit: `812bcf1`
+- Commit: `f94c7a3`
 - Host: Linux 6.18.52 x86_64 (development workspace)
 - Reviewer: implementation pass against `.specify/memory/constitution.md` v1.1.0
 - Result: PASS for the shipped in-memory implementation; the durable adapter remains pending (T013–T041)

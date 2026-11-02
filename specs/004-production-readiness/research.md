@@ -186,7 +186,7 @@ shared instance); a separate database for demo data (new moving part).
 | unset | set | PostgreSQL (shipped compose path) |
 | unset | unset | in-memory with a loud warning |
 
-When the memory store is active, startup logs `WARN scout is using the in-memory metadata store:
+When the in-memory store is active, startup logs `WARN scout is using the in-memory metadata store:
 records will not survive a restart` and `/api/health` reports `durability: "ephemeral"` (FR-002).
 
 **Rationale**: the compose stack always sets `DATABASE_URL`, so the durable path needs no new variable

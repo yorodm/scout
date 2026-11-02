@@ -29,7 +29,7 @@ Now reports both durability dependencies. `200` only when both are reachable, ot
 | `status` | `ok`, `degraded` | Overall readiness |
 | `storage` | `ok`, `unavailable` | Metadata probe (`SELECT 1`, 2 s timeout) |
 | `store` | `postgres`, `memory` | Active adapter |
-| `durability` | `durable`, `ephemeral` | `ephemeral` when the memory store is active |
+| `durability` | `durable`, `ephemeral` | `ephemeral` when the in-memory store is active |
 | `object_store` | backend name, `unavailable` | Existing object-store probe |
 
 ### `GET /api/orgs`
